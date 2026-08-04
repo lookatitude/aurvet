@@ -1,4 +1,4 @@
-// Package config resolves every filesystem location arch-drift touches from a
+// Package config resolves every filesystem location aurvet touches from a
 // single explicit root.
 //
 // INV-4: no collector may read an ambient path. --offline-root is therefore a
@@ -32,7 +32,7 @@ type Config struct {
 	MinSeverity string
 }
 
-// DoctorLine is one row of `arch-drift doctor` output: the resolved value plus
+// DoctorLine is one row of `aurvet doctor` output: the resolved value plus
 // where it came from, so a misconfiguration can be traced to its origin.
 type DoctorLine struct {
 	Key    string
@@ -49,11 +49,11 @@ func Resolve(root string, euid int) (Config, error) {
 	}
 
 	// Unprivileged runs, including offline-root inspection, keep state inside
-	// the tree they are examining. Root does not: /var/lib/arch-drift is the
+	// the tree they are examining. Root does not: /var/lib/aurvet is the
 	// only location an unprivileged attacker cannot pre-seed.
-	state := "/var/lib/arch-drift"
+	state := "/var/lib/aurvet"
 	if euid != 0 {
-		state = filepath.Join(root, "var/lib/arch-drift")
+		state = filepath.Join(root, "var/lib/aurvet")
 	}
 
 	return Config{

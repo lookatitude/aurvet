@@ -1,8 +1,8 @@
-# arch-drift P1-A — Provenance Sweep Implementation Plan
+# aurvet P1-A — Provenance Sweep Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship `arch-drift scan` that reports whether any installed foreign (AUR) package is known-malicious or provenance-anomalous, plus `explain`, `doctor`, and `--since-last`, running entirely unprivileged.
+**Goal:** Ship `aurvet scan` that reports whether any installed foreign (AUR) package is known-malicious or provenance-anomalous, plus `explain`, `doctor`, and `--since-last`, running entirely unprivileged.
 
 **Architecture:** Pure collectors of shape `(root, cfg) -> evidence` read the world-readable pacman local DB and sync DBs; a network client queries the AUR in one batched request and checks cgit for malware tombstones; a check layer turns evidence into findings with explicit coverage gaps; a report layer renders text/JSON and maps to contractual exit codes. No file hashing, no root, no privilege staging — those arrive in P1-B.
 
@@ -39,7 +39,7 @@ These were measured on the reference system; the parsers are written against the
 | File | Responsibility |
 |---|---|
 | `go.mod` | Module definition, Go floor |
-| `cmd/arch-drift/main.go` | Subcommand dispatch, flag parsing, exit-code mapping |
+| `cmd/aurvet/main.go` | Subcommand dispatch, flag parsing, exit-code mapping |
 | `internal/alpm/desc.go` | `desc` field parser |
 | `internal/alpm/files.go` | `files` + `%BACKUP%` parser |
 | `internal/alpm/localdb.go` | Enumerate local DB, assemble `Package` values |
@@ -65,7 +65,7 @@ These were measured on the reference system; the parsers are written against the
 - Create: `go.mod`
 - Create: `internal/config/config.go`
 - Create: `internal/config/config_test.go`
-- Create: `cmd/arch-drift/main.go`
+- Create: `cmd/aurvet/main.go`
 
 **Interfaces:**
 - Consumes: nothing (first task)
@@ -79,7 +79,7 @@ actually proves the test is exercising missing code.
 
 ```go
 // go.mod
-module github.com/lookatitude/arch-drift
+module github.com/lookatitude/aurvet
 
 // Floor is 1.24 for os.Root, the traversal-resistant file API used by the
 // P1-B collector. Arch currently ships 1.26.x.
@@ -165,9 +165,9 @@ func Resolve(root string, euid int) (Config, error) {
 	if root == "" {
 		root = "/"
 	}
-	state := "/var/lib/arch-drift"
+	state := "/var/lib/aurvet"
 	if euid != 0 {
-		state = filepath.Join(root, "var/lib/arch-drift")
+		state = filepath.Join(root, "var/lib/aurvet")
 	}
 	return Config{
 		Root:        root,
@@ -191,7 +191,7 @@ func (c Config) Doctor() []DoctorLine {
 ```
 
 ```go
-// cmd/arch-drift/main.go
+// cmd/aurvet/main.go
 package main
 
 import (
@@ -199,7 +199,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/lookatitude/arch-drift/internal/config"
+	"github.com/lookatitude/aurvet/internal/config"
 )
 
 const (
@@ -215,7 +215,7 @@ func main() {
 
 func run(args []string, stdout, stderr *os.File) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: arch-drift <scan|explain|doctor> [flags]")
+		fmt.Fprintln(stderr, "usage: aurvet <scan|explain|doctor> [flags]")
 		return exitUsage
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
@@ -244,13 +244,13 @@ func run(args []string, stdout, stderr *os.File) int {
 
 - [x] **Step 4: Run tests to verify they pass**
 
-Run: `go test ./internal/config/ -v && go build ./... && go run ./cmd/arch-drift doctor`
+Run: `go test ./internal/config/ -v && go build ./... && go run ./cmd/aurvet doctor`
 Expected: PASS, build succeeds, `doctor` prints five resolved lines
 
 - [x] ~~**Step 5: Commit**~~ — superseded: the orchestrator commits per front, not per task, so two concurrent lanes cannot race the git index
 
 ```bash
-git add go.mod internal/config cmd/arch-drift
+git add go.mod internal/config cmd/aurvet
 git commit -m "feat: module scaffold, root-derived config, doctor command"
 ```
 
@@ -1268,7 +1268,7 @@ import (
 
 const (
 	maxBody       = 8 << 20 // hard cap; a bundle/response bomb must not exhaust memory
-	userAgentName = "arch-drift"
+	userAgentName = "aurvet"
 )
 
 type HTTP struct {
@@ -1401,9 +1401,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lookatitude/arch-drift/internal/alpm"
-	"github.com/lookatitude/arch-drift/internal/aur"
-	"github.com/lookatitude/arch-drift/internal/finding"
+	"github.com/lookatitude/aurvet/internal/alpm"
+	"github.com/lookatitude/aurvet/internal/aur"
+	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 func pkg(name string) alpm.Package {
@@ -1554,9 +1554,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/lookatitude/arch-drift/internal/alpm"
-	"github.com/lookatitude/arch-drift/internal/aur"
-	"github.com/lookatitude/arch-drift/internal/finding"
+	"github.com/lookatitude/aurvet/internal/alpm"
+	"github.com/lookatitude/aurvet/internal/aur"
+	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 const limitProvenance = "Packaging provenance only; says nothing about whether the upstream source is malicious."
@@ -1690,7 +1690,7 @@ git commit -m "feat(check): provenance rules; failures become gaps, never absenc
 - Create: `internal/report/text.go`
 - Create: `internal/report/json.go`
 - Create: `internal/report/report_test.go`
-- Modify: `cmd/arch-drift/main.go`
+- Modify: `cmd/aurvet/main.go`
 
 **Interfaces:**
 - Consumes: `finding.Result`
@@ -1708,7 +1708,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lookatitude/arch-drift/internal/finding"
+	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 func sample() finding.Result {
@@ -1798,7 +1798,7 @@ import (
 	"io"
 	"sort"
 
-	"github.com/lookatitude/arch-drift/internal/finding"
+	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 type Summary struct {
@@ -1893,7 +1893,7 @@ import (
 	"encoding/json"
 	"io"
 
-	"github.com/lookatitude/arch-drift/internal/finding"
+	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 const schemaVersion = 1
@@ -1951,7 +1951,7 @@ func JSON(w io.Writer, r finding.Result, s Summary) error {
 Now wire `scan` and `explain` into `main.go`, replacing the `switch` from Task 1:
 
 ```go
-// cmd/arch-drift/main.go — replace the switch statement
+// cmd/aurvet/main.go — replace the switch statement
 	switch args[0] {
 	case "doctor":
 		for _, l := range cfg.Doctor() {
@@ -1986,7 +1986,7 @@ Now wire `scan` and `explain` into `main.go`, replacing the `switch` from Task 1
 		sum := report.Summary{Total: len(pkgs), Foreign: foreign}
 		if args[0] == "explain" {
 			if fs.NArg() < 1 {
-				fmt.Fprintln(stderr, "usage: arch-drift explain <finding-id>")
+				fmt.Fprintln(stderr, "usage: aurvet explain <finding-id>")
 				return exitUsage
 			}
 			if err := report.Explain(stdout, res, fs.Arg(0)); err != nil {
@@ -2028,24 +2028,24 @@ import (
 	"os"
 	"time"
 
-	"github.com/lookatitude/arch-drift/internal/alpm"
-	"github.com/lookatitude/arch-drift/internal/aur"
-	"github.com/lookatitude/arch-drift/internal/check"
-	"github.com/lookatitude/arch-drift/internal/config"
-	"github.com/lookatitude/arch-drift/internal/finding"
-	"github.com/lookatitude/arch-drift/internal/report"
+	"github.com/lookatitude/aurvet/internal/alpm"
+	"github.com/lookatitude/aurvet/internal/aur"
+	"github.com/lookatitude/aurvet/internal/check"
+	"github.com/lookatitude/aurvet/internal/config"
+	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/report"
 )
 ```
 
 - [ ] **Step 4: Run tests and exercise the binary**
 
-Run: `go test ./... && go build ./... && go run ./cmd/arch-drift scan --no-network`
+Run: `go test ./... && go build ./... && go run ./cmd/aurvet scan --no-network`
 Expected: tests PASS; `scan --no-network` prints a header with `coverage: incomplete` and exits `3`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/report cmd/arch-drift
+git add internal/report cmd/aurvet
 git commit -m "feat(report): text/JSON renderers, explain, contractual exit codes"
 ```
 
@@ -2057,7 +2057,7 @@ git commit -m "feat(report): text/JSON renderers, explain, contractual exit code
 - Create: `internal/report/store.go`
 - Create: `internal/report/store_test.go`
 - Create: `internal/check/fpgate_test.go`
-- Modify: `cmd/arch-drift/main.go`
+- Modify: `cmd/aurvet/main.go`
 
 **Interfaces:**
 - Consumes: `finding.Result`, `report.Summary`, `config.Config`
@@ -2072,7 +2072,7 @@ package report
 import (
 	"testing"
 
-	"github.com/lookatitude/arch-drift/internal/finding"
+	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 func TestSaveThenLoadLatestRoundTrips(t *testing.T) {
@@ -2129,9 +2129,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lookatitude/arch-drift/internal/alpm"
-	"github.com/lookatitude/arch-drift/internal/aur"
-	"github.com/lookatitude/arch-drift/internal/finding"
+	"github.com/lookatitude/aurvet/internal/alpm"
+	"github.com/lookatitude/aurvet/internal/aur"
+	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 // INV-8: the false-positive corpus is a release gate. A stock system and a
@@ -2205,7 +2205,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/lookatitude/arch-drift/internal/finding"
+	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 const reportsSubdir = "reports"
@@ -2455,7 +2455,7 @@ Expected: all PASS, including `TestFPGateNoCriticalsOnBenignSystems` and `TestFP
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/report/store.go internal/report/store_test.go internal/check/fpgate_test.go cmd/arch-drift
+git add internal/report/store.go internal/report/store_test.go internal/check/fpgate_test.go cmd/aurvet
 git commit -m "feat(report): persistence, --since-last diff, INV-8 false-positive gate"
 ```
 
@@ -2464,11 +2464,11 @@ git commit -m "feat(report): persistence, --since-last diff, INV-8 false-positiv
 ## Definition of done for P1-A
 
 - [ ] `go test ./...` green; `go vet ./...` clean
-- [ ] `arch-drift doctor` prints resolved paths with per-key provenance
-- [ ] `arch-drift scan` on the reference system reports 39 foreign of 1409 total and exits `0`, `1`, or `3` — never a bare success when coverage is incomplete
-- [ ] `arch-drift scan --no-network` exits `3` with a gap per foreign package, never `0`
-- [ ] `arch-drift scan --json` emits `schema_version`
-- [ ] `arch-drift explain <id>` prints evidence and the "what this does NOT prove" section
+- [ ] `aurvet doctor` prints resolved paths with per-key provenance
+- [ ] `aurvet scan` on the reference system reports 39 foreign of 1409 total and exits `0`, `1`, or `3` — never a bare success when coverage is incomplete
+- [ ] `aurvet scan --no-network` exits `3` with a gap per foreign package, never `0`
+- [ ] `aurvet scan --json` emits `schema_version`
+- [ ] `aurvet explain <id>` prints evidence and the "what this does NOT prove" section
 - [ ] `TestFPGateNoCriticalsOnBenignSystems` passes — zero criticals on stock and cruft fixtures
 - [ ] `TestFPGateStillCatchesMalware` passes — the gate is not satisfiable by a silent scanner
 - [ ] `TestRPCFailureProducesGapNotAbsence` passes — network failure can never trigger the highest-severity rule

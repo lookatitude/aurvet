@@ -483,7 +483,7 @@ func TestTombstoneMissingLogTableIsAnError(t *testing.T) {
 
 	t.Run("200 with no log table", func(t *testing.T) {
 		c := serveBody(t, http.StatusOK, notCgit)
-		present, msg, err := c.Tombstone(context.Background(), "zzz-arch-drift-does-not-exist-zzz")
+		present, msg, err := c.Tombstone(context.Background(), "zzz-aurvet-does-not-exist-zzz")
 		if err == nil {
 			t.Fatal("a 200 response with no cgit log table must be an error")
 		}
@@ -495,7 +495,7 @@ func TestTombstoneMissingLogTableIsAnError(t *testing.T) {
 
 	t.Run("genuine 404", func(t *testing.T) {
 		c := serveBody(t, http.StatusNotFound, notCgit)
-		_, _, err := c.Tombstone(context.Background(), "zzz-arch-drift-does-not-exist-zzz")
+		_, _, err := c.Tombstone(context.Background(), "zzz-aurvet-does-not-exist-zzz")
 		if err == nil {
 			t.Fatal("an HTTP 404 must be an error, not an absence")
 		}

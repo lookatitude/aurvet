@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>arch-drift — design review</title>
+<title>aurvet — design review</title>
 <style>
   :root {
     --bg: #ffffff; --fg: #1a1d21; --muted: #5b6570; --border: #e4e7ec;
@@ -143,7 +143,7 @@
 
   <main>
     <header class="doc">
-      <h1 class="doc-title">arch-drift — design review</h1>
+      <h1 class="doc-title">aurvet — design review</h1>
       <p class="doc-subtitle">Adversarial review of the approved design, before any code exists. Four review lenses plus independent verification against the target system.</p>
       <div class="doc-meta">
         <span class="chip status-review">● G-init review</span>
@@ -259,7 +259,7 @@
 
     <section id="headline">
       <h2>The headline number</h2>
-      <p>Predicted output of <code>arch-drift scan</code> as specified, on the validation system (1409 packages, 39 foreign), with no baseline and no suppressions: <span class="badge b-unver">reported</span> with the component defects <span class="badge b-ver">verified</span>.</p>
+      <p>Predicted output of <code>aurvet scan</code> as specified, on the validation system (1409 packages, 39 foreign), with no baseline and no suppressions: <span class="badge b-unver">reported</span> with the component defects <span class="badge b-ver">verified</span>.</p>
       <div class="table-wrap">
       <table>
         <thead><tr><th>Source</th><th class="num">Count</th><th>Severity as designed</th></tr></thead>
@@ -370,7 +370,7 @@ vlc: 349 total files, 0 altered files</code></pre>
       <p>The design mandates <code>CGO_ENABLED=0</code> and a static binary, justified as "no runtime dependency a compromised system can shim". Arch's Go packaging guidelines mandate <code>-buildmode=pie -linkmode=external</code>, which requires CGO and produces a dynamically-linked binary.</p>
       <div class="callout danger">
         <div class="ico">◆</div>
-        <div><p>Following Arch convention would silently void a threat-model guarantee — and specifically the one the tool itself checks for. A dynamically-linked <code>arch-drift</code> can be subverted by <code>LD_PRELOAD</code> or <code>/etc/ld.so.preload</code> <em>before it can report on <code>/etc/ld.so.preload</code></em>, which the catalog rates critical. Also relevant: <code>LD_AUDIT</code>, <code>GLIBC_TUNABLES</code>.</p></div>
+        <div><p>Following Arch convention would silently void a threat-model guarantee — and specifically the one the tool itself checks for. A dynamically-linked <code>aurvet</code> can be subverted by <code>LD_PRELOAD</code> or <code>/etc/ld.so.preload</code> <em>before it can report on <code>/etc/ld.so.preload</code></em>, which the catalog rates critical. Also relevant: <code>LD_AUDIT</code>, <code>GLIBC_TUNABLES</code>.</p></div>
       </div>
       <p>Resolution: deviate deliberately, document it in a PKGBUILD comment, add a test asserting the built binary has no <code>DT_NEEDED</code>, sanitise <code>LD_*</code> and re-exec at startup, and expect namcap warnings you suppress explicitly rather than silence. Secondary trap: <code>GOFLAGS</code> <code>-ldflags</code> is <em>replaced</em>, not merged, by a command-line <code>-ldflags</code>, so naïve version injection silently changes the link mode.</p>
 
@@ -396,7 +396,7 @@ vlc: 349 total files, 0 altered files</code></pre>
         <div class="ico">◆</div>
         <div><p><strong>Highest-leverage single action in this review:</strong> commit to <strong>reproducible builds</strong> — pinned Go toolchain, <code>-trimpath</code>, vendored deps, no build-date injection, published <code>SHA256SUMS</code>, CI building on two runners and diffing. It converts "trust me" into "check me", which is the only credible position for this particular tool. Add a second OpenPGP identity purely for release artifacts so <code>validpgpkeys</code> works natively, with the fingerprint published in several independent places.</p></div>
       </div>
-      <p>Two non-obvious defences worth taking: <strong>publish the canonical PKGBUILD upstream and have scheduled CI diff the live AUR copy against it</strong> — self-defence against takeover of your own package; and <strong>register <code>arch-drift</code>, <code>-bin</code> and <code>-git</code> AUR names on day one</strong>, or someone else supplies the "convenient binary build" of your security tool.</p>
+      <p>Two non-obvious defences worth taking: <strong>publish the canonical PKGBUILD upstream and have scheduled CI diff the live AUR copy against it</strong> — self-defence against takeover of your own package; and <strong>register <code>aurvet</code>, <code>-bin</code> and <code>-git</code> AUR names on day one</strong>, or someone else supplies the "convenient binary build" of your security tool.</p>
 
       <h3>Reproducibility is silently defeated by defaults <span class="badge b-ver">verified</span></h3>
       <p><code>OPTIONS=(strip docs !libtool !staticlibs emptydirs zipman purge !debug lto)</code> on this system — <strong><code>strip</code> is on by default</strong>. makepkg strips <em>after</em> the build, so the binary inside the package is not the binary you built and signed. Any "verify against the published hash" claim must therefore define reproducibility over the whole <code>.pkg.tar.zst</code>, or set <code>options=('!strip')</code>. Injecting a build date destroys reproducibility outright — use <code>SOURCE_DATE_EPOCH</code>, which makepkg already exports, or omit it.</p>
@@ -417,14 +417,14 @@ vlc: 349 total files, 0 altered files</code></pre>
       <p>Recommended shape, and it stays compatible with the declarative-rules invariant: embed an offline <strong>root key set</strong> that signs only a delegation document; delegate to short-lived online bundle-signing keys with an expiry; give bundles a monotonic version plus <code>valid_until</code>; refuse versions below a floor held in root-only state; verify signatures over raw bytes before parsing; forbid bundles from introducing keys; and on expiry <strong>degrade to coverage-incomplete rather than reporting clean</strong>. Report the active rule count so a suspicious drop to near-zero is visible.</p>
 
       <h3 id="missing-layout">File layout and the root-vs-user privilege boundary</h3>
-      <p>Nothing in the design says where anything lives, and that omission hides a privilege-escalation hole: if <code>arch-drift</code> running as root reads a user-writable config that specifies the rules-bundle path, cache location, or public-key path, an unprivileged local attacker controls what a root-privileged security tool trusts.</p>
+      <p>Nothing in the design says where anything lives, and that omission hides a privilege-escalation hole: if <code>aurvet</code> running as root reads a user-writable config that specifies the rules-bundle path, cache location, or public-key path, an unprivileged local attacker controls what a root-privileged security tool trusts.</p>
       <p>Rules that follow: when <code>euid==0</code>, never read user config or user cache, and ignore <code>$HOME</code> and <code>SUDO_USER</code> entirely for trust-bearing paths; refuse any config or key file that is group- or world-writable; keep the anti-rollback floor in root-only state, not the cache.</p>
       <p>There is also a stated-invariant contradiction: <strong>25 package-owned files are unreadable and 229 directories unlistable</strong> as an unprivileged user <span class="badge b-unver">reported</span>. Since INV-3 makes unreadable files coverage gaps and coverage-incomplete exit 3, <strong>an unprivileged scan can never exit 0</strong> — so users will learn to ignore the exit code, which is INV-3's own failure mode. Resolution: <code>scan</code> requires root and refuses unprivileged unless explicitly degraded; <code>baseline</code> hard-refuses unprivileged, because a baseline built without visibility into those 229 directories blesses anything hidden in them forever.</p>
 
       <h3 id="missing-ci">CI, and the corpus licensing trap</h3>
       <p>INV-8 makes a corpus of <em>real AUR PKGBUILDs</em> a release gate — which as written is non-deterministic (the AUR moves), network-dependent, and legally murky, since most AUR PKGBUILDs state no license.</p>
       <p>The clean sidestep: <strong>don't store the source text.</strong> Pin <code>pkgbase</code> + AUR commit sha + content digest in a lockfile, and assert over a normalised token-stream digest produced by your own tokeniser — which INV-2 requires you to have anyway. That removes the licensing question, keeps the repo small, makes corpus diffs reviewable, and a scheduled refresh job turns corpus drift into a reviewed PR instead of a mystery release failure.</p>
-      <p>Two hygiene items that are non-negotiable for this project specifically: <strong>pin every CI action by commit SHA, not tag</strong> — a tool warning about supply-chain compromise while consuming mutable refs will be called out, correctly — and <strong>arch-drift's own PKGBUILD must pass arch-drift's own rules as an automated gate</strong>. Note that without vendored dependencies, <code>build()</code> performs a network fetch from the Go module proxy, which trips the tool's own critical "network fetch in build()" rule.</p>
+      <p>Two hygiene items that are non-negotiable for this project specifically: <strong>pin every CI action by commit SHA, not tag</strong> — a tool warning about supply-chain compromise while consuming mutable refs will be called out, correctly — and <strong>aurvet's own PKGBUILD must pass aurvet's own rules as an automated gate</strong>. Note that without vendored dependencies, <code>build()</code> performs a network fetch from the Go module proxy, which trips the tool's own critical "network fetch in build()" rule.</p>
     </section>
 
     <section id="missing-other">
@@ -538,7 +538,7 @@ vlc: 349 total files, 0 altered files</code></pre>
     </section>
 
     <hr>
-    <p style="color:var(--muted);font-size:.9rem">Design review for <code>arch-drift</code>. Two of four review lenses incomplete — the adversarial security lens is not covered by this document.</p>
+    <p style="color:var(--muted);font-size:.9rem">Design review for <code>aurvet</code>. Two of four review lenses incomplete — the adversarial security lens is not covered by this document.</p>
   </main>
 </div>
 

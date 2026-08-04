@@ -15,7 +15,7 @@ import (
 
 const (
 	maxBody       = 8 << 20 // hard cap; a bundle/response bomb must not exhaust memory
-	userAgentName = "arch-drift"
+	userAgentName = "aurvet"
 )
 
 type HTTP struct {

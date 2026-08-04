@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>arch-drift — full delivery plan</title>
+<title>aurvet — full delivery plan</title>
 <style>
   :root{--bg:#fff;--fg:#1a1d21;--muted:#5b6570;--border:#e4e7ec;--card:#f7f8fa;--accent:#2563eb;
     --code-bg:#f4f5f7;--code-fg:#1a1d21;--note:#2563eb;--tip:#059669;--warn:#d97706;--danger:#dc2626;--success:#059669;
@@ -81,7 +81,7 @@
     </nav>
   </aside>
   <main>
-    <h1 class="doc-title">arch-drift — full delivery plan</h1>
+    <h1 class="doc-title">aurvet — full delivery plan</h1>
     <p class="doc-subtitle">Every phase planned before implementation begins. Seven phases, 78 tasks, with lanes, interfaces, acceptance gates and the decisions that must be made first.</p>
     <div class="doc-meta">
       <span class="chip">2026-08-04</span>
@@ -155,7 +155,7 @@
 
     <section id="p1a">
       <h2>P1-A · Provenance sweep <span class="badge b-done">plan complete</span></h2>
-      <p>Full step-level plan: <code>docs/superpowers/plans/2026-08-04-p1a-provenance-sweep.md</code>. Guild lane plan: <code>.guild/plan/arch-drift-p1a.md</code>.</p>
+      <p>Full step-level plan: <code>docs/superpowers/plans/2026-08-04-p1a-provenance-sweep.md</code>. Guild lane plan: <code>.guild/plan/aurvet-p1a.md</code>.</p>
       <p>10 tasks — config/<code>doctor</code>; <code>desc</code> parser; <code>files</code>+<code>%BACKUP%</code> parser; local-DB enumeration; sync-DB name oracle and foreignness; finding model and fingerprints; AUR client (batched RPC, cgit tombstone, fake); provenance rules; reporting and exit codes; persistence, <code>--since-last</code> and the INV-8 gate.</p>
       <div class="callout success">
         <div class="ico">✔</div>
@@ -238,7 +238,7 @@
           <tr><td>9</td><td>Dependency closure</td><td><code>internal/gate/closure.go</code></td><td>Resolves the full AUR dep closure and reviews every new PKGBUILD in it — the attacker's move is a benign package pulling a malicious dep. Prints the tree.</td></tr>
           <tr><td>10</td><td>Approval store</td><td><code>internal/gate/approve.go</code></td><td>Keyed on <code>pkgbase</code> + PKGBUILD digest: silent when unchanged, re-prompts on recipe change.</td></tr>
           <tr><td>11</td><td>VCS delta review</td><td><code>internal/gate/vcsdelta.go</code></td><td>For <code>-git</code> packages the recipe is stable while the source moves, so approving once would bless unbounded future commits. Shows the upstream commit range since the recorded snapshot.</td></tr>
-          <tr><td>12</td><td><code>review</code> and <code>install</code></td><td><code>cmd/arch-drift/</code></td><td><code>review</code> analyses without building; <code>install</code> clones, reviews the closure, prompts, snapshots, then hands the vetted directory to the helper. Leads with rule hits and a diff against the last approved recipe, not the whole file.</td></tr>
+          <tr><td>12</td><td><code>review</code> and <code>install</code></td><td><code>cmd/aurvet/</code></td><td><code>review</code> analyses without building; <code>install</code> clones, reviews the closure, prompts, snapshots, then hands the vetted directory to the helper. Leads with rule hits and a diff against the last approved recipe, not the whole file.</td></tr>
           <tr><td>13</td><td>Hooks</td><td><code>packaging/hooks/</code></td><td><code>PostTransaction</code> for provenance capture — the hook's genuine strength. <code>PreTransaction</code> shipped <strong>inert and warn-only</strong>: <code>AbortOnFail</code> is opt-in by one line, <code>Exec</code> routes through a path that always exists and no-ops when the binary is absent, so removal cannot brick pacman.</td></tr>
           <tr><td>14</td><td>Tokeniser fuzzing</td><td><code>internal/pkgbuild/fuzz_test.go</code></td><td>Several thousand real PKGBUILD/<code>.SRCINFO</code> pairs asserting <em>panic-free and hang-free</em>, not correctness. The input is attacker-controlled, which is INV-2's justification.</td></tr>
         </tbody>
@@ -257,7 +257,7 @@
           <tr><td>1</td><td>Reproducible build <span class="badge b-dec">D-2</span></td><td>Pinned toolchain (<code>go.mod</code> <code>toolchain</code> + <code>GOTOOLCHAIN=local</code>), vendored deps, <code>-trimpath</code>, <code>-buildvcs=false</code>, <code>SOURCE_DATE_EPOCH</code>, no injected build date. Two CI runners produce identical hashes.</td></tr>
           <tr><td>2</td><td>Static-link assertion</td><td>A test asserts no <code>DT_NEEDED</code>/<code>PT_INTERP</code>. This is the deliberate deviation from Arch's Go guidelines, documented in a PKGBUILD comment: a dynamically-linked binary could be subverted by <code>ld.so.preload</code> before it can report on <code>ld.so.preload</code>.</td></tr>
           <tr><td>3</td><td>PKGBUILD</td><td>Source package canonical; <code>-bin</code> only with <code>options=('!strip')</code>; release tarball is a <code>git archive</code> asset, never GitHub's auto-generated archive; SPDX <code>license=()</code>; <code>arch=('x86_64' 'aarch64')</code>.</td></tr>
-          <tr><td>4</td><td>Self-gate</td><td><strong>arch-drift's own PKGBUILD must pass arch-drift's own rules</strong>, enforced in CI. Note that without vendored deps <code>build()</code> performs a network fetch and trips its own critical rule.</td></tr>
+          <tr><td>4</td><td>Self-gate</td><td><strong>aurvet's own PKGBUILD must pass aurvet's own rules</strong>, enforced in CI. Note that without vendored deps <code>build()</code> performs a network fetch and trips its own critical rule.</td></tr>
           <tr><td>5</td><td>Release signing</td><td>A second OpenPGP identity for artifacts, because <code>makepkg</code> only understands OpenPGP (<code>validpgpkeys</code>) — ed25519 alone gives AUR users no verification path. Fingerprint published in several independent places.</td></tr>
           <tr><td>6</td><td>AUR name defence</td><td>Register plain, <code>-bin</code> and <code>-git</code> names on day one. Publish the canonical PKGBUILD upstream and have scheduled CI diff the live AUR copy against it — self-defence against takeover of this project's own package.</td></tr>
           <tr><td>7</td><td>systemd units</td><td>Scan unit with <code>PrivateNetwork=yes</code>, <code>ProtectSystem=strict</code>, <code>ProtectHome=read-only</code>, <code>CapabilityBoundingSet=CAP_DAC_READ_SEARCH</code>; update unit network-only. Timers with <code>Persistent=true</code> and randomised delay. <strong>Never enabled by <code>.install</code></strong> — Arch policy.</td></tr>
@@ -324,7 +324,7 @@
 
     <section id="teams">
       <h2>Teams per phase</h2>
-      <p>Guild caps a team at 6 and defaults to 3–4. Composition follows the work, so it changes by phase; the P1-A team is approved and recorded at <code>.guild/team/arch-drift-p1a.plan.yaml</code>.</p>
+      <p>Guild caps a team at 6 and defaults to 3–4. Composition follows the work, so it changes by phase; the P1-A team is approved and recorded at <code>.guild/team/aurvet-p1a.plan.yaml</code>.</p>
       <div class="table-wrap">
       <table>
         <thead><tr><th>Phase</th><th>Team</th><th>Why</th></tr></thead>
@@ -382,7 +382,7 @@
     </section>
 
     <hr>
-    <p style="color:var(--muted);font-size:.9rem">Full delivery plan for arch-drift. P1-A is planned to executable step level; P1-B through P5 are planned to task level with interfaces and gates fixed, and expand to step level at phase entry. Three decisions (D-1, D-2, D-3) are open and affect files created in early phases.</p>
+    <p style="color:var(--muted);font-size:.9rem">Full delivery plan for aurvet. P1-A is planned to executable step level; P1-B through P5 are planned to task level with interfaces and gates fixed, and expand to step level at phase entry. Three decisions (D-1, D-2, D-3) are open and affect files created in early phases.</p>
   </main>
 </div>
 <script>

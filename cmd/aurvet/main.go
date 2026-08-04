@@ -1,4 +1,4 @@
-// Command arch-drift detects compromised AUR packages and verifies that a
+// Command aurvet detects compromised AUR packages and verifies that a
 // system has not been tampered with.
 package main
 
@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/lookatitude/arch-drift/internal/config"
+	"github.com/lookatitude/aurvet/internal/config"
 )
 
 // Exit codes are contractual (spec §14). They are the machine-readable result
@@ -27,7 +27,7 @@ func main() {
 // run is main's testable body: everything it touches arrives as a parameter,
 // and it returns the exit code rather than calling os.Exit.
 func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("arch-drift", flag.ContinueOnError)
+	fs := flag.NewFlagSet("aurvet", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	offlineRoot := fs.String("offline-root", "", "examine a mounted filesystem instead of the running system")
 
@@ -37,7 +37,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		fmt.Fprintln(stderr, "usage: arch-drift [flags] <command>")
+		fmt.Fprintln(stderr, "usage: aurvet [flags] <command>")
 		fmt.Fprintln(stderr, "commands: doctor")
 		return exitUsage
 	}
@@ -46,7 +46,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "doctor":
 		cfg, err := config.Resolve(*offlineRoot, os.Geteuid())
 		if err != nil {
-			fmt.Fprintf(stderr, "arch-drift: %v\n", err)
+			fmt.Fprintf(stderr, "aurvet: %v\n", err)
 			return exitIncomplete
 		}
 		for _, l := range cfg.Doctor() {
@@ -55,7 +55,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitClean
 
 	default:
-		fmt.Fprintf(stderr, "arch-drift: unknown command %q\n", rest[0])
+		fmt.Fprintf(stderr, "aurvet: unknown command %q\n", rest[0])
 		return exitUsage
 	}
 }

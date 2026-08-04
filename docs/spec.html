@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>arch-drift — design specification</title>
+<title>aurvet — design specification</title>
 <style>
   :root {
     --bg:#ffffff; --fg:#1a1d21; --muted:#5b6570; --border:#e4e7ec;
@@ -100,7 +100,7 @@
   </aside>
   <main>
     <header class="doc">
-      <h1 class="doc-title">arch-drift — design specification</h1>
+      <h1 class="doc-title">aurvet — design specification</h1>
       <p class="doc-subtitle">Detects compromised AUR packages and verifies an Arch system has not been infected. Four subsystems on one evidence core.</p>
       <div class="doc-meta">
         <span class="chip status-draft">● Draft for review</span>
@@ -156,7 +156,7 @@
 
     <section id="arch">
       <h2>3 · Architecture</h2>
-      <pre><code>cmd/arch-drift          CLI wiring, flag parsing, exit codes
+      <pre><code>cmd/aurvet          CLI wiring, flag parsing, exit codes
 
 internal/inventory      local DB reader: desc, files (incl. %BACKUP%), mtree, install
 internal/provenance     helper-cache git history, .SRCINFO, .BUILDINFO, AUR RPC + cgit
@@ -243,7 +243,7 @@ internal/report         findings, severity, correlation, coverage accounting, JS
       <h3>5.3 Integrity</h3>
       <div class="callout note">
         <div class="ico">✎</div>
-        <div><p><strong><code>pacman -Qkk</code> already does the file-level work</strong> — full sha256 against mtree, <code>backup file:</code> prefixing, and <code>%BACKUP%</code> excluded from its altered count. This spec does not claim that as a novel capability. arch-drift reimplements it only for what <code>-Qkk</code> cannot do: offline-root operation, parallelism, structured output, and correlation with other evidence. <strong>The genuinely novel layer is mtree-level tamper evidence</strong> (§8) — <code>-Qkk</code> trusts the mtree and structurally cannot detect its modification.</p></div>
+        <div><p><strong><code>pacman -Qkk</code> already does the file-level work</strong> — full sha256 against mtree, <code>backup file:</code> prefixing, and <code>%BACKUP%</code> excluded from its altered count. This spec does not claim that as a novel capability. aurvet reimplements it only for what <code>-Qkk</code> cannot do: offline-root operation, parallelism, structured output, and correlation with other evidence. <strong>The genuinely novel layer is mtree-level tamper evidence</strong> (§8) — <code>-Qkk</code> trusts the mtree and structurally cannot detect its modification.</p></div>
       </div>
       <div class="table-wrap">
       <table>
@@ -294,7 +294,7 @@ internal/report         findings, severity, correlation, coverage accounting, JS
     <section id="capture">
       <h2>7 · Provenance capture — the ephemerality fix</h2>
       <p>Every §5.1 check depending on the helper cache or a retained artifact is unreliable long-term: <strong>16 of 39 foreign packages (41%) already have neither</strong>, <code>.BUILDINFO</code> is archive-only, and <strong>38 of 39</strong> carry <code>%PACKAGER% = Unknown Packager</code> so there is no local fallback identity.</p>
-      <p><strong><code>arch-drift snapshot &lt;pkgbase&gt;</code></strong> records, into the tool's own state, the small artifacts that matter: <code>PKGBUILD</code>, <code>.SRCINFO</code>, <code>.BUILDINFO</code>, <code>git log</code> summary, remote URL, resolved source URLs, and the <strong>upstream commit actually built</strong> for VCS sources. A few KB per package against the 88 GB the cache occupies to hold the same facts.</p>
+      <p><strong><code>aurvet snapshot &lt;pkgbase&gt;</code></strong> records, into the tool's own state, the small artifacts that matter: <code>PKGBUILD</code>, <code>.SRCINFO</code>, <code>.BUILDINFO</code>, <code>git log</code> summary, remote URL, resolved source URLs, and the <strong>upstream commit actually built</strong> for VCS sources. A few KB per package against the 88 GB the cache occupies to hold the same facts.</p>
       <p>Invoked automatically by <code>review</code>/<code>install</code>, and by a <strong><code>PostTransaction</code> hook</strong> — which is what that hook is genuinely good for, unlike gating. Note <code>PostTransaction</code> hooks do not run when a transaction fails, so <code>scan</code> also opportunistically captures for any package whose evidence is still present but unsnapshotted.</p>
       <p>Keyed on <strong><code>pkgbase</code>, not <code>pkgname</code></strong> — 433 of 1409 installed packages are split. Where no snapshot and no live evidence exist, checks report <em>unavailable</em> (INV-10) and the summary states it: <em>"provenance unavailable for N of M foreign packages"</em>.</p>
     </section>
@@ -351,14 +351,14 @@ internal/report         findings, severity, correlation, coverage accounting, JS
         <div class="ico">◆</div>
         <div><p><strong>A pacman hook cannot be the gate.</strong> By the time pacman sees a built package, <code>makepkg</code> has already run <code>prepare()</code>, <code>build()</code> and <code>package()</code> as the invoking user — the build-time-fetch vector has already fired, and the hook cannot see a PKGBUILD at all.</p></div>
       </div>
-      <p><strong><code>arch-drift install &lt;pkg&gt;</code> is the gate.</strong> It clones the AUR repo itself, resolves the <strong>full AUR dependency closure</strong> and reviews every new PKGBUILD in it (the attacker's move is a benign package pulling a malicious dep), prints the tree, snapshots provenance (§7), and only then hands the vetted directory to the configured helper.</p>
+      <p><strong><code>aurvet install &lt;pkg&gt;</code> is the gate.</strong> It clones the AUR repo itself, resolves the <strong>full AUR dependency closure</strong> and reviews every new PKGBUILD in it (the attacker's move is a benign package pulling a malicious dep), prints the tree, snapshots provenance (§7), and only then hands the vetted directory to the configured helper.</p>
       <p>Approval keys on <strong><code>pkgbase</code> + PKGBUILD digest</strong>, so it is silent when nothing changed and re-prompts on a recipe change. For VCS packages — whose PKGBUILD is stable while the source moves every build — it shows the <strong>upstream commit range</strong> since the recorded snapshot, so the operator reviews the delta rather than an unchanged recipe. Review output leads with indicator hits and a <em>diff against the last approved PKGBUILD</em>, not the whole file; scriptlets are visually flagged, being rare (7 of 39).</p>
       <p><strong>Hook integration</strong>, two roles, neither of them gating the build:</p>
       <ul>
         <li><code>PostTransaction</code> — provenance capture (§7). The hook's genuine strength.</li>
-        <li><code>PreTransaction</code> — a narrow, time-budgeted provenance check on incoming targets (<code>.BUILDINFO</code>, scriptlet, approval status). <strong>Shipped inert and warn-only</strong>: <code>AbortOnFail</code> is required for a non-zero exit to abort anything and is opt-in by one line. <code>Exec</code> must route through a path that always exists and no-op when the binary is absent, so removing arch-drift cannot brick pacman. Note hooks receive matched <em>trigger targets</em> — package names for <code>Type=Package</code>, paths for <code>Type=Path</code>.</li>
+        <li><code>PreTransaction</code> — a narrow, time-budgeted provenance check on incoming targets (<code>.BUILDINFO</code>, scriptlet, approval status). <strong>Shipped inert and warn-only</strong>: <code>AbortOnFail</code> is required for a non-zero exit to abort anything and is opt-in by one line. <code>Exec</code> must route through a path that always exists and no-op when the binary is absent, so removing aurvet cannot brick pacman. Note hooks receive matched <em>trigger targets</em> — package names for <code>Type=Package</code>, paths for <code>Type=Path</code>.</li>
       </ul>
-      <p>The enabled hook is a <strong>symlink into a package-owned path</strong>, and the ownership oracle resolves symlinks — so arch-drift does not flag its own hook, and does so without a name-based exemption an attacker could imitate.</p>
+      <p>The enabled hook is a <strong>symlink into a package-owned path</strong>, and the ownership oracle resolves symlinks — so aurvet does not flag its own hook, and does so without a name-based exemption an attacker could imitate.</p>
     </section>
 
     <section id="config">
@@ -372,10 +372,10 @@ internal/report         findings, severity, correlation, coverage accounting, JS
       <table>
         <thead><tr><th>Thing</th><th>Root context</th><th>User context</th></tr></thead>
         <tbody>
-          <tr><td>Config</td><td><code>/etc/arch-drift/config.toml</code> (in <code>backup=()</code>)</td><td>XDG config dir</td></tr>
-          <tr><td>Cached bundle</td><td><code>/var/cache/arch-drift/</code></td><td>XDG cache dir</td></tr>
-          <tr><td>State, incl. anti-rollback floor</td><td><code>/var/lib/arch-drift/</code>, <code>0700</code></td><td>XDG state dir</td></tr>
-          <tr><td>Baseline working copy, snapshots, reports</td><td><code>/var/lib/arch-drift/</code></td><td>XDG data dir</td></tr>
+          <tr><td>Config</td><td><code>/etc/aurvet/config.toml</code> (in <code>backup=()</code>)</td><td>XDG config dir</td></tr>
+          <tr><td>Cached bundle</td><td><code>/var/cache/aurvet/</code></td><td>XDG cache dir</td></tr>
+          <tr><td>State, incl. anti-rollback floor</td><td><code>/var/lib/aurvet/</code>, <code>0700</code></td><td>XDG state dir</td></tr>
+          <tr><td>Baseline working copy, snapshots, reports</td><td><code>/var/lib/aurvet/</code></td><td>XDG data dir</td></tr>
           <tr><td>Offline-root mode</td><td colspan="2">All output to <code>--report-dir</code>; nothing written under the target (INV-5)</td></tr>
         </tbody>
       </table>
@@ -469,18 +469,18 @@ internal/report         findings, severity, correlation, coverage accounting, JS
 
     <section id="cli">
       <h2>14 · CLI &amp; exit codes</h2>
-      <pre><code>arch-drift scan       [--offline-root P] [--tier T] [--since-last] [--pkg N]... [--json] [--allow-degraded]
-arch-drift review     &lt;dir|pkgbase&gt;         # analyse, never build
-arch-drift install    &lt;pkg&gt;                 # fetch → closure review → prompt → helper
-arch-drift snapshot   &lt;pkgbase&gt;             # capture ephemeral provenance
-arch-drift baseline   init | append | verify | show
-arch-drift diff       [--since ENTRY]
-arch-drift update     [--check]
-arch-drift explain    &lt;finding-id&gt; | --explain-finding &lt;fingerprint&gt;
-arch-drift triage     ack | snooze | note &lt;fingerprint&gt;
-arch-drift adjudicate &lt;fingerprint&gt; --reason ... [--scope pin|subject|rule]
-arch-drift bundle     &lt;fingerprint&gt;         # redacted reproducer = fixture root
-arch-drift doctor                           # resolved config w/ per-key provenance</code></pre>
+      <pre><code>aurvet scan       [--offline-root P] [--tier T] [--since-last] [--pkg N]... [--json] [--allow-degraded]
+aurvet review     &lt;dir|pkgbase&gt;         # analyse, never build
+aurvet install    &lt;pkg&gt;                 # fetch → closure review → prompt → helper
+aurvet snapshot   &lt;pkgbase&gt;             # capture ephemeral provenance
+aurvet baseline   init | append | verify | show
+aurvet diff       [--since ENTRY]
+aurvet update     [--check]
+aurvet explain    &lt;finding-id&gt; | --explain-finding &lt;fingerprint&gt;
+aurvet triage     ack | snooze | note &lt;fingerprint&gt;
+aurvet adjudicate &lt;fingerprint&gt; --reason ... [--scope pin|subject|rule]
+aurvet bundle     &lt;fingerprint&gt;         # redacted reproducer = fixture root
+aurvet doctor                           # resolved config w/ per-key provenance</code></pre>
       <div class="table-wrap">
       <table>
         <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
@@ -520,7 +520,7 @@ arch-drift doctor                           # resolved config w/ per-key provena
       <p><strong>Dependency policy (D-1, D-3).</strong> <code>golang.org/x/sys</code> is the project's only sanctioned third-party dependency, entering at P1-B for <code>capset</code>/<code>prctl</code> — the privilege boundary is the wrong place to hand-roll syscall structs. Git history is read by parsing objects with the standard library rather than executing <code>git</code> against an attacker-controlled repository. All dependencies are vendored, so <code>build()</code> performs no network fetch and the project's own PKGBUILD passes the project's own rules.</p>
       <div class="callout danger">
         <div class="ico">◆</div>
-        <div><p>The deviation is load-bearing: a dynamically-linked <code>arch-drift</code> can be subverted by <code>LD_PRELOAD</code> or <code>/etc/ld.so.preload</code> <em>before it can report on <code>/etc/ld.so.preload</code></em> — a check this tool rates critical. Mitigations: a PKGBUILD comment stating the reason, a test asserting no <code>DT_NEEDED</code>/<code>PT_INTERP</code> in the built binary, and sanitising <code>LD_*</code>/<code>GLIBC_TUNABLES</code> with a re-exec at startup. Namcap warnings are suppressed explicitly, never silenced. Note <code>GOFLAGS</code> <code>-ldflags</code> is <em>replaced</em>, not merged, by a command-line <code>-ldflags</code> — naïve version injection silently changes the link mode.</p></div>
+        <div><p>The deviation is load-bearing: a dynamically-linked <code>aurvet</code> can be subverted by <code>LD_PRELOAD</code> or <code>/etc/ld.so.preload</code> <em>before it can report on <code>/etc/ld.so.preload</code></em> — a check this tool rates critical. Mitigations: a PKGBUILD comment stating the reason, a test asserting no <code>DT_NEEDED</code>/<code>PT_INTERP</code> in the built binary, and sanitising <code>LD_*</code>/<code>GLIBC_TUNABLES</code> with a re-exec at startup. Namcap warnings are suppressed explicitly, never silenced. Note <code>GOFLAGS</code> <code>-ldflags</code> is <em>replaced</em>, not merged, by a command-line <code>-ldflags</code> — naïve version injection silently changes the link mode.</p></div>
       </div>
       <h3>Reproducibility is the answer to the bootstrapping paradox</h3>
       <p>A tool warning about unvetted AUR packages would itself arrive as one, and its AUR account is the highest-value takeover target available. Reproducible builds convert "trust me" into "check me", which is the only credible position here:</p>
@@ -533,7 +533,7 @@ arch-drift doctor                           # resolved config w/ per-key provena
         <li><strong>Register the plain, <code>-bin</code> and <code>-git</code> AUR names on day one</strong>, or someone else supplies the "convenient binary build" of your security tool.</li>
       </ul>
       <h3>Packages and files</h3>
-      <p>The <strong>source package is canonical</strong> — a <code>-bin</code> asks users to trust a build machine, which is the trust this tool exists to question; if shipped, it carries <code>options=('!strip')</code> so its hash matches the signed artifact. Release tarballs are <code>git archive</code> assets, never GitHub's auto-generated archives (whose checksums are not contractually stable, and which contain LFS pointers rather than content). <strong>arch-drift's own PKGBUILD must pass arch-drift's own indicators as an automated release gate</strong> — note that without vendored deps, <code>build()</code> performs a network fetch and trips its own critical rule.</p>
+      <p>The <strong>source package is canonical</strong> — a <code>-bin</code> asks users to trust a build machine, which is the trust this tool exists to question; if shipped, it carries <code>options=('!strip')</code> so its hash matches the signed artifact. Release tarballs are <code>git archive</code> assets, never GitHub's auto-generated archives (whose checksums are not contractually stable, and which contain LFS pointers rather than content). <strong>aurvet's own PKGBUILD must pass aurvet's own indicators as an automated release gate</strong> — note that without vendored deps, <code>build()</code> performs a network fetch and trips its own critical rule.</p>
       <p>Installed: man pages (authored in scdoc; <code>zipman</code> is on by default so install uncompressed), shell completions for bash/zsh/fish with a test asserting no rot, the inert hook, timer units with <code>PrivateNetwork=yes</code> on the scan unit and network only on the update unit, <code>tmpfiles.d</code> entries, SPDX <code>license=()</code>. Helper support is <code>optdepends</code> only — never a hard dependency. <code>arch=('x86_64' 'aarch64')</code>, cross-compiled in CI, with a published supported-platform matrix stating the derivative caveats.</p>
       <p><strong><code>SECURITY.md</code> is two-sided.</strong> Inward: private reporting, coordinated disclosure, and an in-scope list that <em>explicitly names false negatives</em> — a false clean, a verification bypass, an evasion — as vulnerabilities, because saying so invites the reports the project needs. Outward: <code>docs/reporting-malware.md</code> for what an operator does when a finding is real, linked from critical <code>explain</code> output. Plus a privacy statement: <code>update</code> and AUR queries disclose IP, version and the set of installed foreign package names; honour proxies, offer <code>--no-network</code>, never auto-update, no telemetry.</p>
       <p>CI hygiene, non-negotiable for this project: <code>go vet</code>, <code>staticcheck</code>, <code>govulncheck</code>, <code>go mod verify</code>, <code>gosec</code>, <code>namcap</code> on the built package, a clean-chroot build from the tagged tarball before any AUR push, <code>.SRCINFO</code> asserted in sync, and <strong>every CI action pinned by commit SHA, not tag</strong> — a supply-chain tool consuming mutable refs would be called out, correctly.</p>

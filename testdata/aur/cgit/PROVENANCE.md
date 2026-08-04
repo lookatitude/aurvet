@@ -9,7 +9,7 @@ that found the resulting defects could only construct its evidence, not pin it.
 |---|---|---|---|
 | `log-tombstoned-librewolf-fix-bin.html` | `librewolf-fix-bin` | 200 | exactly one log row, subject `history removed due to malware` |
 | `log-present-yay.html` | `yay` | 200 | 50 log rows, ordinary upgpkg subjects |
-| `log-404-nonexistent-branch.html` | `zzz-arch-drift-does-not-exist-zzz` | **404** | cgit error page, zero log rows |
+| `log-404-nonexistent-branch.html` | `zzz-aurvet-does-not-exist-zzz` | **404** | cgit error page, zero log rows |
 
 ## Measured facts these fixtures pin
 

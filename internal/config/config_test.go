@@ -56,7 +56,7 @@ func TestResolveStateDirIsSystemOwnedForRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if c.StateDir != "/var/lib/arch-drift" {
-		t.Errorf("root StateDir = %q, want /var/lib/arch-drift", c.StateDir)
+	if c.StateDir != "/var/lib/aurvet" {
+		t.Errorf("root StateDir = %q, want /var/lib/aurvet", c.StateDir)
 	}
 }
