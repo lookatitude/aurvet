@@ -36,39 +36,62 @@ func LoadSyncNames(syncPath string) (map[string]bool, []string, error) {
 	names := make(map[string]bool)
 	var gaps []string
 	for _, db := range dbs {
-		if err := readSyncDB(db, names); err != nil {
+		entries, extracted, err := readSyncDB(db, names)
+		if err != nil {
+			// One unreadable DB, one gap entry — do not also apply the
+			// zero-names rule below to a DB that already errored out.
+			gaps = append(gaps, filepath.Base(db))
+			continue
+		}
+		// spec.html §4.1: a DB with at least one tar entry that still
+		// extracted zero names means the reader did not understand the
+		// format it was given — a coverage gap. Zero entries is a
+		// legitimate empty repository, not a gap; flagging it would
+		// manufacture false gaps on healthy, empty repos. `extracted`
+		// counts names this DB itself contributed, not map growth: a
+		// second DB whose packages are already known from a prior one
+		// must not be gapped just because it added no new keys.
+		if entries > 0 && extracted == 0 {
 			gaps = append(gaps, filepath.Base(db))
 		}
 	}
 	return names, gaps, nil
 }
 
-func readSyncDB(path string, into map[string]bool) error {
+// readSyncDB walks the gzipped tar at path, adding every name it can parse
+// out of a top-level entry to into. It returns the number of tar entries
+// seen and the number of names this DB itself extracted (regardless of
+// whether those names were already present in into), so the caller can
+// apply the §4.1 zero-names-with-entries gap rule without conflating it
+// with map growth across DBs.
+func readSyncDB(path string, into map[string]bool) (entries int, extracted int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	defer f.Close()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return entries, extracted, nil
 		}
 		if err != nil {
-			return err
+			return entries, extracted, err
 		}
+		entries++
 		dir := strings.TrimSuffix(h.Name, "/")
 		if i := strings.IndexByte(dir, '/'); i >= 0 {
 			dir = dir[:i]
 		}
 		if n := stripVersion(dir); n != "" {
 			into[n] = true
+			extracted++
 		}
 	}
 }

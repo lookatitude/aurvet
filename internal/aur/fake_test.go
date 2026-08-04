@@ -58,3 +58,49 @@ func TestFakeTombstoneAbsenceIsNotAnError(t *testing.T) {
 		t.Errorf("msg = %q, want empty", msg)
 	}
 }
+
+// These three tests are the executable statement of the third Tombstone
+// outcome (docs/interface-contracts-p1a.md rule 1, sharpened by task 8): the
+// index can answer Info while the cgit lookup for one specific base fails.
+// TombstoneErr is what lets a test express that split without also failing
+// every other call, which is what f.Err already does.
+
+func TestFakeTombstoneErrPerBaseIsNotAbsence(t *testing.T) {
+	wantErr := errors.New("cgit unreachable")
+	f := Fake{TombstoneErr: map[string]error{"foo-bin": wantErr}}
+	found, _, err := f.Tombstone(context.Background(), "foo-bin")
+	if err == nil {
+		t.Fatal("Tombstone with a per-base TombstoneErr entry must return a non-nil error")
+	}
+	if found {
+		t.Error("found must be false when the per-base error fires, so a caller checking err first never sees a false positive")
+	}
+}
+
+func TestFakeTombstoneErrDoesNotAffectOtherBases(t *testing.T) {
+	f := Fake{
+		Tombstones:   map[string]string{"other-bin": "history removed due to malware"},
+		TombstoneErr: map[string]error{"foo-bin": errors.New("cgit unreachable")},
+	}
+	found, msg, err := f.Tombstone(context.Background(), "other-bin")
+	if err != nil {
+		t.Fatalf("Tombstone(other-bin): %v", err)
+	}
+	if !found || msg != "history removed due to malware" {
+		t.Errorf("found=%v msg=%q, want the unaffected base's own tombstone", found, msg)
+	}
+}
+
+func TestFakeTombstoneErrDoesNotAffectInfo(t *testing.T) {
+	f := Fake{
+		Known:        map[string]Pkg{"foo-bin": {Name: "foo-bin"}},
+		TombstoneErr: map[string]error{"foo-bin": errors.New("cgit unreachable")},
+	}
+	got, err := f.Info(context.Background(), []string{"foo-bin"})
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if _, ok := got["foo-bin"]; !ok {
+		t.Errorf("Info missing entry for foo-bin: %v", got)
+	}
+}

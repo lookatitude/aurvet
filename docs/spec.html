@@ -209,15 +209,25 @@ internal/report         findings, severity, correlation, coverage accounting, JS
       is a legitimate state, and gapping it would manufacture false gaps on healthy
       systems. The rule is therefore <strong>structural, not numeric</strong>:</p>
       <blockquote>
-        <p>A sync database that yields <strong>zero package names</strong> but
-        contained <strong>at least one tar entry</strong> is a coverage gap, not an
-        empty repository. Zero entries is an empty repository; entries that yield no
-        names means the reader did not understand the format it was given.</p>
+        <p>Every <strong>package entry</strong> in a sync database that does not
+        yield a name is a coverage gap, and the gap records how many. Zero entries
+        is an empty repository and never a gap.</p>
       </blockquote>
       <p>The distinction is what separates "this repo has nothing in it" from "I
       could not read this repo", and only the second is a gap. A consumer that sees
       such a gap must not report foreignness verdicts derived from that oracle as
       complete.</p>
+      <p class="note"><strong>Corrected 2026-08-04, after the join lane's review.</strong>
+      This rule first said "zero names but at least one entry". That is
+      <em>database</em> granularity, and the failure is <em>per entry</em>: one
+      parseable entry would declare a whole database understood, so a DB whose
+      entries mostly fail to parse yields a non-empty name set, no gap, and every
+      unparsed package silently reclassified as foreign — with coverage reported
+      complete. Measured on the reference system, the original wording produced 5
+      false <em>suspicious</em> findings against pgp-validated repository packages
+      while claiming full coverage. The count is load-bearing: a partial read is
+      neither an empty repo nor a total failure, and only a per-entry accounting
+      distinguishes it from either.</p>
       <p>Hook directories: the system dir under <code>/usr/share/libalpm/</code> (57 hooks here, active by default), <code>/etc/pacman.d/hooks</code> (<strong>absent</strong> on the reference system; <code>HookDir</code> commented out), plus any configured override. All must be watched.</p>
     </section>
 

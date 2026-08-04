@@ -167,6 +167,23 @@ the join lane to trip over.
 | O-5 | `IsForeign(p Package, ...)` reads only `p.Name`; taking a `string` would make consulting `%VALIDATION%` structurally impossible rather than comment-enforced. | Frozen for P1-A — `check.Provenance` iterates `[]alpm.Package`. Worth doing at the next signature revision: it converts a rule we currently enforce by review into one the compiler enforces. |
 | O-6 | `Fingerprint` cannot enforce its own version-independence contract; a caller passing `pkg-1.2.3-1` gets a version-bearing fingerprint silently, invalidating every `--since-last` suppression on upgrade. | Task 10 must pin it: fingerprint the same package across two synthetic versions and assert equality. A `SubjectID` named type with a rejecting constructor is the stronger fix and is deferred. |
 
+## Escalations from the join lane — orchestrator decisions
+
+The join lane ran at low autonomy, so it escalated rather than decided. Resolved
+here. Two rounds of adversarial review found 19 defects in it; the four that
+mattered all trace to one spec omission, recorded as J-0.
+
+| # | Escalation | Decision |
+|---|---|---|
+| J-0 | **§5.1 never says whether "absent from the AUR index" is keyed by package *name* or by *pkgbase*.** Three of the four high findings live in that single omission. | The RPC matches **names**, so presence is keyed by name; the tombstone is keyed by the **declared `%BASE%`**. Where a record's `PackageBase` and the installed package's `%BASE%` disagree, cgit is consulted about the *declared* base — critical on malware, gap on failure, silent otherwise, because a benign rename is indistinguishable. This belongs in spec §5.1, not only in a code comment. |
+| E-1 | O-2 propagation is structurally impossible under the frozen `Provenance` signature — it cannot see the sync-DB gaps its caller collected. | Accepted. `check.SyncCoverageGaps` ships as the tested primitive the caller merges. `Provenance` takes the gap list directly at the next signature re-freeze (task 9/10 boundary). Frozen signatures do not move mid-phase. |
+| E-2 | Spec §4.1 stated its rule at DB granularity when the failure is per-entry. | **My defect.** §4.1 corrected to per-entry with a count. `LoadSyncNames` is still faithful to the old wording, so the implementation is a follow-up — the current behaviour is strictly better than the no-gap-at-all it replaced, but it is not yet right. |
+| E-4 | `Submitter == ""` silently disables the submitter-mismatch rule. Failure handling, so the lane left it. | Fix it: an absent `Submitter` is missing evidence and must gap, not vanish. INV-10 — a check whose evidence is absent reports *unavailable*, it does not pass. Two lines, blocks no true detection. |
+| E-5 | `aur.Fake` gained `TombstoneErr`; the frozen contract did not list it. | Accepted as additive. The third `Tombstone` outcome is untestable without a per-base error, and a rule that cannot be tested is a rule that is not enforced. |
+| E-6 | Two further defects in `internal/aur/http.go` (front B, already committed). | Recorded as open. Front B has had four fix rounds and two re-attacks; a fifth is warranted but not blocking. |
+| E-7 | `Info` never chunks its batch: 500 names → one 413 → all 500 gap. | Real, and it fails **safe** — gaps, not a false clean. Robustness, not correctness. Chunk at task 9. |
+| T1 | A `-debug` package carve-out, proposed by review, **deliberately not implemented** by the lane. | Agreed with the lane. The carve-out keys on `%NAME%` and `%BASE%`, both builder-controlled, which hands back the evasion S2 had just closed. Measured population on the reference system is zero. Documented in `Limits` instead. Reversible. |
+
 ## Process note: a headless lead cannot await its own specialists
 
 A `claude -p` team lead is one-shot and cannot block on a child it spawned — both

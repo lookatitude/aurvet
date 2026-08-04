@@ -95,6 +95,86 @@ func TestLoadSyncNamesReportsUnreadableDBAsGap(t *testing.T) {
 	}
 }
 
+// writeEmptySyncDB writes a valid gzipped tar with zero entries: a legitimate
+// empty repository, per spec §4.1 the non-gap side of the rule.
+func writeEmptySyncDB(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A valid gzipped tar with zero tar entries is an empty repository, not a
+// coverage gap: spec §4.1 explicitly rejects gapping this case since it would
+// manufacture false gaps on every healthy, empty repo.
+func TestLoadSyncNamesEmptyDBIsNotAGap(t *testing.T) {
+	dir := t.TempDir()
+	writeEmptySyncDB(t, filepath.Join(dir, "empty.db"))
+
+	names, gaps, err := LoadSyncNames(dir)
+	if err != nil {
+		t.Fatalf("LoadSyncNames: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want empty (zero entries is an empty repo, not a gap)", gaps)
+	}
+	if len(names) != 0 {
+		t.Errorf("names = %v, want empty", names)
+	}
+}
+
+// A DB with at least one tar entry whose names stripVersion rejects yields
+// zero names from that DB: spec §4.1 says that is a coverage gap, since the
+// reader did not understand the format it was given. A healthy DB alongside
+// it must still contribute its names.
+func TestLoadSyncNamesUnparsableEntriesAreAGap(t *testing.T) {
+	dir := t.TempDir()
+	writeSyncDB(t, filepath.Join(dir, "unparsable.db"), []string{"garbage", "nohyphens", "one-hyphen"})
+	writeSyncDB(t, filepath.Join(dir, "core.db"), []string{"zlib-1.3.1-2"})
+
+	names, gaps, err := LoadSyncNames(dir)
+	if err != nil {
+		t.Fatalf("LoadSyncNames: %v", err)
+	}
+	if len(gaps) != 1 || gaps[0] != "unparsable.db" {
+		t.Errorf("gaps = %v, want [unparsable.db]", gaps)
+	}
+	if !names["zlib"] {
+		t.Errorf("zlib not found; a bad DB must not cost the others their names: got %v", names)
+	}
+}
+
+// Two DBs with identical package entries: the second contributes no new map
+// keys (they're already present from the first) but did extract names from
+// its own entries. Counting "names contributed" by map growth would wrongly
+// gap the second DB even though it understood every entry it read.
+func TestLoadSyncNamesDuplicateContentDoesNotGap(t *testing.T) {
+	dir := t.TempDir()
+	writeSyncDB(t, filepath.Join(dir, "core.db"), []string{"zlib-1.3.1-2"})
+	writeSyncDB(t, filepath.Join(dir, "core-mirror.db"), []string{"zlib-1.3.1-2"})
+
+	names, gaps, err := LoadSyncNames(dir)
+	if err != nil {
+		t.Fatalf("LoadSyncNames: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want empty: duplicate content must not gap the second DB", gaps)
+	}
+	if !names["zlib"] {
+		t.Errorf("zlib not found; got %v", names)
+	}
+}
+
 func TestLoadSyncNamesEmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	names, gaps, err := LoadSyncNames(dir)
@@ -106,6 +186,53 @@ func TestLoadSyncNamesEmptyDir(t *testing.T) {
 	}
 	if len(gaps) != 0 {
 		t.Errorf("gaps = %v, want empty", gaps)
+	}
+}
+
+// End to end: real local-DB parse feeding a real sync-DB parse feeding
+// IsForeign. testdata/roots/stock has no var/lib/pacman/sync, so this is the
+// only place IsForeign is exercised against packages LoadLocalDB actually
+// produced rather than a hand-built Package literal.
+func TestIsForeignEndToEnd(t *testing.T) {
+	pkgs, gaps, err := LoadLocalDB("../../testdata/roots/stock/var/lib/pacman/local")
+	if err != nil {
+		t.Fatalf("LoadLocalDB: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Fatalf("gaps = %v, want empty", gaps)
+	}
+
+	var zlib, fooBin *Package
+	for i := range pkgs {
+		switch pkgs[i].Name {
+		case "zlib":
+			zlib = &pkgs[i]
+		case "foo-bin":
+			fooBin = &pkgs[i]
+		}
+	}
+	if zlib == nil {
+		t.Fatal("zlib not found among packages loaded from stock local DB")
+	}
+	if fooBin == nil {
+		t.Fatal("foo-bin not found among packages loaded from stock local DB")
+	}
+
+	syncDir := t.TempDir()
+	writeSyncDB(t, filepath.Join(syncDir, "core.db"), []string{"zlib-1.3.1-2"})
+	syncNames, syncGaps, err := LoadSyncNames(syncDir)
+	if err != nil {
+		t.Fatalf("LoadSyncNames: %v", err)
+	}
+	if len(syncGaps) != 0 {
+		t.Fatalf("syncGaps = %v, want empty", syncGaps)
+	}
+
+	if IsForeign(*zlib, syncNames) {
+		t.Error("zlib is present in the sync DB and must not be foreign")
+	}
+	if !IsForeign(*fooBin, syncNames) {
+		t.Error("foo-bin is absent from every sync DB and must be foreign")
 	}
 }
 

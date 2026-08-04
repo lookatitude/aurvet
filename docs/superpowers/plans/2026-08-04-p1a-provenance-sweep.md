@@ -1389,7 +1389,7 @@ git commit -m "feat(aur): batched RPC client, cgit tombstone check, fixture fake
 - Consumes: `alpm.Package`, `alpm.IsForeign`, `aur.Client`, `finding.*`
 - Produces: `check.Provenance(ctx context.Context, pkgs []alpm.Package, syncNames map[string]bool, cl aur.Client, network bool) finding.Result`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/check/provenance_test.go
@@ -1539,12 +1539,12 @@ func TestRepoPackagesAreSkipped(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/check/ -v`
 Expected: FAIL — `undefined: Provenance`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/check/provenance.go
@@ -1670,12 +1670,12 @@ func Provenance(ctx context.Context, pkgs []alpm.Package, syncNames map[string]b
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/check/ -v`
 Expected: PASS (seven tests)
 
-- [ ] **Step 5: Commit**
+- [x] ~~**Step 5: Commit**~~ — superseded: the orchestrator commits per lane
 
 ```bash
 git add internal/check
