@@ -1,0 +1,7 @@
+%FILES%
+usr/bin/foo
+etc/foo.conf
+
+%BACKUP%
+etc/foo.conf	d41d8cd98f00b204e9800998ecf8427e
+

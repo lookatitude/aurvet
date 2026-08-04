@@ -1,0 +1,18 @@
+%NAME%
+foo-bin
+
+%VERSION%
+1.0-1
+
+%BASE%
+foo-bin
+
+%VALIDATION%
+none
+
+%PACKAGER%
+Unknown Packager
+
+%INSTALLDATE%
+1770760700
+
