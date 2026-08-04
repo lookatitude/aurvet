@@ -191,9 +191,33 @@ internal/report         findings, severity, correlation, coverage accounting, JS
           <tr><td>AUR RPC</td><td><code>Maintainer</code>, <strong><code>Submitter</code></strong>, <code>FirstSubmitted</code>, <code>LastModified</code>, <code>OutOfDate</code>, <strong><code>PackageBase</code></strong></td><td>All 39 foreign packages fit <strong>one batched request</strong>. Errors are structurally distinct from absence (<code>type:"error"</code> vs empty <code>multiinfo</code>) — this is what makes INV-10 implementable</td></tr>
           <tr><td>AUR cgit</td><td>Git log per <code>pkgbase</code>, <strong>retained after package deletion</strong></td><td><strong>New.</strong> The authoritative malware signal — see §5</td></tr>
           <tr><td><code>pacman.log</code></td><td><code>[ALPM]</code> transaction facts</td><td>Mixed offsets in one file (DST); entries may name another root (<code>-r /mnt</code>); rotation must be detected — a log not spanning the baseline window is a coverage gap, and truncation is itself a finding</td></tr>
+          <tr><td>Sync DBs (<code>/var/lib/pacman/sync/*.db</code>)</td><td>The set of package <em>names</em> present in any configured repository — the <strong>name oracle</strong> that defines foreignness</td><td><strong>Fails open in the dangerous direction.</strong> An empty name set makes <em>every</em> installed package foreign. See the rule below</td></tr>
         </tbody>
       </table>
       </div>
+
+      <h3>4.1 · The sync-DB name oracle fails open</h3>
+      <p>Foreignness is <code>!syncNames[pkg]</code>, so the name oracle is the one
+      evidence source whose <em>emptiness</em> is indistinguishable from a confident
+      answer. A <code>.db</code> that decompresses cleanly but whose entries do not
+      match <code>&lt;name&gt;-&lt;ver&gt;-&lt;rel&gt;</code> yields zero names, zero
+      gaps and a nil error — and every installed package is then classified foreign
+      while the run reports <strong>complete coverage</strong>. That is the
+      false-accusation analogue of the false-assurance failures INV-9 exists to
+      prevent, and it is systemic rather than per-package.</p>
+      <p>The obvious guard — gap on any zero-name DB — is wrong: an empty repository
+      is a legitimate state, and gapping it would manufacture false gaps on healthy
+      systems. The rule is therefore <strong>structural, not numeric</strong>:</p>
+      <blockquote>
+        <p>A sync database that yields <strong>zero package names</strong> but
+        contained <strong>at least one tar entry</strong> is a coverage gap, not an
+        empty repository. Zero entries is an empty repository; entries that yield no
+        names means the reader did not understand the format it was given.</p>
+      </blockquote>
+      <p>The distinction is what separates "this repo has nothing in it" from "I
+      could not read this repo", and only the second is a gap. A consumer that sees
+      such a gap must not report foreignness verdicts derived from that oracle as
+      complete.</p>
       <p>Hook directories: the system dir under <code>/usr/share/libalpm/</code> (57 hooks here, active by default), <code>/etc/pacman.d/hooks</code> (<strong>absent</strong> on the reference system; <code>HookDir</code> commented out), plus any configured override. All must be watched.</p>
     </section>
 
