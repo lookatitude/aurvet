@@ -1,0 +1,27 @@
+# Build output
+/arch-drift
+/dist/
+/vendor/modules.txt.bak
+
+# Go test/coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Guild run telemetry — machine-generated, verbose, and it captures raw tool
+# output including local absolute paths. The durable records we DO keep are
+# .guild/runs/*/review/** (gate outcomes and review loops), tracked below.
+.guild/runs/*/logs/
+.guild/runs/*/events.ndjson
+.guild/runs/*/resolved-settings.json
+.guild/runs/*/agent-bus/
+
+# Transient pointer to the in-flight run — local state, not history
+.guild/runs/current-run-id
+
+# Host capability probe — machine-specific
+.guild/hosts/
+
+# Local-only operator config
+.guild/settings.local.json
+*.local.json

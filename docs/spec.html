@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arch-drift — design specification</title>
+<style>
+  :root {
+    --bg:#ffffff; --fg:#1a1d21; --muted:#5b6570; --border:#e4e7ec;
+    --card:#f7f8fa; --accent:#2563eb; --accent-soft:#eff4ff;
+    --code-bg:#f4f5f7; --code-fg:#1a1d21;
+    --note:#2563eb; --tip:#059669; --warn:#d97706; --danger:#dc2626; --success:#059669;
+    --shadow:0 1px 3px rgba(16,24,40,.08),0 1px 2px rgba(16,24,40,.04);
+    --maxw:64rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1216; --fg:#e6e8eb; --muted:#9aa4b0; --border:#232a33;
+      --card:#161b22; --accent:#6ea8ff; --accent-soft:#16233a; --code-bg:#161b22; --code-fg:#e6e8eb;
+      --note:#6ea8ff; --tip:#34d399; --warn:#fbbf24; --danger:#f87171; --success:#34d399;
+      --shadow:0 1px 3px rgba(0,0,0,.4); }
+  }
+  :root[data-theme="light"]{--bg:#fff;--fg:#1a1d21;--muted:#5b6570;--border:#e4e7ec;--card:#f7f8fa;--accent:#2563eb;--accent-soft:#eff4ff;--code-bg:#f4f5f7;--code-fg:#1a1d21;--note:#2563eb;--tip:#059669;--warn:#d97706;--danger:#dc2626;--success:#059669;--shadow:0 1px 3px rgba(16,24,40,.08),0 1px 2px rgba(16,24,40,.04);}
+  :root[data-theme="dark"]{--bg:#0f1216;--fg:#e6e8eb;--muted:#9aa4b0;--border:#232a33;--card:#161b22;--accent:#6ea8ff;--accent-soft:#16233a;--code-bg:#161b22;--code-fg:#e6e8eb;--note:#6ea8ff;--tip:#34d399;--warn:#fbbf24;--danger:#f87171;--success:#34d399;--shadow:0 1px 3px rgba(0,0,0,.4);}
+  *{box-sizing:border-box;} html{scroll-behavior:smooth;}
+  body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;}
+  .layout{display:grid;grid-template-columns:17rem minmax(0,1fr);gap:0;max-width:86rem;margin:0 auto;}
+  aside{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;padding:2rem 1.25rem;border-right:1px solid var(--border);font-size:.88rem;}
+  aside .toc-title{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:.75rem;}
+  aside nav a{display:block;color:var(--muted);text-decoration:none;padding:.26rem 0;border-left:2px solid transparent;padding-left:.6rem;}
+  aside nav a:hover{color:var(--fg);} aside nav a.active{color:var(--accent);border-left-color:var(--accent);}
+  main{padding:2.5rem clamp(1.25rem,4vw,3.5rem);max-width:var(--maxw);}
+  header.doc{margin-bottom:2.5rem;}
+  .doc-title{font-size:2.1rem;line-height:1.15;margin:0 0 .4rem;letter-spacing:-.02em;}
+  .doc-subtitle{font-size:1.08rem;color:var(--muted);margin:0 0 1rem;}
+  .doc-meta{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;}
+  .chip{display:inline-flex;align-items:center;gap:.35rem;font-size:.78rem;padding:.22rem .6rem;border-radius:999px;background:var(--card);border:1px solid var(--border);color:var(--muted);}
+  .chip.status-draft{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent);}
+  h2{font-size:1.45rem;margin:2.75rem 0 1rem;padding-top:.5rem;letter-spacing:-.01em;scroll-margin-top:1rem;}
+  h3{font-size:1.1rem;margin:1.6rem 0 .6rem;scroll-margin-top:1rem;}
+  h2+h3{margin-top:1rem;}
+  a{color:var(--accent);}
+  hr{border:none;border-top:1px solid var(--border);margin:2.5rem 0;}
+  code{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-size:.87em;background:var(--code-bg);padding:.12em .38em;border-radius:4px;}
+  pre{background:var(--code-bg);color:var(--code-fg);padding:1rem 1.15rem;border-radius:8px;overflow-x:auto;border:1px solid var(--border);line-height:1.5;}
+  pre code{background:none;padding:0;font-size:.84rem;}
+  .table-wrap{overflow-x:auto;margin:1.2rem 0;}
+  table{border-collapse:collapse;width:100%;font-size:.9rem;}
+  th,td{text-align:left;padding:.55rem .8rem;border-bottom:1px solid var(--border);vertical-align:top;}
+  thead th{background:var(--card);font-weight:600;border-bottom:2px solid var(--border);}
+  tbody tr:hover{background:color-mix(in srgb,var(--accent) 5%,transparent);}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .callout{display:grid;grid-template-columns:1.5rem 1fr;gap:.6rem;margin:1.2rem 0;padding:.85rem 1rem;border-radius:8px;border:1px solid var(--border);background:var(--card);}
+  .callout .ico{font-size:1.1rem;line-height:1.4;}
+  .callout p:first-child{margin-top:0;} .callout p:last-child{margin-bottom:0;}
+  .callout.note{border-left:3px solid var(--note);} .callout.tip{border-left:3px solid var(--tip);}
+  .callout.warn{border-left:3px solid var(--warn);} .callout.danger{border-left:3px solid var(--danger);}
+  .callout.success{border-left:3px solid var(--success);}
+  details{border:1px solid var(--border);border-radius:8px;padding:.4rem 1rem;margin:1rem 0;background:var(--card);}
+  details[open]{padding-bottom:1rem;}
+  summary{cursor:pointer;font-weight:600;padding:.5rem 0;list-style:none;}
+  summary::-webkit-details-marker{display:none;}
+  summary::before{content:"▸";display:inline-block;margin-right:.5rem;transition:transform .15s;color:var(--muted);}
+  details[open]>summary::before{transform:rotate(90deg);}
+  .badge{display:inline-block;font-size:.7rem;font-weight:700;letter-spacing:.04em;padding:.15rem .45rem;border-radius:4px;text-transform:uppercase;white-space:nowrap;}
+  .b-crit{background:color-mix(in srgb,var(--danger) 18%,transparent);color:var(--danger);}
+  .b-high{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn);}
+  .b-med{background:color-mix(in srgb,var(--note) 16%,transparent);color:var(--note);}
+  .b-inf{background:color-mix(in srgb,var(--muted) 18%,transparent);color:var(--muted);}
+  .b-new{background:color-mix(in srgb,var(--success) 18%,transparent);color:var(--success);}
+  .theme-toggle{position:fixed;top:1rem;right:1rem;z-index:10;background:var(--card);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:.4rem .6rem;cursor:pointer;font-size:.9rem;}
+  @media (max-width:52rem){.layout{grid-template-columns:1fr;} aside{position:static;height:auto;border-right:none;border-bottom:1px solid var(--border);}}
+  @media print{aside,.theme-toggle{display:none;} .layout{display:block;} main{max-width:none;padding:0;} details{border:none;} details:not([open])>*:not(summary){display:revert;} pre,table,.callout{break-inside:avoid;}}
+</style>
+</head>
+<body>
+<button class="theme-toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');r.setAttribute('data-theme',d==='dark'?'light':'dark');})()">◐ Theme</button>
+<div class="layout">
+  <aside>
+    <div class="toc-title">Specification</div>
+    <nav id="toc">
+      <a href="#scope">1 · Scope</a>
+      <a href="#invariants">2 · Invariants</a>
+      <a href="#arch">3 · Architecture</a>
+      <a href="#evidence">4 · Evidence sources</a>
+      <a href="#catalog">5 · Detection catalog</a>
+      <a href="#correlation">6 · Correlation</a>
+      <a href="#capture">7 · Provenance capture</a>
+      <a href="#baseline">8 · Baseline &amp; trust chain</a>
+      <a href="#bundle">9 · Indicator bundle</a>
+      <a href="#gate">10 · Pre-install gate</a>
+      <a href="#config">11 · Config, state, process model</a>
+      <a href="#findings">12 · Findings &amp; adjudication</a>
+      <a href="#tiers">13 · Performance tiers</a>
+      <a href="#cli">14 · CLI &amp; exit codes</a>
+      <a href="#testing">15 · Testing</a>
+      <a href="#packaging">16 · Packaging</a>
+      <a href="#sequence">17 · Delivery sequence</a>
+      <a href="#limits">18 · Known limits</a>
+    </nav>
+  </aside>
+  <main>
+    <header class="doc">
+      <h1 class="doc-title">arch-drift — design specification</h1>
+      <p class="doc-subtitle">Detects compromised AUR packages and verifies an Arch system has not been infected. Four subsystems on one evidence core.</p>
+      <div class="doc-meta">
+        <span class="chip status-draft">● Draft for review</span>
+        <span class="chip">2026-08-04</span>
+        <span class="chip">Go · Arch Linux</span>
+        <span class="chip">supersedes the reviewed design</span>
+      </div>
+    </header>
+
+    <section id="scope">
+      <h2>1 · Scope</h2>
+      <p>A Go CLI answering two questions: <strong>am I compromised by a malicious AUR package</strong>, and <strong>has anything changed that pacman did not change</strong>. Four subsystems, all in scope:</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Subsystem</th><th>Commands</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td>Forensic sweep</td><td><code>scan</code> <code>explain</code> <code>doctor</code></td><td>Am I infected now?</td></tr>
+          <tr><td>Pre-install gate</td><td><code>review</code> <code>install</code> <code>snapshot</code></td><td>Should this build run? — and capture provenance while it exists</td></tr>
+          <tr><td>Drift baseline</td><td><code>baseline</code> <code>diff</code></td><td>What changed that pacman didn't do?</td></tr>
+          <tr><td>Indicator bundle</td><td><code>update</code></td><td>What is newly known-bad?</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>All three verbs are the same operation against different reference points: <code>scan</code> compares live state to expectation, <code>diff</code> to recorded state, <code>review</code> to indicators. That is why one core serves all four.</p>
+      <p><strong>Non-goals:</strong> judging whether upstream source code is malicious; replacing <code>rkhunter</code>/<code>AIDE</code>/EDR; multi-distro support; <em>performing</em> remediation (it reports, explains, and gives investigation commands — the operator acts).</p>
+      <div class="callout warn">
+        <div class="ico">▲</div>
+        <div><p><strong>Recorded concern, overridden by decision.</strong> The design review recommended a reduced first milestone, on the grounds that the baseline is actively harmful when half-built — a chain you cannot fully trust manufactures confidence — and that the indicator bundle is largely superseded by the AUR tombstone check (§5), which needs no curation. All four subsystems are retained by operator decision. §17 therefore places an explicit <strong>ship gate</strong> on the baseline: it must not be enabled in a release until its full acceptance set passes, precisely so the half-built state cannot reach a user.</p></div>
+      </div>
+    </section>
+
+    <section id="invariants">
+      <h2>2 · Invariants</h2>
+      <p>Non-negotiable. A change violating any of these is rejected regardless of what it enables. INV-9 and INV-10 are new, added by the review.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Invariant</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>INV-1</td><td>Network-delivered content is <strong>strictly declarative data</strong> — hosts, globs, digests, thresholds, names. No eval, no shell, no embedded scripting.</td><td>An updatable format that executes logic is an RCE channel into a root security tool — the exact hole the tool exists to defend against.</td></tr>
+          <tr><td>INV-2</td><td>Analyse by <strong>parsing, never executing</strong>. PKGBUILDs and scriptlets are tokenised; never sourced, never run, not even sandboxed.</td><td>The input is attacker-controlled by definition.</td></tr>
+          <tr><td>INV-3</td><td>Never claim clean for what was not examined. Incomplete coverage is a distinct, loud outcome.</td><td>A false clean is worse than no tool.</td></tr>
+          <tr><td>INV-4</td><td>Collectors are pure: <code>(root, cfg) → evidence</code>. No ambient <code>$HOME</code>, no implicit <code>/</code>, no global state.</td><td>Makes offline-root a parameter, not a second implementation; makes fixture testing possible.</td></tr>
+          <tr><td>INV-5</td><td>Offline mode never writes to the target.</td><td>Inspecting a suspect filesystem must not mutate evidence.</td></tr>
+          <tr><td>INV-6</td><td>Findings state their own limits, in output, not documentation.</td><td>Calibrated confidence is the product.</td></tr>
+          <tr><td>INV-7</td><td>The private key is required only to <em>append</em>. <code>scan</code>/<code>diff</code>/<code>verify</code> need the public key alone.</td><td>Signing keys must not live on the monitored machine.</td></tr>
+          <tr><td>INV-8</td><td>The false-positive corpus is a release gate, and it includes <strong>system-state fixtures</strong>, not only PKGBUILDs.</td><td>A scanner that cries wolf gets ignored. The reviewed design's gate was blind to its own largest noise sources.</td></tr>
+          <tr><td>INV-9 <span class="badge b-new">new</span></td><td><strong>Analysis coverage is coverage.</strong> Input the parser cannot fully resolve yields an explicit <em>could-not-analyse</em> verdict, counted under INV-3 — never silence, never a critical.</td><td>Measured: legitimate PKGBUILDs generate their package functions via <code>eval</code>, so the code does not exist in source text. Without this, unresolvable input silently reads as clean.</td></tr>
+          <tr><td>INV-10 <span class="badge b-new">new</span></td><td>Every check declares its <strong>evidence precondition</strong>. If the evidence is absent, the check reports <em>unavailable</em> rather than passing.</td><td>Provenance evidence is ephemeral (§7). 41% of foreign packages on the reference system have none, and the reviewed design would have reported them clean.</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section id="arch">
+      <h2>3 · Architecture</h2>
+      <pre><code>cmd/arch-drift          CLI wiring, flag parsing, exit codes
+
+internal/inventory      local DB reader: desc, files (incl. %BACKUP%), mtree, install
+internal/provenance     helper-cache git history, .SRCINFO, .BUILDINFO, AUR RPC + cgit
+internal/pkgbuild       bash-aware tokeniser + analysers; emits resolved | unresolved
+internal/surfaces       units, timers, hook dirs, ld.so.preload, rc, autostart, SUID
+internal/indicators     declarative matcher over evidence; bundled + updatable data
+internal/baseline       canonical serialisation, ed25519, hash chain, replication state
+internal/report         findings, severity, correlation, coverage accounting, JSON</code></pre>
+      <p>Collectors are pure functions of <code>(root, cfg)</code> (INV-4). <code>--offline-root PATH</code> is a prefix threaded through them, not a second code path. Four documented deltas in offline mode, enumerated here because the equivalence test (§15) cannot be written without them:</p>
+      <ol>
+        <li><strong>No live systemd</strong> — unit files and <code>*.wants/</code> links are parsed from disk, never via <code>systemctl</code>. This is stronger, not weaker: a compromised systemd cannot lie to it.</li>
+        <li><strong>User surfaces</strong> enumerate homes from the target's <code>passwd</code>, not <code>$HOME</code>. Unreadable or encrypted homes are coverage gaps.</li>
+        <li><strong>Network checks still work</strong> if the rescue environment has connectivity — queries concern the target's packages, not the live host.</li>
+        <li><strong>Strictly read-only</strong> against the target; reports go to <code>--report-dir</code> (INV-5).</li>
+      </ol>
+      <p><code>ALPM_DB_VERSION</code> (currently <code>9</code>) is checked and an unrecognised value is a <strong>hard, documented refusal</strong> — a supported outcome on derivatives, not a surprise.</p>
+    </section>
+
+    <section id="evidence">
+      <h2>4 · Evidence sources</h2>
+      <p>All measured on the reference system (1409 packages, 39 foreign, <code>yay</code>), 2026-08-04.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Source</th><th>Content</th><th>Correction from the reviewed design</th></tr></thead>
+        <tbody>
+          <tr><td><code>mtree</code> (gzip, per package)</td><td>Per-file <code>sha256digest</code>, <code>size</code>, <code>mode</code>, <code>time</code>; <code>link=</code> for symlinks</td><td>237 entries use <code>md5digest</code>; paths are vis(3)-escaped; <code>/set</code>/<code>/unset</code> establish inherited defaults; <code>time</code> is a float; <code>./.</code>-prefixed entries are package metadata not present on disk</td></tr>
+          <tr><td><code>desc</code></td><td><code>%NAME%</code>, <code>%VERSION%</code>, <code>%VALIDATION%</code>, <code>%PACKAGER%</code>, <code>%INSTALLDATE%</code>, <code>%XDATA%</code></td><td><code>%VALIDATION%</code> is a <strong>weak signal, not a discriminator</strong>. Fields are not guaranteed present (<code>%SIZE%</code> missing on 9, <code>%XDATA%</code> on 6, <code>%LICENSE%</code> on 1)</td></tr>
+          <tr><td><code>files</code></td><td>Owned paths <strong>and the <code>%BACKUP%</code> section</strong></td><td><code>%BACKUP%</code> is here, <strong>not in <code>desc</code></strong>, and is <strong>MD5</strong>-keyed. 348 entries across 94 packages</td></tr>
+          <tr><td><code>install</code></td><td>The <code>.install</code> scriptlet, verbatim</td><td>Retained post-install — analysable even with no cache. Only 57 of 1409 packages have one (7 of 39 foreign), so "no scriptlet findings" must not read as reassurance</td></tr>
+          <tr><td>Helper cache (<code>yay</code>, <code>paru</code>, <code>pikaur</code>, <code>aurutils</code>)</td><td>Full git clone: author history, remote URL, PKGBUILD, <code>.SRCINFO</code>, built artifacts</td><td><strong>Ephemeral</strong> — present for only 23 of 39 foreign packages. Cache is 88 GB, which is why users clean it. Location must be detected, never hardcoded</td></tr>
+          <tr><td><code>.BUILDINFO</code></td><td><code>pkgbuild_sha256sum</code>, <code>buildenv</code>, <code>options</code>, <code>builddir</code>/<code>startdir</code></td><td><strong>Not retained in the local DB</strong> — archive-only. See §7</td></tr>
+          <tr><td>AUR RPC</td><td><code>Maintainer</code>, <strong><code>Submitter</code></strong>, <code>FirstSubmitted</code>, <code>LastModified</code>, <code>OutOfDate</code>, <strong><code>PackageBase</code></strong></td><td>All 39 foreign packages fit <strong>one batched request</strong>. Errors are structurally distinct from absence (<code>type:"error"</code> vs empty <code>multiinfo</code>) — this is what makes INV-10 implementable</td></tr>
+          <tr><td>AUR cgit</td><td>Git log per <code>pkgbase</code>, <strong>retained after package deletion</strong></td><td><strong>New.</strong> The authoritative malware signal — see §5</td></tr>
+          <tr><td><code>pacman.log</code></td><td><code>[ALPM]</code> transaction facts</td><td>Mixed offsets in one file (DST); entries may name another root (<code>-r /mnt</code>); rotation must be detected — a log not spanning the baseline window is a coverage gap, and truncation is itself a finding</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Hook directories: the system dir under <code>/usr/share/libalpm/</code> (57 hooks here, active by default), <code>/etc/pacman.d/hooks</code> (<strong>absent</strong> on the reference system; <code>HookDir</code> commented out), plus any configured override. All must be watched.</p>
+    </section>
+
+    <section id="catalog">
+      <h2>5 · Detection catalog</h2>
+      <p>Severity: <span class="badge b-crit">critical</span> act on it · <span class="badge b-high">suspicious</span> needs correlation · <span class="badge b-inf">info</span> baseline-diff or context only. Every row declares its evidence precondition (INV-10).</p>
+
+      <h3>5.1 Provenance — cheapest, highest signal</h3>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Check</th><th>Sev</th><th>Precondition &amp; false-positive control</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Absent from AUR index <em>and</em> cgit log carries a removal/malware tombstone</strong></td><td><span class="badge b-crit">critical</span></td><td><strong>Definitive, zero curation.</strong> Verified: all three July 2025 CHAOS RAT packages still serve <code>history removed due to malware</code>; a control package does not. Needs network — else <em>unavailable</em></td></tr>
+          <tr><td>Absent from AUR index, no tombstone</td><td><span class="badge b-high">suspicious</span></td><td>Rule out: dropped from official repos (the <code>python-pkg_resources</code> case), renamed/merged, never-published local build. <strong>Network failure must never reach this rule</strong> — branch on RPC <code>type</code></td></tr>
+          <tr><td>Git remote ≠ the AUR host</td><td><span class="badge b-crit">critical</span></td><td>Near-zero FP. Needs cache clone</td></tr>
+          <tr><td><code>pkgbuild_sha256sum</code> ≠ PKGBUILD at cache HEAD or at upstream HEAD</td><td><span class="badge b-crit">critical</span></td><td>Needs <code>.BUILDINFO</code> — archive or captured snapshot (§7), else <em>unavailable</em></td></tr>
+          <tr><td>Installed version absent from AUR git history</td><td><span class="badge b-crit">critical</span></td><td>Built from a PKGBUILD the AUR never published. Needs cache clone or snapshot</td></tr>
+          <tr><td>Maintainer changed since the installed version was built</td><td><span class="badge b-crit">critical</span></td><td>Legit handoffs exist → report the identity delta as evidence, never assert malice</td></tr>
+          <tr><td><code>Submitter</code> ≠ current <code>Maintainer</code></td><td><span class="badge b-high">suspicious</span></td><td>Free from the same batched call; a takeover leaves this trace</td></tr>
+          <tr><td>Orphaned (<code>Maintainer: null</code>)</td><td><span class="badge b-high">suspicious</span></td><td>A takeover precondition, not an event</td></tr>
+          <tr><td>First submitted within N days of install</td><td><span class="badge b-high">suspicious</span></td><td>Correlation-only — legitimately new packages trip it</td></tr>
+          <tr><td><strong>Repo-provenance verdict</strong>: classify each package's origin repo (official / known AUR-rebuild / derivative / unknown / absent)</td><td>varies</td><td><strong>Replaces the <code>%VALIDATION%</code> discriminator.</strong> Third-party rebuild repos <em>sign</em> AUR-authored packages, so <code>pgp</code> there means nothing; treat known-rebuild repos as foreign-equivalent. Repo list ships in the bundle</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <h3>5.2 PKGBUILD and scriptlet analysis</h3>
+      <p>Tokenised, never executed (INV-2). Measured over 34 real cached PKGBUILDs, which sets the parser's minimum competence: <strong>32 use array <code>source=()</code></strong>, <strong>10 (29%) use arch-suffixed <code>source_x86_64</code>/<code>_aarch64</code></strong>, <strong>7 (21%) build source URLs via parameter expansion</strong>, and nested <code>$( … )</code>, heredocs and external <code>source</code> each appear. A parser reading only literal <code>source=</code> is wrong for nearly a third of packages.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Check</th><th>Sev</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>Network fetch in <code>prepare/build/package</code> or the scriptlet, especially piped to a shell</td><td><span class="badge b-crit">critical</span></td><td>Bypasses source integrity entirely. <strong>Requires comment stripping and dependency-array exclusion</strong> — both <code>curl</code> hits in the real corpus are false positives (one a comment, one the dependency string <code>"curl"</code>)</td></tr>
+          <tr><td>Writes outside <code>$pkgdir</code>, or to <code>$HOME</code></td><td><span class="badge b-crit">critical</span></td><td>Builds must be hermetic</td></tr>
+          <tr><td>Reads credential paths (<code>~/.ssh</code>, <code>~/.gnupg</code>, <code>~/.aws</code>, keyrings, browser profiles)</td><td><span class="badge b-crit">critical</span></td><td></td></tr>
+          <tr><td>Privilege escalation in build (<code>sudo</code>, <code>pkexec</code>, <code>chmod u+s</code>)</td><td><span class="badge b-crit">critical</span></td><td></td></tr>
+          <tr><td>Source host is a paste site, bare IP, gist or shortener</td><td><span class="badge b-crit">critical</span></td><td>Host list ships in the bundle</td></tr>
+          <tr><td>Source host merely ≠ declared <code>url</code> host</td><td><span class="badge b-high">suspicious</span></td><td><strong>Deliberately not critical</strong> — legit <code>-bin</code> packages routinely source release artifacts from a different host</td></tr>
+          <tr><td>Fixed-URL source with <code>SKIP</code> or MD5-only integrity</td><td><span class="badge b-high">suspicious</span></td><td><code>SKIP</code> is mandatory for VCS sources → scope to fixed URLs</td></tr>
+          <tr><td>Obfuscation (<code>base64 -d</code>, <code>xxd -r</code>, hex escapes, long opaque tokens)</td><td><span class="badge b-crit">critical</span></td><td>Absent from the benign corpus, so a clean signal</td></tr>
+          <tr><td>Scriptlet or <code>package()</code> installs persistence</td><td><span class="badge b-high">suspicious</span> → <span class="badge b-crit">critical</span></td><td>Escalates when the unit's <code>ExecStart</code> does not resolve to a file the package owns</td></tr>
+          <tr><td><strong><code>eval</code> or unresolvable construction</strong></td><td><span class="badge b-inf">could-not-analyse</span></td><td><strong>Not a finding — a coverage gap (INV-9).</strong> <code>eval</code> appears in 3 of 34 legitimate packages, including <code>eval "package_$_p() {</code> which <em>generates the package functions</em>. Flagging it is wrong; silence is worse</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <h3>5.3 Integrity</h3>
+      <div class="callout note">
+        <div class="ico">✎</div>
+        <div><p><strong><code>pacman -Qkk</code> already does the file-level work</strong> — full sha256 against mtree, <code>backup file:</code> prefixing, and <code>%BACKUP%</code> excluded from its altered count. This spec does not claim that as a novel capability. arch-drift reimplements it only for what <code>-Qkk</code> cannot do: offline-root operation, parallelism, structured output, and correlation with other evidence. <strong>The genuinely novel layer is mtree-level tamper evidence</strong> (§8) — <code>-Qkk</code> trusts the mtree and structurally cannot detect its modification.</p></div>
+      </div>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Check</th><th>Sev</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>File sha256 (or md5) ≠ mtree digest</td><td><span class="badge b-crit">critical</span></td><td>Exempt <code>%BACKUP%</code> entries and the derived mutable set below. <strong>For AUR packages the mtree came from that build</strong> — this detects later modification only, never a malicious build</td></tr>
+          <tr><td><code>type=link</code> target string ≠ recorded <code>link=</code></td><td><span class="badge b-crit">critical</span></td><td><strong>Compare strings; never resolve-and-hash.</strong> 4,145 legitimate targets contain <code>..</code>, so following links while hashing as root would run on every scan</td></tr>
+          <tr><td>mtree path containing <code>..</code>, absolute, or not <code>./</code>-rooted</td><td><span class="badge b-crit">critical</span></td><td>0 instances across ~325k paths today, so any violation is damning. Validate on read regardless — an AUR package's mtree is generated by the attacker's own build</td></tr>
+          <tr><td>Unowned SUID/SGID binary</td><td><span class="badge b-crit">critical</span></td><td>0 of 33 SUID binaries are unowned here</td></tr>
+          <tr><td>Unowned executable/library in package-managed dirs</td><td><span class="badge b-inf">info</span></td><td>1,403 unowned files here, 1,171 of them one generated tree. Useful only once baselined</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p><strong>Mutable-file exemptions are derived, not hand-maintained:</strong> parse the <code>Target</code>/<code>Exec</code> pairs of installed pacman hooks to compute which files pacman itself regenerates. Seed additions from measurement: the VLC plugin cache, <code>.gresource</code> bundles, the shared MIME tree, extracted CA certificates, kernel module indices, and the pacman keyring. <strong><code>__pycache__</code> must not be blanket-exempted</strong> — 103 packages ship digest-covered <code>.pyc</code> files, so a wholesale exemption is an attacker drop-zone.</p>
+
+      <h3>5.4 Persistence surfaces</h3>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Check</th><th>Sev</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td><code>/etc/ld.so.preload</code> exists</td><td><span class="badge b-crit">critical</span></td><td>Normally absent</td></tr>
+          <tr><td>Unowned hook in any active hook dir</td><td><span class="badge b-crit">critical</span></td><td>Runs as root every transaction; survives removal of the package that planted it</td></tr>
+          <tr><td><strong>A package-owned hook shadowed or disabled</strong></td><td><span class="badge b-crit">critical</span></td><td><strong>New.</strong> Hooks can be disabled by symlinking to <code>/dev/null</code> or shadowed by a same-named file in a higher-priority dir. The reviewed design checked only for hooks <em>added</em>, never <em>suppressed</em></td></tr>
+          <tr><td>Unowned unit/timer whose <code>ExecStart</code> targets an unowned binary, <code>/tmp</code>, <code>/var/tmp</code>, <code>/dev/shm</code> or a home dir</td><td><span class="badge b-crit">critical</span></td><td>The CHAOS RAT persistence pattern verbatim</td></tr>
+          <tr><td>Unowned unit/timer, otherwise ordinary</td><td><span class="badge b-high">suspicious</span></td><td><strong>Requires symlink resolution and directory exclusion.</strong> Of 30 unowned paths here: 19 are enablement symlinks to package-owned units, 8 are <code>*.wants</code> directories, 1 is a real hand-written unit</td></tr>
+          <tr><td>Unowned entries in generator dirs</td><td><span class="badge b-crit">critical</span></td><td>Obscure but effective</td></tr>
+          <tr><td>Unowned <code>/etc/profile.d</code> or autostart entry</td><td><span class="badge b-high">suspicious</span></td><td></td></tr>
+          <tr><td>Shell dotfile content</td><td><span class="badge b-inf">info</span></td><td>Baseline-diff only, never pattern-alerted</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section id="correlation">
+      <h2>6 · Correlation</h2>
+      <p>Findings carry correlation keys and clusters escalate. Three keys, because package scope alone cannot reach the persistence class — those files are unowned by definition, so there is no package to scope to:</p>
+      <ol>
+        <li><strong>Package key</strong> — for evidence with an owner.</li>
+        <li><strong>Temporal key</strong> — evidence timestamps inside one window. All inputs already collected: mtree <code>time=</code>, <code>%INSTALLDATE%</code>, and <code>[ALPM]</code> transaction times. Timestamps must be parsed with explicit offsets; the reference log mixes two.</li>
+        <li><strong>Path attribution</strong> — resolve an unowned unit's <code>ExecStart</code> and match its directory or filename stem against foreign package names; and for anything installed after §7 is live, use the <em>recorded</em> set of paths that appeared during that install, turning inference into fact.</li>
+      </ol>
+      <div class="callout danger">
+        <div class="ico">◆</div>
+        <div><p><strong>Stated limit, in output as well as here (INV-6).</strong> Correlation does not survive a competent attacker. If a compromised package's <code>build()</code> emits the payload into its own <code>$pkgdir</code> and the package ships an ordinary-looking unit for it, then there are no unowned files, the mtree is self-consistent, and <code>ExecStart</code> resolves to a package-owned binary — every §5.4 check and the whole of §5.3 go silent. <strong>The host-side half of this tool catches sloppy malware.</strong> The real incidents were sloppy; they needn't have been. Provenance (§5.1) is what survives, which is why it leads the delivery sequence.</p></div>
+      </div>
+    </section>
+
+    <section id="capture">
+      <h2>7 · Provenance capture — the ephemerality fix</h2>
+      <p>Every §5.1 check depending on the helper cache or a retained artifact is unreliable long-term: <strong>16 of 39 foreign packages (41%) already have neither</strong>, <code>.BUILDINFO</code> is archive-only, and <strong>38 of 39</strong> carry <code>%PACKAGER% = Unknown Packager</code> so there is no local fallback identity.</p>
+      <p><strong><code>arch-drift snapshot &lt;pkgbase&gt;</code></strong> records, into the tool's own state, the small artifacts that matter: <code>PKGBUILD</code>, <code>.SRCINFO</code>, <code>.BUILDINFO</code>, <code>git log</code> summary, remote URL, resolved source URLs, and the <strong>upstream commit actually built</strong> for VCS sources. A few KB per package against the 88 GB the cache occupies to hold the same facts.</p>
+      <p>Invoked automatically by <code>review</code>/<code>install</code>, and by a <strong><code>PostTransaction</code> hook</strong> — which is what that hook is genuinely good for, unlike gating. Note <code>PostTransaction</code> hooks do not run when a transaction fails, so <code>scan</code> also opportunistically captures for any package whose evidence is still present but unsnapshotted.</p>
+      <p>Keyed on <strong><code>pkgbase</code>, not <code>pkgname</code></strong> — 433 of 1409 installed packages are split. Where no snapshot and no live evidence exist, checks report <em>unavailable</em> (INV-10) and the summary states it: <em>"provenance unavailable for N of M foreign packages"</em>.</p>
+    </section>
+
+    <section id="baseline">
+      <h2>8 · Baseline &amp; trust chain</h2>
+      <p><strong>Two layers, so the baseline stays small.</strong> It stores the <em>hash of each package's mtree</em>, not per-file hashes — those already exist in the mtree. File tampering is caught by the mtree; mtree tampering, the attacker's next move, is caught by the baseline. ~1409 records rather than ~325k.</p>
+      <p><strong>Manifest</strong> — canonically serialised, sorted keys, no floats, fixed field order; sloppy serialisation makes signatures worthless and is the easiest thing here to get wrong. Contents: package identity + <code>sha256(mtree)</code> + <code>sha256(install)</code>; provenance snapshot digests; surfaces inventory including all SUID/SGID; adjudications; and metadata recording tool version, host, root, active bundle version, <strong>and the earliest <code>pacman.log</code> timestamp</strong> so later truncation is itself detectable.</p>
+      <h3>Chain and replication</h3>
+      <p>A git repo of signed entries with <code>prev_hash</code>, each carrying a <strong>detached ed25519 signature over the canonical JSON</strong> — deliberately not git commit signing, which would couple the tool to the user's git config. Keys use the <strong>OpenSSH ed25519 format</strong>, so <code>ssh-keygen</code>, <code>ssh-agent</code>, and <strong>FIDO2 <code>sk-ssh-ed25519</code> keys</strong> all work — INV-7 satisfied by hardware rather than discipline.</p>
+      <div class="callout warn">
+        <div class="ico">▲</div>
+        <div><p><strong>The tamper-evidence claim must be stated precisely, because the reviewed design overclaimed it.</strong> "An attacker cannot rewrite history that exists on a remote" is true <em>only if the remote forbids it</em>. Push credentials necessarily live on the monitored machine, so a root attacker can force-push or delete. Therefore: an append-restricted deploy key, <strong>force-push and branch protection are load-bearing and must be documented as such</strong>, a second replication target is recommended, and the chain records <code>pushed: bool</code> with <strong>every run reporting unpushed entries prominently</strong> — an unpushed entry has none of the property the argument rests on.</p></div>
+      </div>
+      <h3>Bootstrap</h3>
+      <p>A first baseline asserts nothing about cleanliness. <code>baseline init</code> therefore runs a full scan and <strong>refuses to write while unresolved critical findings exist</strong>; each must be adjudicated with a recorded reason, converting an invisible assumption into a dated, signed, auditable one. It <strong>hard-refuses unprivileged</strong> (§11) and refuses a <code>triage</code>-tier scan as its basis (§13).</p>
+      <h3>Drift classification</h3>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Bucket</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>Corroborated</td><td>Changed, and a matching <code>[ALPM]</code> transaction exists. Normal upgrade.</td></tr>
+          <tr><td>Adjudicated</td><td>Matches a recorded suppression. Silent.</td></tr>
+          <tr><td><strong>Unexplained</strong></td><td>Changed with no matching transaction → critical. A package that changed without pacman changing it is the cleanest signal the system produces.</td></tr>
+          <tr><td>Log-coverage gap</td><td>Change falls outside the log's span (rotation). <strong>Reduced severity, reported as a gap</strong> — not critical. Otherwise a rotated log turns a clean system into a wall of criticals.</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section id="bundle">
+      <h2>9 · Indicator bundle</h2>
+      <div class="callout note">
+        <div class="ico">✎</div>
+        <div><p><strong>Named "indicator bundle", not "rules", deliberately.</strong> All non-trivial detection logic is compiled: ownership resolution, host comparison, tombstone corroboration, correlation, symlink handling. A network-delivered bundle can carry only <em>data</em> — host lists, patterns, digests, thresholds, known-bad names, the rebuild-repo list. That is what threat intel <em>is</em>, but calling it a rules engine would promise updatable detection capability the design cannot deliver. <strong>New detection logic ships with the binary.</strong></p></div>
+      </div>
+      <p><strong>Key hierarchy</strong> — TUF-lite, fully INV-1 compatible:</p>
+      <ul>
+        <li>Embed an offline <strong>root key set</strong> (2-of-3, hardware-held). Root signs <em>only</em> a delegation document.</li>
+        <li>The delegation names short-lived (30–90 day) online bundle-signing keys with <code>valid_until</code>. Rotating the online key ships no new binary.</li>
+        <li>Bundles carry <code>spec_version</code>, a <strong>monotonic <code>bundle_version</code></strong>, <code>valid_until</code>, and the digest of the prior bundle.</li>
+        <li><strong>Anti-rollback floor lives in root-only state</strong>, never the cache. A bundle below the floor is refused.</li>
+        <li>Signature verified <strong>over raw bytes before parsing</strong>. Size cap, timeout, no cross-host redirects.</li>
+        <li><strong>Bundles cannot introduce keys.</strong> Root rotation is out-of-band; a binary whose root set is retired <strong>fails closed</strong> with an actionable upgrade message.</li>
+        <li><strong>On expiry, degrade to coverage-incomplete — never report clean.</strong> Report the active indicator count so a suspicious drop toward zero is visible; a signed bundle that <em>removes</em> detections is an attack.</li>
+        <li>Never auto-update. <code>--version</code> prints root fingerprints, delegation expiry and cached bundle version.</li>
+      </ul>
+      <p>A separate <code>RULES-CHANGELOG</code> tracks bundle versions with a rationale per change, and every finding records the bundle version that produced it.</p>
+    </section>
+
+    <section id="gate">
+      <h2>10 · Pre-install gate</h2>
+      <div class="callout danger">
+        <div class="ico">◆</div>
+        <div><p><strong>A pacman hook cannot be the gate.</strong> By the time pacman sees a built package, <code>makepkg</code> has already run <code>prepare()</code>, <code>build()</code> and <code>package()</code> as the invoking user — the build-time-fetch vector has already fired, and the hook cannot see a PKGBUILD at all.</p></div>
+      </div>
+      <p><strong><code>arch-drift install &lt;pkg&gt;</code> is the gate.</strong> It clones the AUR repo itself, resolves the <strong>full AUR dependency closure</strong> and reviews every new PKGBUILD in it (the attacker's move is a benign package pulling a malicious dep), prints the tree, snapshots provenance (§7), and only then hands the vetted directory to the configured helper.</p>
+      <p>Approval keys on <strong><code>pkgbase</code> + PKGBUILD digest</strong>, so it is silent when nothing changed and re-prompts on a recipe change. For VCS packages — whose PKGBUILD is stable while the source moves every build — it shows the <strong>upstream commit range</strong> since the recorded snapshot, so the operator reviews the delta rather than an unchanged recipe. Review output leads with indicator hits and a <em>diff against the last approved PKGBUILD</em>, not the whole file; scriptlets are visually flagged, being rare (7 of 39).</p>
+      <p><strong>Hook integration</strong>, two roles, neither of them gating the build:</p>
+      <ul>
+        <li><code>PostTransaction</code> — provenance capture (§7). The hook's genuine strength.</li>
+        <li><code>PreTransaction</code> — a narrow, time-budgeted provenance check on incoming targets (<code>.BUILDINFO</code>, scriptlet, approval status). <strong>Shipped inert and warn-only</strong>: <code>AbortOnFail</code> is required for a non-zero exit to abort anything and is opt-in by one line. <code>Exec</code> must route through a path that always exists and no-op when the binary is absent, so removing arch-drift cannot brick pacman. Note hooks receive matched <em>trigger targets</em> — package names for <code>Type=Package</code>, paths for <code>Type=Path</code>.</li>
+      </ul>
+      <p>The enabled hook is a <strong>symlink into a package-owned path</strong>, and the ownership oracle resolves symlinks — so arch-drift does not flag its own hook, and does so without a name-based exemption an attacker could imitate.</p>
+    </section>
+
+    <section id="config">
+      <h2>11 · Config, state, and process model</h2>
+      <p>Resolution order: <code>--flag</code> &gt; environment &gt; system config &gt; user config &gt; compiled defaults.</p>
+      <div class="callout danger">
+        <div class="ico">◆</div>
+        <div><p><strong>When <code>euid == 0</code>, never read user config or user cache</strong>, and ignore <code>$HOME</code> and <code>SUDO_USER</code> entirely for trust-bearing paths. Otherwise an unprivileged local attacker controls what a root-privileged security tool trusts — bundle path, cache location, public key. Refuse any config or key file that is group- or world-writable or not root-owned, and say why. A user config may tighten but <strong>never loosen</strong> system settings.</p></div>
+      </div>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Thing</th><th>Root context</th><th>User context</th></tr></thead>
+        <tbody>
+          <tr><td>Config</td><td><code>/etc/arch-drift/config.toml</code> (in <code>backup=()</code>)</td><td>XDG config dir</td></tr>
+          <tr><td>Cached bundle</td><td><code>/var/cache/arch-drift/</code></td><td>XDG cache dir</td></tr>
+          <tr><td>State, incl. anti-rollback floor</td><td><code>/var/lib/arch-drift/</code>, <code>0700</code></td><td>XDG state dir</td></tr>
+          <tr><td>Baseline working copy, snapshots, reports</td><td><code>/var/lib/arch-drift/</code></td><td>XDG data dir</td></tr>
+          <tr><td>Offline-root mode</td><td colspan="2">All output to <code>--report-dir</code>; nothing written under the target (INV-5)</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Directories are created via <code>tmpfiles.d</code>, not <code>mkdir</code> in <code>package()</code>. Ancestors are verified non-world-writable at startup.</p>
+      <p><strong>Privilege policy.</strong> Measured: 25 package-owned files are unreadable and 229 directories unlistable unprivileged — so under INV-3 an unprivileged scan could never exit 0, and users would learn to ignore the exit code. Therefore <code>scan</code> requires root and refuses unprivileged unless <code>--allow-degraded</code> is passed, which stamps the report and forces the incomplete exit. <code>baseline</code> hard-refuses unprivileged: a baseline blind to 229 directories blesses whatever hides in them forever.</p>
+      <h3>11.1 Staged privilege — the privileged phase contains no parsers</h3>
+      <p>The tool's job is parsing attacker-controlled input while needing to read root-only files. Those two requirements are separated in time rather than accepted together.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Phase</th><th>Privilege</th><th>Does</th><th>Must not do</th></tr></thead>
+        <tbody>
+          <tr><td>Startup</td><td>root (via sudo/systemd)</td><td>Sanitise <code>LD_*</code>/<code>GLIBC_TUNABLES</code> and re-exec; reduce to <strong><code>CAP_DAC_READ_SEARCH</code></strong> only; set <code>PR_SET_NO_NEW_PRIVS</code></td><td>Parse anything</td></tr>
+          <tr><td><strong>1 · Collect</strong></td><td><code>CAP_DAC_READ_SEARCH</code></td><td>Directory walk; confined opens; <code>fstat</code>; <strong>sha256 streaming</strong>; buffer raw metadata bytes</td><td>Decompress, tokenise, parse, or touch the network</td></tr>
+          <tr><td>Transition</td><td>—</td><td><strong>Drop all capabilities irrevocably</strong> (clear the permitted set, so nothing can be regained)</td><td>—</td></tr>
+          <tr><td><strong>2 · Analyse</strong></td><td>none</td><td>gzip decompression, mtree parsing, bash tokenising, unit-file parsing, correlation, reporting, all network</td><td>Read anything not already buffered</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Feasibility is measured, not assumed: phase 1 buffers <strong>~41 MB</strong> on the reference system — 16.2 MB compressed mtree, 24.1 MB <code>files</code>, 0.7 MB <code>desc</code>, 0.4 MB surface files. Decompression to 62 MB happens after the drop. Hashing 19.8 GiB needs no buffering, only a streaming digest, and sha256 over a byte stream is negligible attack surface. Phase 1 therefore contains syscalls and a hash function, nothing else — <strong>a parser bug is an unprivileged bug.</strong></p>
+      <div class="callout danger">
+        <div class="ico">◆</div>
+        <div><p><strong>No file capability on the binary.</strong> Arch precedent exists — <code>btop</code> ships <code>cap_dac_read_search,cap_perfmon=ep</code> — but it does not transfer: <code>explain</code> surfaces matched bytes, so a world-executable <code>cap_dac_read_search</code> binary would be an arbitrary-file-read oracle for <code>/etc/shadow</code>. Privilege arrives per-invocation via sudo or a systemd unit, never from the filesystem.</p></div>
+      </div>
+
+      <h3>11.2 TOCTOU-safe I/O — open then fstat, never stat then open</h3>
+      <p><code>stat</code>-then-<code>open</code> resolves the path twice, and the window between resolutions is the vulnerability. The operation is inverted:</p>
+      <ul>
+        <li>Open once with <code>O_NOFOLLOW|O_NONBLOCK</code>, <code>fstat</code> <em>that fd</em>, verify <code>S_ISREG</code>, and hash from the same fd. One resolution, no window.</li>
+        <li>Every open is confined via <code>os.Root</code> (Go 1.24+; Arch ships 1.26.5) so no path component can be swapped for a symlink escaping the tree. This matters most under <code>--offline-root</code>, where the whole tree is attacker-controlled.</li>
+        <li><code>O_NONBLOCK</code> plus the <code>S_ISREG</code> check is not incidental: a packaged path replaced by a <strong>fifo would hang the scan</strong>, and one aimed at <code>/dev/zero</code> would stream forever. Both are denial-of-tool with no panic involved.</li>
+        <li><strong>Re-<code>fstat</code> the same fd after hashing.</strong> If <code>st_ino</code>/<code>st_dev</code>/<code>st_size</code>/<code>st_mtime</code> moved, emit <em>mutated during scan</em> — a signal, not a nuisance.</li>
+        <li><strong>The <code>triage</code> prefilter is itself the TOCTOU pattern</strong> (stat, decide, maybe hash), so its stat must come from the fd it would hash. That costs an <code>open</code> per file even when the hash is skipped — the same order as the measured 0.24 s stat sweep, so still sub-second, and it deletes the race rather than documenting it.</li>
+      </ul>
+
+      <h3>11.3 Panic and hang containment</h3>
+      <ul>
+        <li><strong>Per-subject recovery boundary.</strong> Each package and each surface file is analysed inside a unit with a deferred recover; a panic becomes a <em>could-not-analyse</em> coverage gap under INV-9, attributed to that subject. Without this, one crafted package aborts the scan and thereby hides every other package — which is the actual attack.</li>
+        <li><strong>Every worker goroutine needs its own deferred recover</strong> at its top-level function. In Go a goroutine panic cannot be recovered by its parent, so without this the per-subject boundary is decorative.</li>
+        <li>A recovered panic is <strong>never silent</strong>: it emits the coverage gap <em>and</em> auto-writes a reproducer bundle (§12), because a panic on attacker-controlled input is simultaneously a bug and a possible exploitation attempt.</li>
+        <li><strong>Hangs outrank panics, because <code>recover</code> does nothing for them.</strong> Bound everything: per-subject context timeout, decompression ratio and absolute caps, max mtree entries, max tokeniser recursion depth and token count, <code>GOMEMLIMIT</code> with bounded in-flight work.</li>
+        <li>Any recovered panic or timeout forces coverage-incomplete — exit <code>3</code>, never <code>0</code>.</li>
+      </ul>
+
+      <h3>11.4 Concurrency</h3>
+      <p><strong>Concurrency.</strong> An advisory lock on the state dir; and pacman's <code>db.lck</code> is detected — <code>scan</code> warns and records it, <code>baseline append</code> refuses, since reading a half-written DB during a transaction produces spurious findings that would otherwise get <em>signed</em>. All state writes are temp + fsync + atomic rename; a payload without a valid signature reads as absent, not as corruption.</p>
+    </section>
+
+    <section id="findings">
+      <h2>12 · Findings &amp; adjudication</h2>
+      <p><strong>Fingerprint</strong> = <code>sha256(rule_id ‖ subject_kind ‖ subject_identity ‖ scope_class)</code>, where <code>subject_identity</code> is deliberately version-independent — package <em>name</em>, not name-version; the <em>path</em>, not its digest. With ~28 transactions/day on the reference system, a version-bearing fingerprint would re-alert everything on every upgrade.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Scope</th><th>Behaviour</th></tr></thead>
+        <tbody>
+          <tr><td><code>pin</code></td><td>This exact evidence digest; auto-expires on any change and reappears once.</td></tr>
+          <tr><td><code>subject</code></td><td>This rule × this package/path; survives upgrades.</td></tr>
+          <tr><td><code>rule</code></td><td>This rule everywhere; requires <code>--force</code> and is echoed in every subsequent run header.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Indicators carry a <strong><code>fingerprint_epoch</code></strong>: a change to matching <em>semantics</em> bumps it, and suppressions bound to a prior epoch surface as <em>stale — re-adjudicate</em> rather than silently persisting or silently vanishing. Severity or wording changes do not bump it. Adjudications require a reason and expire (default 180 days); dead suppressions that match nothing are reported for removal.</p>
+      <p><strong>Three weights, not two</strong> — the reviewed design had no middle ground, so users would over-suppress or ignore output:</p>
+      <ul>
+        <li><code>triage ack</code> / <code>snooze</code> / <code>note</code> — lightweight, local, unsigned, expiring.</li>
+        <li>Signed adjudications — reserved for <code>baseline init</code>, where they belong.</li>
+        <li>Reports persisted unconditionally, with <strong><code>scan --since-last</code></strong> printing only new and resolved findings. This is the command people run daily and it needs no keys at all.</li>
+      </ul>
+      <p><code>explain</code> gives the rationale, the matched pattern with byte offsets, <strong>the rules that did <em>not</em> match on the same subject</strong> (missed detections are debugged from non-matches), what the finding cannot prove (INV-6), copy-pasteable investigation commands, and a clearly separated "if this is real" paragraph. <code>bundle &lt;fingerprint&gt;</code> emits a redacted, self-contained fixture root reproducing the finding — which costs almost nothing because offline-root already exists, and makes every false-positive report a test case.</p>
+    </section>
+
+    <section id="tiers">
+      <h2>13 · Performance tiers</h2>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Tier</th><th>Scope</th><th>Reference cost</th><th>Default</th></tr></thead>
+        <tbody>
+          <tr><td><code>meta</code></td><td>DB/mtree parse, provenance, surfaces; no content hashing</td><td>~0.35 s</td><td>hook use</td></tr>
+          <tr><td><code>triage</code></td><td>meta + stat prefilter, hash only mismatches (322,594 → 678 candidates)</td><td>~0.6 s</td><td>no</td></tr>
+          <tr><td><code>full</code></td><td>meta + hash every owned file (325,466 files, 19.8 GiB)</td><td>1.8 s warm / 32 s cold; 60–120 s without SHA-NI</td><td><strong>yes</strong></td></tr>
+          <tr><td><code>paranoid</code></td><td>full + unowned walk of all watched trees + full SUID sweep</td><td>+~2 s</td><td>on demand</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="callout warn">
+        <div class="ico">▲</div>
+        <div><p><strong>mtime is attacker-controllable</strong> (<code>touch -r</code>), so <code>triage</code> is reassurance, not verification. Therefore: <code>full</code> is the default; <code>triage</code> <strong>unconditionally</strong> hashes the security-relevant subset regardless of stat — all AUR-owned files, all SUID/SGID, and everything under the systemd, hook, <code>profile.d</code> and preload paths; its output carries a visible <em>mtime-assisted</em> marker; and it is <strong>never accepted as the basis for <code>baseline init</code></strong>.</p></div>
+      </div>
+      <p>Parallelism is a config knob defaulting to <code>min(NumCPU, 8)</code> — measured returns diminish sharply past 8, and a high value on a laptop thrashes the page cache.</p>
+    </section>
+
+    <section id="cli">
+      <h2>14 · CLI &amp; exit codes</h2>
+      <pre><code>arch-drift scan       [--offline-root P] [--tier T] [--since-last] [--pkg N]... [--json] [--allow-degraded]
+arch-drift review     &lt;dir|pkgbase&gt;         # analyse, never build
+arch-drift install    &lt;pkg&gt;                 # fetch → closure review → prompt → helper
+arch-drift snapshot   &lt;pkgbase&gt;             # capture ephemeral provenance
+arch-drift baseline   init | append | verify | show
+arch-drift diff       [--since ENTRY]
+arch-drift update     [--check]
+arch-drift explain    &lt;finding-id&gt; | --explain-finding &lt;fingerprint&gt;
+arch-drift triage     ack | snooze | note &lt;fingerprint&gt;
+arch-drift adjudicate &lt;fingerprint&gt; --reason ... [--scope pin|subject|rule]
+arch-drift bundle     &lt;fingerprint&gt;         # redacted reproducer = fixture root
+arch-drift doctor                           # resolved config w/ per-key provenance</code></pre>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>0</code></td><td>No findings at/above threshold <strong>and</strong> coverage complete</td></tr>
+          <tr><td><code>1</code></td><td>Findings at/above threshold</td></tr>
+          <tr><td><code>2</code></td><td>Usage / config / verification error</td></tr>
+          <tr><td><code>3</code></td><td>No findings, but <strong>coverage incomplete</strong> — including analysis gaps (INV-9) and unavailable evidence (INV-10)</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Codes <code>1</code> and <code>3</code> are contractual, and both render as <em>failed</em> under systemd — so the shipped timer units pair with an <code>OnFailure=</code> notifier rather than papering over the code with <code>SuccessExitStatus=</code>. A timer that silently marks a unit failed is a security tool nobody hears.</p>
+      <p>Output is quiet by default: one header line with counts <em>and coverage</em>, findings grouped by correlation cluster, severity as a text token rather than colour alone, and <code>--json</code> on a versioned schema whose breaking changes are reserved for major releases.</p>
+    </section>
+
+    <section id="testing">
+      <h2>15 · Testing</h2>
+      <p>Eight suites. Suites 2, 3 and 7 are what decide whether the tool is trustworthy.</p>
+      <ol>
+        <li><strong>Collector units</strong> against synthetic fixture roots — fake local DB with real gzipped mtrees, fake unit dirs, fake caches. No root, no containers, no VMs.</li>
+        <li><strong>Incident-shaped acceptance fixtures</strong> reproducing the CHAOS RAT and <code>acroread</code> <em>structural patterns</em>; must yield a correlated critical cluster. <strong>Inert markers only</strong> — no working payloads, no real C2 addresses.</li>
+        <li><strong>False-positive corpus — release gate (INV-8), and it includes system state.</strong> Three fixtures: a stock install root, a cruft-laden root (pip, <code>npm -g</code>, manual <code>/usr/local</code>, hand-written units), and the pinned PKGBUILD corpus. All must yield zero criticals. The PKGBUILD corpus is pinned by <code>pkgbase</code> + commit sha + content digest and asserted over <strong>token-stream digests rather than stored source text</strong> — which sidesteps redistributing unlicensed PKGBUILDs entirely and keeps diffs reviewable.</li>
+        <li><strong>Canonicalisation and signing properties</strong> — sign, flip any single byte, verification must fail; reordering map keys must <em>not</em> change the digest. Chain tests: truncated, forked, replayed, wrong <code>prev_hash</code> all rejected.</li>
+        <li><strong>Coverage honesty</strong> — asserts the measured reality: an unprivileged scan of a stock root yields a stable gap count and the incomplete exit, never <code>0</code>.</li>
+        <li><strong>Offline-root equivalence</strong> — identical findings modulo the four deltas enumerated in §3.</li>
+        <li><strong>mtree conformance</strong> — the full vis(3) escape set, <code>/set</code>/<code>/unset</code> inheritance, float timestamps, <code>./.</code> metadata entries, <code>md5digest</code>, symlinks, hardlinks, missing <code>#mtree</code> header, truncated gzip, decompression-ratio caps, and traversal rejection. Cross-validated against <code>pacman -Qkk</code> on a fixture root.</li>
+        <li><strong>Process-model assertions</strong> (§11.1–11.3), because these mechanisms fail silently when broken: after the transition, an attempt to read a root-only file <strong>must fail</strong> — proving the drop is real and irrevocable; the built binary has no <code>DT_NEEDED</code>/<code>PT_INTERP</code>; a fixture whose packaged path is replaced by a <strong>fifo</strong> and by a <strong>symlink escaping the root</strong> must be refused rather than hanging or following; a file mutated between hash and re-<code>fstat</code> must yield <em>mutated during scan</em>; and a deliberately panicking subject must produce a coverage gap with the rest of the scan completing plus exit <code>3</code> — including when the panic originates in a worker goroutine.</li>
+        <li><strong>Parser robustness fuzzing</strong> — several thousand real PKGBUILD/<code>.SRCINFO</code> pairs asserting <em>panic-free and hang-free</em>, not correctness. The input is attacker-controlled, which is INV-2's own justification. Filesystem edge cases belong here too: hardlinks, sparse files (which defeat a size prefilter), immutable files, xattrs and ACLs (<strong>not covered by mtree at all</strong> — either checked or declared a non-goal), btrfs subvolumes and <code>--one-file-system</code> truncation, overlayfs, and mid-scan mutation detected by re-stat after hashing.</li>
+      </ol>
+      <p>Network access sits behind an interface with recorded fixtures; no test touches the network. A <code>-tags=live</code> smoke test runs against the real system, outside CI.</p>
+    </section>
+
+    <section id="packaging">
+      <h2>16 · Packaging &amp; distribution</h2>
+      <h3>Build</h3>
+      <p><code>CGO_ENABLED=0</code>, static, <code>-trimpath</code>, <code>-mod=vendor</code>, <code>-buildvcs=false</code>, <code>options=('!strip')</code>, one merged <code>-ldflags</code>. This is a <strong>deliberate documented deviation</strong> from Arch's Go guidelines, which mandate <code>-buildmode=pie -linkmode=external</code> and therefore CGO and dynamic linking.</p>
+      <p><strong>Dependency policy (D-1, D-3).</strong> <code>golang.org/x/sys</code> is the project's only sanctioned third-party dependency, entering at P1-B for <code>capset</code>/<code>prctl</code> — the privilege boundary is the wrong place to hand-roll syscall structs. Git history is read by parsing objects with the standard library rather than executing <code>git</code> against an attacker-controlled repository. All dependencies are vendored, so <code>build()</code> performs no network fetch and the project's own PKGBUILD passes the project's own rules.</p>
+      <div class="callout danger">
+        <div class="ico">◆</div>
+        <div><p>The deviation is load-bearing: a dynamically-linked <code>arch-drift</code> can be subverted by <code>LD_PRELOAD</code> or <code>/etc/ld.so.preload</code> <em>before it can report on <code>/etc/ld.so.preload</code></em> — a check this tool rates critical. Mitigations: a PKGBUILD comment stating the reason, a test asserting no <code>DT_NEEDED</code>/<code>PT_INTERP</code> in the built binary, and sanitising <code>LD_*</code>/<code>GLIBC_TUNABLES</code> with a re-exec at startup. Namcap warnings are suppressed explicitly, never silenced. Note <code>GOFLAGS</code> <code>-ldflags</code> is <em>replaced</em>, not merged, by a command-line <code>-ldflags</code> — naïve version injection silently changes the link mode.</p></div>
+      </div>
+      <h3>Reproducibility is the answer to the bootstrapping paradox</h3>
+      <p>A tool warning about unvetted AUR packages would itself arrive as one, and its AUR account is the highest-value takeover target available. Reproducible builds convert "trust me" into "check me", which is the only credible position here:</p>
+      <ul>
+        <li>Pinned Go toolchain (<code>toolchain</code> in <code>go.mod</code>, <code>GOTOOLCHAIN=local</code>), vendored deps, <code>SOURCE_DATE_EPOCH</code> — <strong>never an injected build date</strong>; inject version and commit only.</li>
+        <li><strong><code>strip</code> is on by default</strong> and runs <em>after</em> the build, so the packaged binary would not be the one signed. <strong>Resolved (D-2): <code>options=('!strip')</code></strong> — reproducibility is defined over the binary itself, so <code>verify-self</code> works and a user can check a published hash without rebuilding a package.</li>
+        <li>CI builds on two runners and diffs; publish <code>SHA256SUMS</code> and a <code>verify-reproducible</code> target.</li>
+        <li><strong>A second OpenPGP identity for release artifacts</strong>, because <code>makepkg</code> only understands OpenPGP (<code>validpgpkeys</code>) — ed25519 alone gives AUR users no verification path. Fingerprint published in several independent places.</li>
+        <li>Publish the canonical PKGBUILD upstream and have <strong>scheduled CI diff the live AUR copy against it</strong> — self-defence against takeover of your own package.</li>
+        <li><strong>Register the plain, <code>-bin</code> and <code>-git</code> AUR names on day one</strong>, or someone else supplies the "convenient binary build" of your security tool.</li>
+      </ul>
+      <h3>Packages and files</h3>
+      <p>The <strong>source package is canonical</strong> — a <code>-bin</code> asks users to trust a build machine, which is the trust this tool exists to question; if shipped, it carries <code>options=('!strip')</code> so its hash matches the signed artifact. Release tarballs are <code>git archive</code> assets, never GitHub's auto-generated archives (whose checksums are not contractually stable, and which contain LFS pointers rather than content). <strong>arch-drift's own PKGBUILD must pass arch-drift's own indicators as an automated release gate</strong> — note that without vendored deps, <code>build()</code> performs a network fetch and trips its own critical rule.</p>
+      <p>Installed: man pages (authored in scdoc; <code>zipman</code> is on by default so install uncompressed), shell completions for bash/zsh/fish with a test asserting no rot, the inert hook, timer units with <code>PrivateNetwork=yes</code> on the scan unit and network only on the update unit, <code>tmpfiles.d</code> entries, SPDX <code>license=()</code>. Helper support is <code>optdepends</code> only — never a hard dependency. <code>arch=('x86_64' 'aarch64')</code>, cross-compiled in CI, with a published supported-platform matrix stating the derivative caveats.</p>
+      <p><strong><code>SECURITY.md</code> is two-sided.</strong> Inward: private reporting, coordinated disclosure, and an in-scope list that <em>explicitly names false negatives</em> — a false clean, a verification bypass, an evasion — as vulnerabilities, because saying so invites the reports the project needs. Outward: <code>docs/reporting-malware.md</code> for what an operator does when a finding is real, linked from critical <code>explain</code> output. Plus a privacy statement: <code>update</code> and AUR queries disclose IP, version and the set of installed foreign package names; honour proxies, offer <code>--no-network</code>, never auto-update, no telemetry.</p>
+      <p>CI hygiene, non-negotiable for this project: <code>go vet</code>, <code>staticcheck</code>, <code>govulncheck</code>, <code>go mod verify</code>, <code>gosec</code>, <code>namcap</code> on the built package, a clean-chroot build from the tagged tarball before any AUR push, <code>.SRCINFO</code> asserted in sync, and <strong>every CI action pinned by commit SHA, not tag</strong> — a supply-chain tool consuming mutable refs would be called out, correctly.</p>
+    </section>
+
+    <section id="sequence">
+      <h2>17 · Delivery sequence</h2>
+      <p>All four subsystems ship. The sequence is dependency-ordered, and the baseline carries an explicit gate so it cannot reach a user half-built.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Phase</th><th>Delivers</th><th>Gate to ship</th></tr></thead>
+        <tbody>
+          <tr><td><strong>P1 — Sweep</strong></td><td><code>scan</code> (provenance + integrity + surfaces), <code>explain</code>, <code>doctor</code>, <code>--since-last</code>, report persistence, <code>triage</code>. Indicators compiled in.</td><td>Suites 1–3, 5–8. Zero criticals on all three FP fixtures.</td></tr>
+          <tr><td><strong>P2 — Gate &amp; capture</strong></td><td><code>review</code>, <code>install</code>, <code>snapshot</code>, <code>PostTransaction</code> hook, inert <code>PreTransaction</code> hook.</td><td>Dependency-closure review; <code>pkgbase</code> keying; VCS commit-range flow; hook orphan-safety proven.</td></tr>
+          <tr><td><strong>P3 — Packaging</strong></td><td>PKGBUILD, reproducible build, release signing, man pages, completions, units, <code>SECURITY.md</code>.</td><td>Two-runner reproducibility diff; own PKGBUILD passes own indicators; clean-chroot build.</td></tr>
+          <tr><td><strong>P4 — Baseline</strong></td><td><code>baseline</code>, <code>diff</code>, signed chain, replication reporting, <code>adjudicate</code>.</td><td><strong>Hard gate — not enabled in a release until all of:</strong> suite 4 green; fingerprint epochs implemented; bootstrap refusal working; unpushed-entry reporting working; force-push protection documented; <code>db.lck</code> refusal working. An untrustworthy chain manufactures confidence, so a partial P4 must not ship at all.</td></tr>
+          <tr><td><strong>P5 — Indicator bundle</strong></td><td><code>update</code>, root key set, delegation, version floor, expiry.</td><td>Rollback, freeze, expired-bundle, empty-bundle and retired-root cases all fail closed. Key-compromise runbook written <em>before</em> first release.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>P1 is independently useful and answers the project's first question on its own. P2 is what makes provenance reliable going forward (§7), so it precedes the baseline that would otherwise record incomplete evidence.</p>
+    </section>
+
+    <section id="limits">
+      <h2>18 · Known limits</h2>
+      <p>Stated in tool output, not only here (INV-6).</p>
+      <ul>
+        <li><strong>A malicious build whose payload lives only in its own package files is undetectable by integrity or surfaces checks.</strong> The mtree came from that build; the hash <em>is</em> the malware's. Only provenance can reach it. This is the design's central blind spot and §6 spells out how ordinary it is to exploit.</li>
+        <li><strong>An attacker with root before the first baseline wins</strong> — everything blessed is assumed-good. Mitigated only by the bootstrap refusal recording what was waved through.</li>
+        <li><strong>Upstream source malice is out of scope.</strong> A clean PKGBUILD fetching a genuinely backdoored release passes.</li>
+        <li><strong>A trigger-activated payload that has not yet acted leaves no trace to find.</strong></li>
+        <li><strong><code>%VALIDATION%</code>, "foreign", and cache-derived provenance are all config-dependent.</strong> A local repo of self-built AUR packages yields zero foreign packages while running entirely unreviewed code; <code>doctor</code> warns when non-official repos are configured.</li>
+        <li><strong>Static analysis cannot resolve dynamically constructed code</strong> — INV-9 makes that visible rather than silently clean, but it does not make it analysable.</li>
+        <li><strong>xattrs and ACLs are not covered by mtree</strong>, so an ACL-granted read on a root-owned binary is invisible unless explicitly checked.</li>
+        <li><strong>The staged privilege drop protects the parsers, not the collector.</strong> A bug in phase 1 — the directory walk, the confined opens, the digest loop — still runs with <code>CAP_DAC_READ_SEARCH</code>. That surface is deliberately tiny (syscalls plus a hash function, no parsing) but it is not zero, and nothing here defends against a kernel bug.</li>
+        <li><strong>Phase 2 cannot re-read.</strong> Anything the collector did not buffer is unavailable to analysis for that run, by construction. A future check needing evidence phase 1 doesn't gather requires changing the collector, not just the analyser.</li>
+      </ul>
+    </section>
+
+    <hr>
+    <p style="color:var(--muted);font-size:.9rem">Draft for review. Supersedes the design assessed in <code>docs/design-review.html</code>; every correction recorded there is folded in. The three previously-open items — TOCTOU, panic-as-denial-of-tool, and the privilege model — are resolved in §11.1–11.3. No open items remain.</p>
+  </main>
+</div>
+<script>
+  (function () {
+    var links = [].slice.call(document.querySelectorAll('#toc a'));
+    var map = {};
+    links.forEach(function (a) { var el = document.getElementById(a.getAttribute('href').slice(1)); if (el) map[a.getAttribute('href').slice(1)] = a; });
+    var obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          links.forEach(function (l) { l.classList.remove('active'); });
+          if (map[e.target.id]) map[e.target.id].classList.add('active');
+        }
+      });
+    }, { rootMargin: '-10% 0px -80% 0px' });
+    document.querySelectorAll('main section[id]').forEach(function (s) { obs.observe(s); });
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arch-drift — full delivery plan</title>
+<style>
+  :root{--bg:#fff;--fg:#1a1d21;--muted:#5b6570;--border:#e4e7ec;--card:#f7f8fa;--accent:#2563eb;
+    --code-bg:#f4f5f7;--code-fg:#1a1d21;--note:#2563eb;--tip:#059669;--warn:#d97706;--danger:#dc2626;--success:#059669;
+    --shadow:0 1px 3px rgba(16,24,40,.08);--maxw:66rem;}
+  @media (prefers-color-scheme:dark){:root{--bg:#0f1216;--fg:#e6e8eb;--muted:#9aa4b0;--border:#232a33;--card:#161b22;
+    --accent:#6ea8ff;--code-bg:#161b22;--code-fg:#e6e8eb;--note:#6ea8ff;--tip:#34d399;--warn:#fbbf24;--danger:#f87171;--success:#34d399;
+    --shadow:0 1px 3px rgba(0,0,0,.4);}}
+  :root[data-theme="light"]{--bg:#fff;--fg:#1a1d21;--muted:#5b6570;--border:#e4e7ec;--card:#f7f8fa;--accent:#2563eb;--code-bg:#f4f5f7;--code-fg:#1a1d21;--note:#2563eb;--tip:#059669;--warn:#d97706;--danger:#dc2626;--success:#059669;}
+  :root[data-theme="dark"]{--bg:#0f1216;--fg:#e6e8eb;--muted:#9aa4b0;--border:#232a33;--card:#161b22;--accent:#6ea8ff;--code-bg:#161b22;--code-fg:#e6e8eb;--note:#6ea8ff;--tip:#34d399;--warn:#fbbf24;--danger:#f87171;--success:#34d399;}
+  *{box-sizing:border-box;} html{scroll-behavior:smooth;}
+  body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;}
+  .layout{display:grid;grid-template-columns:15rem minmax(0,1fr);max-width:86rem;margin:0 auto;}
+  aside{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;padding:2rem 1.15rem;border-right:1px solid var(--border);font-size:.88rem;}
+  aside .toc-title{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:.75rem;}
+  aside nav a{display:block;color:var(--muted);text-decoration:none;padding:.26rem 0;border-left:2px solid transparent;padding-left:.6rem;}
+  aside nav a:hover{color:var(--fg);} aside nav a.active{color:var(--accent);border-left-color:var(--accent);}
+  main{padding:2.5rem clamp(1.25rem,4vw,3.5rem);max-width:var(--maxw);}
+  .doc-title{font-size:2rem;line-height:1.15;margin:0 0 .4rem;letter-spacing:-.02em;}
+  .doc-subtitle{font-size:1.05rem;color:var(--muted);margin:0 0 1rem;}
+  .doc-meta{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:2.5rem;}
+  .chip{font-size:.78rem;padding:.22rem .6rem;border-radius:999px;background:var(--card);border:1px solid var(--border);color:var(--muted);}
+  h2{font-size:1.4rem;margin:2.6rem 0 .9rem;letter-spacing:-.01em;scroll-margin-top:1rem;}
+  h3{font-size:1.05rem;margin:1.5rem 0 .5rem;scroll-margin-top:1rem;}
+  a{color:var(--accent);}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.86em;background:var(--code-bg);padding:.12em .38em;border-radius:4px;}
+  pre{background:var(--code-bg);color:var(--code-fg);padding:.9rem 1.1rem;border-radius:8px;overflow-x:auto;border:1px solid var(--border);line-height:1.5;}
+  pre code{background:none;padding:0;font-size:.83rem;}
+  .table-wrap{overflow-x:auto;margin:1.1rem 0;}
+  table{border-collapse:collapse;width:100%;font-size:.89rem;}
+  th,td{text-align:left;padding:.52rem .75rem;border-bottom:1px solid var(--border);vertical-align:top;}
+  thead th{background:var(--card);font-weight:600;border-bottom:2px solid var(--border);}
+  tbody tr:hover{background:color-mix(in srgb,var(--accent) 5%,transparent);}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .callout{display:grid;grid-template-columns:1.4rem 1fr;gap:.55rem;margin:1.1rem 0;padding:.8rem 1rem;border-radius:8px;border:1px solid var(--border);background:var(--card);}
+  .callout .ico{font-size:1.05rem;}
+  .callout p:first-child{margin-top:0;} .callout p:last-child{margin-bottom:0;}
+  .callout.note{border-left:3px solid var(--note);} .callout.tip{border-left:3px solid var(--tip);}
+  .callout.warn{border-left:3px solid var(--warn);} .callout.danger{border-left:3px solid var(--danger);}
+  .callout.success{border-left:3px solid var(--success);}
+  details{border:1px solid var(--border);border-radius:8px;padding:.4rem 1rem;margin:.9rem 0;background:var(--card);}
+  details[open]{padding-bottom:.9rem;}
+  summary{cursor:pointer;font-weight:600;padding:.45rem 0;list-style:none;}
+  summary::-webkit-details-marker{display:none;}
+  summary::before{content:"▸";display:inline-block;margin-right:.5rem;transition:transform .15s;color:var(--muted);}
+  details[open]>summary::before{transform:rotate(90deg);}
+  .badge{display:inline-block;font-size:.69rem;font-weight:700;letter-spacing:.04em;padding:.14rem .42rem;border-radius:4px;text-transform:uppercase;white-space:nowrap;}
+  .b-done{background:color-mix(in srgb,var(--success) 18%,transparent);color:var(--success);}
+  .b-next{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent);}
+  .b-gate{background:color-mix(in srgb,var(--danger) 18%,transparent);color:var(--danger);}
+  .b-dec{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn);}
+  .theme-toggle{position:fixed;top:1rem;right:1rem;z-index:10;background:var(--card);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:.4rem .6rem;cursor:pointer;}
+  @media (max-width:52rem){.layout{grid-template-columns:1fr;} aside{position:static;height:auto;border-right:none;border-bottom:1px solid var(--border);}}
+  @media print{aside,.theme-toggle{display:none;} .layout{display:block;} main{max-width:none;padding:0;} details{border:none;} details:not([open])>*:not(summary){display:revert;} pre,table,.callout{break-inside:avoid;}}
+</style>
+</head>
+<body>
+<button class="theme-toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');r.setAttribute('data-theme',d==='dark'?'light':'dark');})()">◐ Theme</button>
+<div class="layout">
+  <aside>
+    <div class="toc-title">Delivery plan</div>
+    <nav id="toc">
+      <a href="#overview">Overview</a>
+      <a href="#granularity">Planning granularity</a>
+      <a href="#decisions">Decisions needed now</a>
+      <a href="#p1a">P1-A · Provenance sweep</a>
+      <a href="#p1b">P1-B · Integrity &amp; privilege</a>
+      <a href="#p1c">P1-C · Surfaces &amp; correlation</a>
+      <a href="#p2">P2 · Gate &amp; capture</a>
+      <a href="#p3">P3 · Packaging</a>
+      <a href="#p4">P4 · Baseline</a>
+      <a href="#p5">P5 · Indicator bundle</a>
+      <a href="#teams">Teams per phase</a>
+      <a href="#deps">Dependency graph</a>
+      <a href="#risks">Risk register</a>
+    </nav>
+  </aside>
+  <main>
+    <h1 class="doc-title">arch-drift — full delivery plan</h1>
+    <p class="doc-subtitle">Every phase planned before implementation begins. Seven phases, 78 tasks, with lanes, interfaces, acceptance gates and the decisions that must be made first.</p>
+    <div class="doc-meta">
+      <span class="chip">2026-08-04</span>
+      <span class="chip">run-a1b1ee55</span>
+      <span class="chip">spec: docs/spec.html</span>
+      <span class="chip">team: 4 specialists approved</span>
+    </div>
+
+    <section id="overview">
+      <h2>Overview</h2>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Phase</th><th>Delivers</th><th class="num">Tasks</th><th>Needs root</th><th>Network</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><a href="#p1a">P1-A</a></td><td>Provenance sweep — <code>scan</code>, <code>explain</code>, <code>doctor</code>, <code>--since-last</code></td><td class="num">10</td><td>no</td><td>yes</td><td><span class="badge b-next">next</span></td></tr>
+          <tr><td><a href="#p1b">P1-B</a></td><td>Integrity tier, staged-privilege collector, TOCTOU-safe I/O, mtree parser</td><td class="num">13</td><td>yes</td><td>no</td><td>planned</td></tr>
+          <tr><td><a href="#p1c">P1-C</a></td><td>Persistence surfaces, ownership oracle, correlation keys</td><td class="num">9</td><td>yes</td><td>no</td><td>planned</td></tr>
+          <tr><td><a href="#p2">P2</a></td><td>Pre-install gate, PKGBUILD tokeniser, <code>snapshot</code>, hooks</td><td class="num">14</td><td>partial</td><td>yes</td><td>planned</td></tr>
+          <tr><td><a href="#p3">P3</a></td><td>Reproducible build, PKGBUILD, signing, units, man pages, CI</td><td class="num">11</td><td>n/a</td><td>n/a</td><td>planned</td></tr>
+          <tr><td><a href="#p4">P4</a></td><td>Signed baseline, hash chain, <code>diff</code>, adjudication lifecycle</td><td class="num">12</td><td>yes</td><td>push</td><td>planned · <span class="badge b-gate">hard gate</span></td></tr>
+          <tr><td><a href="#p5">P5</a></td><td>Indicator bundle, root key set, delegation, fail-closed paths</td><td class="num">9</td><td>no</td><td>yes</td><td>planned</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>The ordering is dependency-driven, not preference. <strong>P2 precedes P4</strong> because provenance evidence is ephemeral — 41% of foreign packages on the reference system already have none — so the capture mechanism must exist before a baseline records what it can see. <strong>P3 precedes P4</strong> so the reproducible-build story lands before the project asks anyone to trust a signed chain.</p>
+    </section>
+
+    <section id="granularity">
+      <h2>Planning granularity — and why it differs by phase</h2>
+      <div class="callout note">
+        <div class="ico">✎</div>
+        <div><p><strong>P1-A is planned to executable step level</strong> — 10 tasks, 50 steps, real test code, no placeholders (<code>docs/superpowers/plans/2026-08-04-p1a-provenance-sweep.md</code>). Every other phase is planned here to <strong>task level</strong>: exact files, exact interfaces, acceptance criteria, dependencies and risks.</p>
+        <p>That difference is deliberate rather than a shortcut. Step-level TDD detail commits to concrete function signatures, and for later phases those signatures depend on types P1-A and P1-B actually establish. Writing 300 speculative steps now would produce detail that reads authoritative and is wrong — the expensive failure mode this project has already been bitten by once. Each phase's step-level plan is generated at phase entry, against the interfaces that then exist.</p>
+        <p>What <em>is</em> fully decided here: scope, boundaries, file layout, interfaces between phases, acceptance gates, and every open decision. Nothing about what to build remains unplanned.</p></div>
+      </div>
+    </section>
+
+    <section id="decisions">
+      <h2>Decisions — resolved 2026-08-04</h2>
+      <p>All three settled at the plan gate. Each affects files created in early phases, which is why they were taken before implementation rather than deferred.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Decision</th><th>Resolution</th><th>Affects</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="badge b-done">D-1</span></td>
+            <td>How to read git history from helper caches — needed for maintainer-change detection and VCS commit ranges</td>
+            <td><strong>Parse git objects with the stdlib</strong> (<code>compress/zlib</code>), no dependency and no subprocess. Rejected: shelling to <code>git</code>, which would execute a binary against an attacker-controlled repository — the precise class of risk this tool exists to warn about. <code>go-git</code> is the documented fallback <em>if and only if</em> packfile handling proves disproportionate to the narrow read required (HEAD, commit author, date, message). Scope is deliberately small: loose objects and packed refs first, and the fallback trigger is recorded so the decision can be revisited on evidence rather than frustration.</td>
+            <td>P2 task 2 · P1-C correlation</td>
+          </tr>
+          <tr>
+            <td><span class="badge b-done">D-2</span></td>
+            <td>Reproducibility boundary — <code>strip</code> runs after the build, so the packaged binary is not the one built</td>
+            <td><strong><code>options=('!strip')</code></strong>, defining reproducibility over the binary itself. This makes <code>verify-self</code> possible and gives users a hash they can check without rebuilding a package. Costs a marginally larger package; buys the only verification path an ordinary user will actually exercise.</td>
+            <td>P3 tasks 1–3</td>
+          </tr>
+          <tr>
+            <td><span class="badge b-done">D-3</span></td>
+            <td>Capability handling for the privileged phase</td>
+            <td><strong><code>golang.org/x/sys/unix</code></strong> for <code>capset</code>/<code>prctl</code>. Hand-rolling syscall structs in the code that enforces the privilege boundary is exactly the wrong place to save a dependency, and <code>x/sys</code> is maintained by the Go team under the same review as the standard library.</td>
+            <td>P1-B task 6</td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="callout note">
+        <div class="ico">✎</div>
+        <div><p><strong>Resulting dependency policy.</strong> P1-A remains <strong>zero third-party dependencies</strong> — nothing in D-1…D-3 touches it. <code>golang.org/x/sys</code> enters at P1-B and is the project's only sanctioned dependency; <code>go-git</code> is conditional on D-1's fallback trigger and would require its own justification in the PR that adds it. Every dependency is vendored (P3 task 1), so <code>build()</code> performs no network fetch and the project's own PKGBUILD passes its own rules.</p></div>
+      </div>
+    </section>
+
+    <section id="p1a">
+      <h2>P1-A · Provenance sweep <span class="badge b-done">plan complete</span></h2>
+      <p>Full step-level plan: <code>docs/superpowers/plans/2026-08-04-p1a-provenance-sweep.md</code>. Guild lane plan: <code>.guild/plan/arch-drift-p1a.md</code>.</p>
+      <p>10 tasks — config/<code>doctor</code>; <code>desc</code> parser; <code>files</code>+<code>%BACKUP%</code> parser; local-DB enumeration; sync-DB name oracle and foreignness; finding model and fingerprints; AUR client (batched RPC, cgit tombstone, fake); provenance rules; reporting and exit codes; persistence, <code>--since-last</code> and the INV-8 gate.</p>
+      <div class="callout success">
+        <div class="ico">✔</div>
+        <div><p><strong>L2 architect↔security loop already run</strong>, two defects found and fixed with regression tests: <em>D1</em> — <code>--since-last</code> persisted its filtered result, poisoning the next diff's baseline; <em>D2</em> — the tombstone matcher would report an administrative removal (<code>removed due to rename</code>) as malware, a false critical on the design's one definitive rule. Record: <code>.guild/runs/run-a1b1ee55…/review/plan/l2-loop.md</code>.</p></div>
+      </div>
+      <p><strong>Gate:</strong> zero criticals on both benign fixtures, the malware acceptance test still passing, and an RPC failure provably unable to produce an "absent from the AUR" finding.</p>
+    </section>
+
+    <section id="p1b">
+      <h2>P1-B · Integrity tier, staged privilege, TOCTOU-safe I/O</h2>
+      <p><strong>Goal:</strong> verify installed files against mtree digests, with all parsing running unprivileged and all I/O immune to path swapping.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Task</th><th>Files</th><th>Key interface / acceptance</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>mtree lexer — vis(3) unescape</td><td><code>internal/mtree/unvis.go</code></td><td><code>Unvis(string) (string, error)</code>. Table-driven over the full escape set. Measured: 379 lines / 599 occurrences on the reference system, mostly <code>\040</code>; unhandled, these become 382 spurious "missing file" findings.</td></tr>
+          <tr><td>2</td><td>mtree parser — records and inheritance</td><td><code>internal/mtree/parse.go</code></td><td><code>Parse(io.Reader) ([]Entry, error)</code>; <code>Entry{Path, Type, Size, Mode, Time float64, SHA256, MD5, Link string}</code>. Handles <code>/set</code>+<code>/unset</code> inheritance, float <code>time=</code>, <code>md5digest</code> (237 entries), and filters <code>./.</code> metadata entries that do not exist on disk.</td></tr>
+          <tr><td>3</td><td>Hostile-input bounds</td><td><code>internal/mtree/limits.go</code></td><td>Decompression ratio cap and absolute ceiling — real data is 3–5× with a 5.7 MB max, so a 100× cap is far above legitimate use. Rejects missing <code>#mtree</code> header, truncated gzip, and any path containing <code>..</code>, absolute, or not <code>./</code>-rooted (measured: 0 such paths exist, so any is damning).</td></tr>
+          <tr><td>4</td><td>Confined file I/O</td><td><code>internal/fsx/open.go</code></td><td><code>OpenConfined(root *os.Root, rel string) (*os.File, unix.Stat_t, error)</code> — open once with <code>O_NOFOLLOW|O_NONBLOCK</code>, <code>fstat</code> the fd, require <code>S_ISREG</code>. Never stat-then-open.</td></tr>
+          <tr><td>5</td><td>Mutation detection</td><td><code>internal/fsx/verify.go</code></td><td>Re-<code>fstat</code> the same fd after hashing; a changed <code>ino/dev/size/mtime</code> yields <em>mutated during scan</em>.</td></tr>
+          <tr><td>6</td><td>Privilege staging <span class="badge b-dec">D-3</span></td><td><code>internal/privdrop/drop.go</code></td><td><code>ReduceToRead() error</code> then <code>DropAll() error</code>. Sanitises <code>LD_*</code>/<code>GLIBC_TUNABLES</code> and re-execs; sets <code>PR_SET_NO_NEW_PRIVS</code>; the drop clears the permitted set so nothing can be regained.</td></tr>
+          <tr><td>7</td><td>Collect phase</td><td><code>internal/collect/collect.go</code></td><td><code>Collect(cfg) (Raw, error)</code> — walk, confined opens, streaming sha256, buffer raw metadata. Measured budget ~41 MB. <strong>Contains no parsers.</strong></td></tr>
+          <tr><td>8</td><td>Panic and hang containment</td><td><code>internal/safe/subject.go</code></td><td><code>Run(subject string, fn func() error) (err error, panicked bool)</code>. Per-subject recover; every worker goroutine has its own; per-subject context timeout. A panic becomes a could-not-analyse gap (INV-9), never a global abort.</td></tr>
+          <tr><td>9</td><td>Derived mutable-file exemptions</td><td><code>internal/check/exempt.go</code></td><td>Parses installed pacman hooks' <code>Target</code>/<code>Exec</code> pairs to compute which files pacman itself regenerates — derived, not hand-maintained. Plus <code>%BACKUP%</code>. <strong>Must not blanket-exempt <code>__pycache__</code></strong>: 103 packages ship digest-covered <code>.pyc</code>.</td></tr>
+          <tr><td>10</td><td>Integrity checks</td><td><code>internal/check/integrity.go</code></td><td>Digest mismatch; <code>type=link</code> compared as <em>strings</em> against recorded <code>link=</code> — never resolved-and-hashed, because 4,145 legitimate targets contain <code>..</code>; unowned SUID/SGID.</td></tr>
+          <tr><td>11</td><td>Performance tiers</td><td><code>internal/check/tier.go</code></td><td><code>meta</code>/<code>triage</code>/<code>full</code>/<code>paranoid</code>, <code>full</code> default. <code>triage</code>'s prefilter reads its stat from the fd it would hash, and unconditionally hashes the security-relevant subset regardless of stat, carrying an <em>mtime-assisted</em> marker.</td></tr>
+          <tr><td>12</td><td>Process-model assertions</td><td><code>internal/privdrop/drop_test.go</code></td><td>Post-drop read of a root-only file must fail; fifo and escaping-symlink fixtures refused not followed; mid-scan mutation detected; a panicking subject yields a gap with the scan completing and exit 3 — including from a worker goroutine.</td></tr>
+          <tr><td>13</td><td>mtree conformance suite</td><td><code>internal/mtree/conform_test.go</code></td><td>Full escape set, inheritance, float times, metadata prefix, symlinks, hardlinks, corrupt gzip, traversal. Cross-validated against <code>pacman -Qkk</code> on a fixture root.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="callout warn">
+        <div class="ico">▲</div>
+        <div><p><strong>Positioning constraint carried from the review:</strong> <code>pacman -Qkk</code> already performs sha256 verification and already exempts <code>%BACKUP%</code>. P1-B must not present file hashing as novel. Its justification is offline-root operation, parallelism, structured output, correlation input, and — the only genuinely new capability — supplying the mtree digests that P4's baseline uses to detect mtree tampering, which <code>-Qkk</code> structurally cannot do.</p></div>
+      </div>
+      <p><strong>Gate:</strong> all 13 tasks green; conformance suite passes; zero criticals on benign fixtures with the integrity tier enabled; post-drop privilege assertion passes.</p>
+    </section>
+
+    <section id="p1c">
+      <h2>P1-C · Persistence surfaces and correlation</h2>
+      <p><strong>Goal:</strong> detect persistence planted outside package ownership, and tie host-side evidence back to packages.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Task</th><th>Files</th><th>Key interface / acceptance</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Ownership oracle</td><td><code>internal/own/index.go</code></td><td><code>Index(pkgs []alpm.Package) *Owners</code>; <code>Owners.Owner(path string) (pkg string, ok bool)</code>. Resolves symlinks so a package-owned target is recognised through a link.</td></tr>
+          <tr><td>2</td><td>Unit and timer parsing from disk</td><td><code>internal/surfaces/units.go</code></td><td>Parses unit files and <code>*.wants/</code> links without <code>systemctl</code> — a compromised systemd cannot lie to it. Extracts <code>ExecStart</code>.</td></tr>
+          <tr><td>3</td><td>The <code>*.wants</code> triage rule</td><td><code>internal/surfaces/wants.go</code></td><td><strong>Three behaviours, not one:</strong> resolve symlink targets, exclude directories, alert only on unresolvable or non-package-owned targets. Measured on the reference system: 30 unowned paths → 19 benign enablement symlinks, 8 <code>*.target.wants</code> directories, 1 real hand-written unit.</td></tr>
+          <tr><td>4</td><td>Hook directories</td><td><code>internal/surfaces/hooks.go</code></td><td>Covers the system hook dir (57 hooks, active by default), <code>/etc/pacman.d/hooks</code> (absent on the reference system), and any <code>HookDir</code> override.</td></tr>
+          <tr><td>5</td><td>Shadowed and disabled hooks</td><td><code>internal/surfaces/hooks.go</code></td><td><strong>New check neither review caught:</strong> a package-owned hook can be disabled by a <code>/dev/null</code> symlink or shadowed by a same-named file in a higher-priority dir. Detects hooks <em>suppressed</em>, not only hooks added.</td></tr>
+          <tr><td>6</td><td>Remaining surfaces</td><td><code>internal/surfaces/misc.go</code></td><td><code>ld.so.preload</code>, generator dirs, <code>profile.d</code>, XDG autostart, per-user paths enumerated from the target's <code>passwd</code> — unreadable homes become coverage gaps.</td></tr>
+          <tr><td>7</td><td>Correlation keys</td><td><code>internal/correlate/correlate.go</code></td><td>Three keys: package; <strong>temporal</strong> (mtree <code>time=</code> ≈ <code>%INSTALLDATE%</code> ≈ transaction time — all inputs already collected); <strong>path attribution</strong> (resolve <code>ExecStart</code>, match directory or filename stem against foreign package names).</td></tr>
+          <tr><td>8</td><td>System-state FP fixtures</td><td><code>testdata/roots/{stock,cruft}/</code></td><td>Extends the INV-8 gate with real system state — stock install and a cruft-laden root with pip, <code>npm -g</code>, manual <code>/usr/local</code>, hand-written units. Without these the gate is blind to its largest noise source.</td></tr>
+          <tr><td>9</td><td>Incident acceptance fixture</td><td><code>testdata/roots/malicious/</code></td><td>The CHAOS RAT structural shape — off-upstream source, scriptlet-installed unit, <code>ExecStart</code> to an unowned binary — must yield a correlated critical cluster. <strong>Inert markers only</strong>: no working payloads, no real C2 addresses.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="callout danger">
+        <div class="ico">◆</div>
+        <div><p><strong>Severity ratings in this phase must be written down as weaker than they look.</strong> Correlation does not survive a competent attacker: a payload built into its own <code>$pkgdir</code> and shipped with an ordinary-looking unit produces no unowned files, a self-consistent mtree, and an <code>ExecStart</code> resolving to a package-owned binary. Every check in P1-C goes silent. This phase catches sloppy malware — the real incidents were sloppy, but needn't have been.</p></div>
+      </div>
+      <p><strong>Gate:</strong> zero criticals on stock and cruft roots; the malicious fixture yields a correlated critical cluster; the <code>*.wants</code> rule produces exactly one subject on the reference system.</p>
+    </section>
+
+    <section id="p2">
+      <h2>P2 · Pre-install gate and provenance capture</h2>
+      <p><strong>Goal:</strong> review a PKGBUILD before <code>makepkg</code> runs it, and capture ephemeral provenance while it still exists.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Task</th><th>Files</th><th>Key interface / acceptance</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Helper cache detection</td><td><code>internal/helper/detect.go</code></td><td>Detects <code>yay</code>, <code>paru</code> (<code>clone/</code> layout), <code>pikaur</code>, <code>aurutils</code>. Config-driven, never hardcoded. Absent cache ⇒ coverage gap, not silence.</td></tr>
+          <tr><td>2</td><td>Git history reader <span class="badge b-dec">D-1</span></td><td><code>internal/vcs/gitlog.go</code></td><td><code>Head(dir) (string, error)</code>, <code>Log(dir, n) ([]Commit, error)</code>, <code>Remote(dir) (string, error)</code>. Read-only; must not execute <code>git</code> against an attacker-controlled repo.</td></tr>
+          <tr><td>3</td><td><code>.BUILDINFO</code> and <code>.SRCINFO</code> readers</td><td><code>internal/pkgmeta/</code></td><td>Extracts <code>pkgbuild_sha256sum</code>, <code>builddir</code>/<code>startdir</code> from a package archive; parses <code>.SRCINFO</code> for declared sources and deps.</td></tr>
+          <tr><td>4</td><td><code>snapshot</code> command</td><td><code>internal/snapshot/</code>, <code>cmd/</code></td><td>Captures PKGBUILD, <code>.SRCINFO</code>, <code>.BUILDINFO</code>, git log summary, remote, resolved source URLs, and the upstream commit built. <strong>Keyed on <code>pkgbase</code></strong> — 433 of 1409 packages are split. A few KB per package versus the 88 GB cache holding the same facts.</td></tr>
+          <tr><td>5</td><td>Bash tokeniser</td><td><code>internal/pkgbuild/lex.go</code></td><td>Handles what real PKGBUILDs contain, measured over 34: array <code>source=()</code> (32), nested <code>$( )</code> (2), heredocs (2), <code>${var//x/y}</code> (7), external <code>source</code> (2). Comment stripping is mandatory.</td></tr>
+          <tr><td>6</td><td>Variable resolution</td><td><code>internal/pkgbuild/resolve.go</code></td><td>Resolves <code>source_x86_64</code> / <code>_aarch64</code> (10 of 34 — a 29% blind spot if unhandled) and parameter-expanded URLs (7 of 34). Emits <code>Resolved</code> or <code>Unresolvable</code> per value.</td></tr>
+          <tr><td>7</td><td>Could-not-analyse verdict</td><td><code>internal/pkgbuild/verdict.go</code></td><td><strong>INV-9 made concrete.</strong> <code>eval</code> appears in 3 of 34 legitimate PKGBUILDs, including <code>eval "package_$_p() {</code> which generates the package functions — which is why zero cached PKGBUILDs contain a literal <code>package_*()</code> despite 31% being split. Unresolvable input is a coverage gap, never a critical and never silence.</td></tr>
+          <tr><td>8</td><td>PKGBUILD rules</td><td><code>internal/check/pkgbuild.go</code></td><td>Network fetch in build functions (<strong>excluding comments and dependency arrays</strong> — both <code>curl</code> hits in the real corpus are false positives), writes outside <code>$pkgdir</code>, credential paths, privilege escalation, paste-site hosts, obfuscation, <code>SKIP</code> on fixed URLs.</td></tr>
+          <tr><td>9</td><td>Dependency closure</td><td><code>internal/gate/closure.go</code></td><td>Resolves the full AUR dep closure and reviews every new PKGBUILD in it — the attacker's move is a benign package pulling a malicious dep. Prints the tree.</td></tr>
+          <tr><td>10</td><td>Approval store</td><td><code>internal/gate/approve.go</code></td><td>Keyed on <code>pkgbase</code> + PKGBUILD digest: silent when unchanged, re-prompts on recipe change.</td></tr>
+          <tr><td>11</td><td>VCS delta review</td><td><code>internal/gate/vcsdelta.go</code></td><td>For <code>-git</code> packages the recipe is stable while the source moves, so approving once would bless unbounded future commits. Shows the upstream commit range since the recorded snapshot.</td></tr>
+          <tr><td>12</td><td><code>review</code> and <code>install</code></td><td><code>cmd/arch-drift/</code></td><td><code>review</code> analyses without building; <code>install</code> clones, reviews the closure, prompts, snapshots, then hands the vetted directory to the helper. Leads with rule hits and a diff against the last approved recipe, not the whole file.</td></tr>
+          <tr><td>13</td><td>Hooks</td><td><code>packaging/hooks/</code></td><td><code>PostTransaction</code> for provenance capture — the hook's genuine strength. <code>PreTransaction</code> shipped <strong>inert and warn-only</strong>: <code>AbortOnFail</code> is opt-in by one line, <code>Exec</code> routes through a path that always exists and no-ops when the binary is absent, so removal cannot brick pacman.</td></tr>
+          <tr><td>14</td><td>Tokeniser fuzzing</td><td><code>internal/pkgbuild/fuzz_test.go</code></td><td>Several thousand real PKGBUILD/<code>.SRCINFO</code> pairs asserting <em>panic-free and hang-free</em>, not correctness. The input is attacker-controlled, which is INV-2's justification.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p><strong>Gate:</strong> dep-closure review working; <code>pkgbase</code> keying correct for split packages; VCS commit-range flow working; hook orphan-safety proven; fuzzing clean.</p>
+    </section>
+
+    <section id="p3">
+      <h2>P3 · Packaging and distribution</h2>
+      <p><strong>Goal:</strong> make the tool installable in a way that does not require trusting its author.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Task</th><th>Acceptance</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Reproducible build <span class="badge b-dec">D-2</span></td><td>Pinned toolchain (<code>go.mod</code> <code>toolchain</code> + <code>GOTOOLCHAIN=local</code>), vendored deps, <code>-trimpath</code>, <code>-buildvcs=false</code>, <code>SOURCE_DATE_EPOCH</code>, no injected build date. Two CI runners produce identical hashes.</td></tr>
+          <tr><td>2</td><td>Static-link assertion</td><td>A test asserts no <code>DT_NEEDED</code>/<code>PT_INTERP</code>. This is the deliberate deviation from Arch's Go guidelines, documented in a PKGBUILD comment: a dynamically-linked binary could be subverted by <code>ld.so.preload</code> before it can report on <code>ld.so.preload</code>.</td></tr>
+          <tr><td>3</td><td>PKGBUILD</td><td>Source package canonical; <code>-bin</code> only with <code>options=('!strip')</code>; release tarball is a <code>git archive</code> asset, never GitHub's auto-generated archive; SPDX <code>license=()</code>; <code>arch=('x86_64' 'aarch64')</code>.</td></tr>
+          <tr><td>4</td><td>Self-gate</td><td><strong>arch-drift's own PKGBUILD must pass arch-drift's own rules</strong>, enforced in CI. Note that without vendored deps <code>build()</code> performs a network fetch and trips its own critical rule.</td></tr>
+          <tr><td>5</td><td>Release signing</td><td>A second OpenPGP identity for artifacts, because <code>makepkg</code> only understands OpenPGP (<code>validpgpkeys</code>) — ed25519 alone gives AUR users no verification path. Fingerprint published in several independent places.</td></tr>
+          <tr><td>6</td><td>AUR name defence</td><td>Register plain, <code>-bin</code> and <code>-git</code> names on day one. Publish the canonical PKGBUILD upstream and have scheduled CI diff the live AUR copy against it — self-defence against takeover of this project's own package.</td></tr>
+          <tr><td>7</td><td>systemd units</td><td>Scan unit with <code>PrivateNetwork=yes</code>, <code>ProtectSystem=strict</code>, <code>ProtectHome=read-only</code>, <code>CapabilityBoundingSet=CAP_DAC_READ_SEARCH</code>; update unit network-only. Timers with <code>Persistent=true</code> and randomised delay. <strong>Never enabled by <code>.install</code></strong> — Arch policy.</td></tr>
+          <tr><td>8</td><td>Failure notification</td><td>Exit codes <code>1</code> and <code>3</code> both render as <em>failed</em> under systemd, which then tells nobody. Ship <code>OnFailure=</code> rather than masking with <code>SuccessExitStatus=</code>.</td></tr>
+          <tr><td>9</td><td>Docs and completions</td><td>Man pages in scdoc (installed uncompressed — <code>zipman</code> is on by default), bash/zsh/fish completions with a test asserting every subcommand appears, <code>tmpfiles.d</code> for state dirs.</td></tr>
+          <tr><td>10</td><td>Two-sided disclosure</td><td><code>SECURITY.md</code> whose in-scope list <strong>explicitly names false negatives</strong> — a false clean, a verification bypass, an evasion — as vulnerabilities. Plus <code>docs/reporting-malware.md</code> for the outward path, linked from critical <code>explain</code> output. Privacy statement: queries disclose the installed foreign package set; honour proxies, offer <code>--no-network</code>, never auto-update, no telemetry.</td></tr>
+          <tr><td>11</td><td>CI hygiene</td><td><code>go vet</code>, <code>staticcheck</code>, <code>govulncheck</code>, <code>go mod verify</code>, <code>gosec</code>, <code>namcap</code>, clean-chroot build from the tagged tarball, <code>.SRCINFO</code> sync assertion, and <strong>every action pinned by commit SHA</strong> — a supply-chain tool consuming mutable refs would be called out, correctly.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p><strong>Gate:</strong> two-runner reproducibility diff identical; own PKGBUILD passes own rules; clean-chroot build succeeds; static-link assertion passes.</p>
+    </section>
+
+    <section id="p4">
+      <h2>P4 · Baseline and trust chain <span class="badge b-gate">hard ship gate</span></h2>
+      <div class="callout danger">
+        <div class="ico">◆</div>
+        <div><p><strong>This phase must not be enabled in any release until every task below passes.</strong> A baseline whose chain cannot be trusted manufactures confidence, which is worse than having none — this is the specific risk accepted when all four subsystems were kept in scope, and this gate is the mitigation. Partial P4 does not ship.</p></div>
+      </div>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Task</th><th>Acceptance</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Canonical serialisation</td><td>Sorted keys, no floats, fixed field order. Property tests: sign → flip any single byte → verify fails; reordering map keys must <strong>not</strong> change the digest.</td></tr>
+          <tr><td>2</td><td>Key handling</td><td>OpenSSH ed25519 format, so <code>ssh-keygen</code>, <code>ssh-agent</code> and <strong>FIDO2 <code>sk-ssh-ed25519</code></strong> all work — INV-7 satisfied by hardware rather than discipline.</td></tr>
+          <tr><td>3</td><td>Detached signatures</td><td>Signature over canonical JSON, deliberately not git commit signing, which would couple the tool to the user's git config.</td></tr>
+          <tr><td>4</td><td>Manifest assembly</td><td>Two-layer: stores <code>sha256(mtree)</code> per package, not per-file hashes — ~1409 records rather than ~325k. Includes provenance snapshot digests, surfaces inventory, adjudications, and <strong>the earliest <code>pacman.log</code> timestamp</strong> so later truncation is itself detectable.</td></tr>
+          <tr><td>5</td><td>Hash chain</td><td><code>prev_hash</code> linkage; append, verify. Attack tests: truncated, forked, replayed, wrong <code>prev_hash</code> all rejected.</td></tr>
+          <tr><td>6</td><td>Replication state</td><td>Chain records <code>pushed: bool</code>; <strong>every run reports unpushed entries prominently</strong>. Documents that force-push and branch protection are load-bearing — "an attacker cannot rewrite remote history" is true only if the remote forbids it, and push credentials necessarily live on the monitored machine.</td></tr>
+          <tr><td>7</td><td>Bootstrap refusal</td><td><code>baseline init</code> runs a full scan and refuses to write while unresolved criticals exist; each must be adjudicated with a recorded reason. Refuses unprivileged. Refuses a <code>triage</code>-tier scan as its basis.</td></tr>
+          <tr><td>8</td><td>Fingerprint epochs</td><td>Indicators carry <code>fingerprint_epoch</code>; a change to matching semantics bumps it, and bound suppressions surface as <em>stale — re-adjudicate</em> rather than silently persisting or vanishing.</td></tr>
+          <tr><td>9</td><td>Adjudication lifecycle</td><td>Three scopes (<code>pin</code>/<code>subject</code>/<code>rule</code>), mandatory reason, default 180-day expiry, dead-suppression reporting. Distinct from the lightweight <code>triage</code> layer.</td></tr>
+          <tr><td>10</td><td><code>pacman.log</code> parsing</td><td>Explicit RFC3339 offsets — the reference log mixes two (DST); <code>[ALPM]</code> lines only; rotated siblings read; entries naming another root (<code>-r /mnt</code>) handled; <strong>log coverage shorter than the baseline window is a gap, not a wall of criticals</strong>, and truncation is itself a finding.</td></tr>
+          <tr><td>11</td><td>Drift classification</td><td>Four buckets: corroborated, adjudicated, unexplained (critical), log-coverage gap (reduced severity).</td></tr>
+          <tr><td>12</td><td>Concurrency and crash safety</td><td>Advisory lock; <code>db.lck</code> detected — <code>scan</code> warns, <code>baseline append</code> refuses, because reading a half-written DB mid-transaction produces spurious findings that would otherwise get <em>signed</em>. Temp + fsync + atomic rename; a payload without a valid signature reads as absent, not corrupt.</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section id="p5">
+      <h2>P5 · Indicator bundle</h2>
+      <div class="callout note">
+        <div class="ico">✎</div>
+        <div><p><strong>Named "indicator bundle", not "rules".</strong> All non-trivial detection logic is compiled — ownership resolution, host comparison, tombstone corroboration, correlation, symlink handling. A network-delivered bundle carries only data: host lists, patterns, digests, thresholds, names, the rebuild-repo list. That is what threat intel is; calling it a rules engine would promise updatable detection capability the design cannot deliver.</p></div>
+      </div>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Task</th><th>Acceptance</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Bundle format</td><td>Strictly declarative (INV-1): no eval, no shell, no embedded scripting. Carries <code>spec_version</code>, monotonic <code>bundle_version</code>, <code>valid_until</code>, prior-bundle digest.</td></tr>
+          <tr><td>2</td><td>Root key set</td><td>Embedded 2-of-3 offline, hardware-held. Signs <em>only</em> a delegation document.</td></tr>
+          <tr><td>3</td><td>Delegation</td><td>Names short-lived (30–90 day) online bundle-signing keys with expiry. Rotating the online key ships no new binary. <strong>Bundles cannot introduce keys.</strong></td></tr>
+          <tr><td>4</td><td>Anti-rollback</td><td>Version floor held in <strong>root-only state</strong>, never the cache. A bundle below the floor is refused.</td></tr>
+          <tr><td>5</td><td>Verification order</td><td>Signature verified over <strong>raw bytes before parsing</strong>. Size cap, timeout, no cross-host redirects.</td></tr>
+          <tr><td>6</td><td>Fail-closed paths</td><td>Expiry ⇒ degrade to coverage-incomplete, <strong>never report clean</strong>. Retired root set ⇒ refuse with an actionable upgrade message. Report the active indicator count so a suspicious drop toward zero is visible — a bundle that <em>removes</em> detections is an attack.</td></tr>
+          <tr><td>7</td><td><code>update</code> command</td><td>Never automatic. <code>--version</code> prints root fingerprints, delegation expiry, cached bundle version.</td></tr>
+          <tr><td>8</td><td>Attack suite</td><td>Rollback, indefinite freeze, expired bundle, empty bundle, retired root — all must fail closed.</td></tr>
+          <tr><td>9</td><td>Key-compromise runbook</td><td><code>docs/key-compromise-runbook.md</code>, written <strong>before</strong> first release, not after an incident.</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section id="teams">
+      <h2>Teams per phase</h2>
+      <p>Guild caps a team at 6 and defaults to 3–4. Composition follows the work, so it changes by phase; the P1-A team is approved and recorded at <code>.guild/team/arch-drift-p1a.plan.yaml</code>.</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Phase</th><th>Team</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>P1-A</td><td>backend, qa, security, architect <span class="badge b-done">approved</span></td><td>Implementation, the FP gate, adversarial rule review, interface contracts.</td></tr>
+          <tr><td>P1-B</td><td>backend, qa, security, architect</td><td>Same shape, but security's weight rises sharply — privilege staging and hostile-input parsing are its core competence.</td></tr>
+          <tr><td>P1-C</td><td>backend, qa, security</td><td>Interfaces are settled by then; architect not needed. qa owns the system-state fixtures.</td></tr>
+          <tr><td>P2</td><td>backend, qa, security, architect</td><td>The tokeniser is the highest-risk component in the project; architect returns for the analyse/collect boundary.</td></tr>
+          <tr><td>P3</td><td>devops, doc-writer, security</td><td>First devops phase. security reviews the signing and disclosure design.</td></tr>
+          <tr><td>P4</td><td>backend, security, architect, qa</td><td>Crypto and chain semantics — security is effectively co-owner, not reviewer.</td></tr>
+          <tr><td>P5</td><td>backend, security, devops</td><td>Key hierarchy and the update channel; devops for the publishing pipeline.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="callout warn">
+        <div class="ico">▲</div>
+        <div><p><strong>Dispatch reliability caveat, recorded because it cost real time.</strong> In this session 6 of 6 agent dispatches were attempted and 4 failed to return output — one crashed mid-stream, three idled without delivering, and one critical finding survived only because Guild's telemetry happened to capture its tool calls. Lanes should be dispatched when they are genuinely separable and investigation-heavy; defect passes over material already in context are more reliably run inline. The L2 loop for P1-A was run inline for exactly this reason.</p></div>
+      </div>
+    </section>
+
+    <section id="deps">
+      <h2>Dependency graph</h2>
+      <pre><code>P1-A  provenance sweep ......  no deps
+  │
+  ├──> P1-B  integrity + privilege ......  needs P1-A finding model, config, report
+  │      │
+  │      └──> P1-C  surfaces + correlation ......  needs P1-B ownership + mtree
+  │             │
+  ├──> P2  gate + capture ......  needs P1-A (aur client, checks) + P1-B (safe, fsx)
+  │      │
+  │      └──> P3  packaging ......  needs a shippable binary; own-rules gate needs P2
+  │             │
+  │             └──> P4  baseline ......  needs P1-B mtree digests, P2 snapshots, P3 trust story
+  │                    │
+  │                    └──> P5  indicator bundle ......  needs P4 root-only state for the floor</code></pre>
+      <p>Two edges are non-obvious and worth stating: <strong>P4 depends on P2</strong> because a baseline must record provenance that still exists, and <strong>P5 depends on P4</strong> because the anti-rollback floor needs the root-only state P4 establishes.</p>
+    </section>
+
+    <section id="risks">
+      <h2>Risk register</h2>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Risk</th><th>Phase</th><th>Countermeasure</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Severity inflation.</strong> Measured: the pre-review design would have produced ~1,860 findings, ~427 critical, zero actionable on the reference system.</td><td>all</td><td>INV-8 gate with system-state fixtures; the gate is paired with a malware acceptance test so it cannot be satisfied by a silent scanner.</td></tr>
+          <tr><td><strong>False assurance.</strong> A network error read as "package deleted"; a parse failure read as clean.</td><td>P1-A, P2</td><td>Dedicated tests for both; INV-9 and INV-10 give the tool explicit <em>could-not-analyse</em> and <em>unavailable</em> states.</td></tr>
+          <tr><td><strong>Baseline half-built.</strong> An untrustworthy chain manufactures confidence.</td><td>P4</td><td>Hard ship gate — all 12 tasks or the subsystem stays disabled.</td></tr>
+          <tr><td><strong>Tokeniser is the highest-risk component.</strong> Attacker-controlled bash, and legitimate PKGBUILDs generate code with <code>eval</code>.</td><td>P2</td><td>Fuzzing for panic/hang; unresolvable input becomes a coverage gap; all parsing runs after the privilege drop.</td></tr>
+          <tr><td><strong>Bootstrapping paradox.</strong> A tool warning about unvetted AUR packages, distributed as one.</td><td>P3</td><td>Reproducible builds as the primary answer, OpenPGP release signing second, AUR-drift monitoring third.</td></tr>
+          <tr><td><strong>Provenance evidence decays.</strong> 41% of foreign packages already have none; the cache is 88 GB, so users clean it.</td><td>P2</td><td><code>snapshot</code> captures a few KB per package at install time; missing evidence reports <em>unavailable</em>, never clean.</td></tr>
+          <tr><td><strong>Ecosystem drift.</strong> pacman DB schema, AUR RPC shape, tombstone wording, third-party rebuild repos.</td><td>all</td><td>Hard refusal on unrecognised <code>ALPM_DB_VERSION</code>; recorded RPC fixtures; escalation triggers in the autonomy contract; the rebuild-repo list ships in the bundle.</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <hr>
+    <p style="color:var(--muted);font-size:.9rem">Full delivery plan for arch-drift. P1-A is planned to executable step level; P1-B through P5 are planned to task level with interfaces and gates fixed, and expand to step level at phase entry. Three decisions (D-1, D-2, D-3) are open and affect files created in early phases.</p>
+  </main>
+</div>
+<script>
+  (function () {
+    var links = [].slice.call(document.querySelectorAll('#toc a'));
+    var map = {};
+    links.forEach(function (a) { var el = document.getElementById(a.getAttribute('href').slice(1)); if (el) map[a.getAttribute('href').slice(1)] = a; });
+    var obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          links.forEach(function (l) { l.classList.remove('active'); });
+          if (map[e.target.id]) map[e.target.id].classList.add('active');
+        }
+      });
+    }, { rootMargin: '-10% 0px -80% 0px' });
+    document.querySelectorAll('main section[id]').forEach(function (s) { obs.observe(s); });
+  })();
+</script>
+</body>
+</html>
