@@ -71,7 +71,27 @@ These were measured on the reference system; the parsers are written against the
 - Consumes: nothing (first task)
 - Produces: `config.Config{Root string, DBPath string, SyncPath string, StateDir string, Network bool, MinSeverity string}`; `config.Resolve(root string, euid int) (Config, error)`; `config.Config.Doctor() []config.DoctorLine` where `DoctorLine{Key, Value, Source string}`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 0: Create `go.mod`**
+
+`go.mod` must exist *before* the first test is written, or step 2 fails with
+"go.mod file not found" instead of the `undefined: Resolve` build error that
+actually proves the test is exercising missing code.
+
+```go
+// go.mod
+module github.com/lookatitude/arch-drift
+
+// Floor is 1.24 for os.Root, the traversal-resistant file API used by the
+// P1-B collector. Arch currently ships 1.26.x.
+go 1.24
+```
+
+- [x] **Step 1: Write the failing test**
+
+Written with two tests beyond the sketch below: `TestResolveEmptyRootMeansFilesystemRoot`
+(an empty root must mean `/`, not an empty prefix yielding relative paths) and
+`TestResolveStateDirIsSystemOwnedForRoot` (spec §11 — a privileged run must not
+resolve state into a caller-writable location).
 
 ```go
 // internal/config/config_test.go
@@ -106,19 +126,13 @@ func TestDoctorReportsProvenancePerKey(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/config/ -run TestResolve -v`
 Expected: FAIL — build error, `undefined: Resolve`
+Observed: `internal/config/config_test.go:9:12: undefined: Resolve` (×4). ✅
 
-- [ ] **Step 3: Write minimal implementation**
-
-```go
-// go.mod
-module github.com/lookatitude/arch-drift
-
-go 1.24
-```
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/config/config.go
