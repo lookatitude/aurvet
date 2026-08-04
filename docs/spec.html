@@ -210,8 +210,13 @@ internal/report         findings, severity, correlation, coverage accounting, JS
       systems. The rule is therefore <strong>structural, not numeric</strong>:</p>
       <blockquote>
         <p>Every <strong>package entry</strong> in a sync database that does not
-        yield a name is a coverage gap, and the gap records how many. Zero entries
-        is an empty repository and never a gap.</p>
+        yield a name is a coverage gap, and the gap records how many. Zero package
+        entries is an empty repository and never a gap.</p>
+        <p>A <strong>package entry</strong> is a top-level directory entry in the
+        database's tar, one per package. It is <em>not</em> a raw tar entry: each
+        package contributes both a directory entry and a <code>desc</code> entry, so
+        counting raw entries roughly doubles the denominator and makes the gap's count
+        meaningless.</p>
       </blockquote>
       <p>The distinction is what separates "this repo has nothing in it" from "I
       could not read this repo", and only the second is a gap. A consumer that sees
@@ -240,7 +245,7 @@ internal/report         findings, severity, correlation, coverage accounting, JS
       <table>
         <thead><tr><th>Check</th><th>Sev</th><th>Precondition &amp; false-positive control</th></tr></thead>
         <tbody>
-          <tr><td><strong>Absent from AUR index <em>and</em> cgit log carries a removal/malware tombstone</strong></td><td><span class="badge b-crit">critical</span></td><td><strong>Definitive, zero curation.</strong> Verified: all three July 2025 CHAOS RAT packages still serve <code>history removed due to malware</code>; a control package does not. Needs network — else <em>unavailable</em></td></tr>
+          <tr><td><strong>Absent from AUR index <em>and</em> cgit log carries a removal/malware tombstone</strong></td><td><span class="badge b-crit">critical</span></td><td><strong>Definitive, zero curation.</strong> Verified: all three July 2025 CHAOS RAT packages still serve <code>history removed due to malware</code>; a control package does not. Needs network — else <em>unavailable</em>. <strong>Read §5.1.1 before implementing: the two halves are keyed on different subjects.</strong></td></tr>
           <tr><td>Absent from AUR index, no tombstone</td><td><span class="badge b-high">suspicious</span></td><td>Rule out: dropped from official repos (the <code>python-pkg_resources</code> case), renamed/merged, never-published local build. <strong>Network failure must never reach this rule</strong> — branch on RPC <code>type</code></td></tr>
           <tr><td>Git remote ≠ the AUR host</td><td><span class="badge b-crit">critical</span></td><td>Near-zero FP. Needs cache clone</td></tr>
           <tr><td><code>pkgbuild_sha256sum</code> ≠ PKGBUILD at cache HEAD or at upstream HEAD</td><td><span class="badge b-crit">critical</span></td><td>Needs <code>.BUILDINFO</code> — archive or captured snapshot (§7), else <em>unavailable</em></td></tr>
@@ -253,6 +258,40 @@ internal/report         findings, severity, correlation, coverage accounting, JS
         </tbody>
       </table>
       </div>
+
+      <h3>5.1.1 · Name or pkgbase: the two halves are keyed differently</h3>
+      <p><strong>Added 2026-08-04.</strong> §5.1's critical rule is a conjunction —
+      <em>absent from the AUR index</em> <strong>and</strong> <em>cgit carries a
+      tombstone</em> — and this specification never said which subject either half
+      is keyed on, nor required them to be the same subject. Three high-severity
+      defects came out of that one omission, and all three were found only by
+      running the tool. The rule:</p>
+      <ul>
+        <li><strong>Presence is keyed on the package <code>%NAME%</code>.</strong>
+        The AUR RPC's <code>arg[]</code> matches package <em>names</em>, not bases —
+        measured, and <code>by=pkgbase</code> is rejected outright by the v5 API. Asking
+        by base means every split package whose base is not itself a package name
+        reads as <em>absent from the AUR</em>, with coverage reported complete.</li>
+        <li><strong>The tombstone is keyed on the <code>%BASE%</code> the installed
+        package declares.</strong> cgit is organised by <code>pkgbase</code>; there is
+        no per-name log.</li>
+        <li><strong>Where a returned record's <code>PackageBase</code> and the
+        installed <code>%BASE%</code> disagree, cgit must be consulted about the base
+        the package <em>declares</em></strong> — critical on a malware removal, a gap
+        on lookup failure, and <em>silent otherwise</em>. This is not defensive
+        pedantry: AUR names are freed when a base is removed, so a clean package can
+        be republished under a name whose original base was tombstoned, while a user
+        still carries the malware build. Keying presence on name alone reads that
+        <em>clean and complete</em>.</li>
+      </ul>
+      <p>The silent-otherwise case is deliberate. A benign rename produces exactly
+      the same disagreement, so anything louder than silence would fire on ordinary
+      packaging events.</p>
+      <p class="note"><strong>Do not "fix" this by trusting <code>%BASE%</code>.</strong>
+      It is builder-controlled. A package published nowhere can declare a healthy
+      base, and if presence is keyed on the declared base it disappears from the
+      sweep entirely — no finding, no gap, cgit never consulted. Both halves are
+      needed precisely because each covers the other's blind spot.</p>
 
       <h3>5.2 PKGBUILD and scriptlet analysis</h3>
       <p>Tokenised, never executed (INV-2). Measured over 34 real cached PKGBUILDs, which sets the parser's minimum competence: <strong>32 use array <code>source=()</code></strong>, <strong>10 (29%) use arch-suffixed <code>source_x86_64</code>/<code>_aarch64</code></strong>, <strong>7 (21%) build source URLs via parameter expansion</strong>, and nested <code>$( … )</code>, heredocs and external <code>source</code> each appear. A parser reading only literal <code>source=</code> is wrong for nearly a third of packages.</p>
@@ -330,7 +369,16 @@ internal/report         findings, severity, correlation, coverage accounting, JS
       <p>Every §5.1 check depending on the helper cache or a retained artifact is unreliable long-term: <strong>16 of 39 foreign packages (41%) already have neither</strong>, <code>.BUILDINFO</code> is archive-only, and <strong>38 of 39</strong> carry <code>%PACKAGER% = Unknown Packager</code> so there is no local fallback identity.</p>
       <p><strong><code>aurvet snapshot &lt;pkgbase&gt;</code></strong> records, into the tool's own state, the small artifacts that matter: <code>PKGBUILD</code>, <code>.SRCINFO</code>, <code>.BUILDINFO</code>, <code>git log</code> summary, remote URL, resolved source URLs, and the <strong>upstream commit actually built</strong> for VCS sources. A few KB per package against the 88 GB the cache occupies to hold the same facts.</p>
       <p>Invoked automatically by <code>review</code>/<code>install</code>, and by a <strong><code>PostTransaction</code> hook</strong> — which is what that hook is genuinely good for, unlike gating. Note <code>PostTransaction</code> hooks do not run when a transaction fails, so <code>scan</code> also opportunistically captures for any package whose evidence is still present but unsnapshotted.</p>
-      <p>Keyed on <strong><code>pkgbase</code>, not <code>pkgname</code></strong> — 433 of 1409 installed packages are split. Where no snapshot and no live evidence exist, checks report <em>unavailable</em> (INV-10) and the summary states it: <em>"provenance unavailable for N of M foreign packages"</em>.</p>
+      <p><strong>Snapshots</strong> are keyed on <strong><code>pkgbase</code>, not
+      <code>pkgname</code></strong> — 433 of 1409 installed packages are split, and a
+      snapshot records what one <em>build</em> produced. Where no snapshot and no live
+      evidence exist, checks report <em>unavailable</em> (INV-10) and the summary states
+      it: <em>"provenance unavailable for N of M foreign packages"</em>.</p>
+      <p class="note"><strong>Scoped 2026-08-04.</strong> This sentence previously read
+      as a blanket "keyed on pkgbase, not pkgname" for all provenance, and was cited
+      that way. It is true of <em>snapshots</em> and false of <em>AUR index presence</em>,
+      which is keyed on the package name because the RPC matches names — see §5.1.1.
+      Read as a blanket rule it produces the defect §5.1.1 exists to prevent.</p>
     </section>
 
     <section id="baseline">

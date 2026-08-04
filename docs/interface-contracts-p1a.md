@@ -175,7 +175,7 @@ mattered all trace to one spec omission, recorded as J-0.
 
 | # | Escalation | Decision |
 |---|---|---|
-| J-0 | **§5.1 never says whether "absent from the AUR index" is keyed by package *name* or by *pkgbase*.** Three of the four high findings live in that single omission. | The RPC matches **names**, so presence is keyed by name; the tombstone is keyed by the **declared `%BASE%`**. Where a record's `PackageBase` and the installed package's `%BASE%` disagree, cgit is consulted about the *declared* base — critical on malware, gap on failure, silent otherwise, because a benign rename is indistinguishable. This belongs in spec §5.1, not only in a code comment. |
+| J-0 | **§5.1 never says whether "absent from the AUR index" is keyed by package *name* or by *pkgbase*.** Three of the four high findings live in that single omission. | **Closed.** Written up as spec **§5.1.1**, and §7's blanket "keyed on pkgbase, not pkgname" — which was being cited as authority for the wrong answer — scoped to snapshots only. |
 | E-1 | O-2 propagation is structurally impossible under the frozen `Provenance` signature — it cannot see the sync-DB gaps its caller collected. | Accepted. `check.SyncCoverageGaps` ships as the tested primitive the caller merges. `Provenance` takes the gap list directly at the next signature re-freeze (task 9/10 boundary). Frozen signatures do not move mid-phase. |
 | E-2 | Spec §4.1 stated its rule at DB granularity when the failure is per-entry. | **My defect.** §4.1 corrected to per-entry with a count. `LoadSyncNames` is still faithful to the old wording, so the implementation is a follow-up — the current behaviour is strictly better than the no-gap-at-all it replaced, but it is not yet right. |
 | E-4 | `Submitter == ""` silently disables the submitter-mismatch rule. Failure handling, so the lane left it. | Fix it: an absent `Submitter` is missing evidence and must gap, not vanish. INV-10 — a check whose evidence is absent reports *unavailable*, it does not pass. Two lines, blocks no true detection. |
@@ -183,6 +183,15 @@ mattered all trace to one spec omission, recorded as J-0.
 | E-6 | Two further defects in `internal/aur/http.go` (front B, already committed). | Recorded as open. Front B has had four fix rounds and two re-attacks; a fifth is warranted but not blocking. |
 | E-7 | `Info` never chunks its batch: 500 names → one 413 → all 500 gap. | Real, and it fails **safe** — gaps, not a false clean. Robustness, not correctness. Chunk at task 9. |
 | T1 | A `-debug` package carve-out, proposed by review, **deliberately not implemented** by the lane. | Agreed with the lane. The carve-out keys on `%NAME%` and `%BASE%`, both builder-controlled, which hands back the evasion S2 had just closed. Measured population on the reference system is zero. Documented in `Limits` instead. Reversible. |
+
+## Escalations from task 9 — orchestrator decisions
+
+| # | Escalation | Decision |
+|---|---|---|
+| E-8 | `LoadLocalDB` drops symlinked package entries with **no gap** — a foreign package leaves the population entirely and the run can still exit `0`. | Fix. Silent population loss is the worst failure available to this project: false assurance that leaves no trace. Count it or gap it, never neither. Assigned to the cleanup lane. |
+| E-9 | The sync oracle globs a caller-supplied root without escaping glob metacharacters, so a root containing `*`, `?` or `[` resolves the oracle to a **different directory** — wrong name set, wrong foreignness for every package. | Fix, and prefer reading the directory over escaping the pattern: that removes the failure mode instead of guarding it. It matters most under `--offline-root`, the mode used on a machine already under suspicion. |
+| E-11 | `aur-absent` fired on **0** of the 1 package it targets; a cgit 404 was treated as "could not tell". | **Fixed and shipped** in `abbe166`. A 404 from cgit *plus a cgit-generated body* is a definitive absence of any removal record — `librewolf-fix-bin`, the verified malware removal, still answers 200 with a populated log table, so cgit retains logs after deletion and a 404 cannot conceal a tombstone. Deliberately narrow: a non-cgit 404 and a 200 carrying a cgit error body both remain errors. |
+| E-4b | `lead-report` fixed an exit-`0`-on-malware hole **outside its stated scope** and disclosed it: dropping `PackageBase` from an AUR response turned a malware tombstone into 0 findings, 0 gaps, exit `0`. | **Ratified.** It is E-4's own INV-10 shape one field over, on the only rule that reaches `SevCritical`, in a file the lane was authorised to edit. Disclosing rather than burying it was correct. Do not revert. |
 
 ## Process note: a headless lead cannot await its own specialists
 
