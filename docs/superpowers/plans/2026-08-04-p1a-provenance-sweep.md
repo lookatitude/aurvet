@@ -242,12 +242,12 @@ func run(args []string, stdout, stderr *os.File) int {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/config/ -v && go build ./... && go run ./cmd/arch-drift doctor`
 Expected: PASS, build succeeds, `doctor` prints five resolved lines
 
-- [ ] **Step 5: Commit**
+- [x] ~~**Step 5: Commit**~~ — superseded: the orchestrator commits per front, not per task, so two concurrent lanes cannot race the git index
 
 ```bash
 git add go.mod internal/config cmd/arch-drift
@@ -266,7 +266,7 @@ git commit -m "feat: module scaffold, root-derived config, doctor command"
 - Consumes: nothing
 - Produces: `alpm.ParseDesc(r io.Reader) (map[string][]string, error)`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/alpm/desc_test.go
@@ -324,12 +324,12 @@ func TestParseDescToleratesMissingFields(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/alpm/ -run TestParseDesc -v`
 Expected: FAIL — `undefined: ParseDesc`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/alpm/desc.go
@@ -368,12 +368,12 @@ func ParseDesc(r io.Reader) (map[string][]string, error) {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/alpm/ -v`
 Expected: PASS (both tests)
 
-- [ ] **Step 5: Commit**
+- [x] ~~**Step 5: Commit**~~ — superseded: the orchestrator commits per front, not per task, so two concurrent lanes cannot race the git index
 
 ```bash
 git add internal/alpm/desc.go internal/alpm/desc_test.go
@@ -392,7 +392,7 @@ git commit -m "feat(alpm): desc parser tolerant of absent fields"
 - Consumes: nothing
 - Produces: `alpm.ParseFiles(r io.Reader) (paths []string, backup map[string]string, err error)`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/alpm/files_test.go
@@ -438,12 +438,12 @@ func TestParseFilesNoBackupSection(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/alpm/ -run TestParseFiles -v`
 Expected: FAIL — `undefined: ParseFiles`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/alpm/files.go
@@ -485,12 +485,12 @@ func ParseFiles(r io.Reader) ([]string, map[string]string, error) {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/alpm/ -v`
 Expected: PASS (all four tests)
 
-- [ ] **Step 5: Commit**
+- [x] ~~**Step 5: Commit**~~ — superseded: the orchestrator commits per front, not per task, so two concurrent lanes cannot race the git index
 
 ```bash
 git add internal/alpm/files.go internal/alpm/files_test.go
@@ -513,7 +513,7 @@ git commit -m "feat(alpm): files parser with MD5-keyed %BACKUP% section"
 - Consumes: `alpm.ParseDesc`, `alpm.ParseFiles`
 - Produces: `alpm.Package{Name, Version, Base, Validation, Packager string; InstallDate time.Time; Files []string; Backup map[string]string}`; `alpm.LoadLocalDB(dbPath string) ([]Package, []string, error)` returning packages and the names of unreadable entries (coverage gaps)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/alpm/localdb_test.go
@@ -590,12 +590,12 @@ func TestLoadLocalDBSkipsNonPackageEntries(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/alpm/ -run TestLoadLocalDB -v`
 Expected: FAIL — `undefined: LoadLocalDB`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/alpm/localdb.go
@@ -667,6 +667,13 @@ func LoadLocalDB(dbPath string) ([]Package, []string, error) {
 		if secs, err := strconv.ParseInt(first(fields, "INSTALLDATE"), 10, 64); err == nil {
 			p.InstallDate = time.Unix(secs, 0).UTC()
 		}
+		// INV-9 correction, 2026-08-04. This block originally had no `else` on
+		// the Open: an open failure left p.Files empty and recorded NO gap, so
+		// the package reported as fully analysed when its file list had not been
+		// read at all — coverage inferred rather than reported, which is exactly
+		// what INV-9 forbids. The ParseFiles-error branch below already recorded
+		// one; only the open path was missed. The package still lands in pkgs,
+		// because its `desc` was readable.
 		if ff, err := os.Open(filepath.Join(dir, "files")); err == nil {
 			paths, backup, perr := ParseFiles(ff)
 			ff.Close()
@@ -675,6 +682,8 @@ func LoadLocalDB(dbPath string) ([]Package, []string, error) {
 			} else {
 				gaps = append(gaps, e.Name()+"/files")
 			}
+		} else {
+			gaps = append(gaps, e.Name()+"/files")
 		}
 		if p.Name == "" {
 			gaps = append(gaps, e.Name())
@@ -686,12 +695,12 @@ func LoadLocalDB(dbPath string) ([]Package, []string, error) {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/alpm/ -v`
 Expected: PASS (all six tests)
 
-- [ ] **Step 5: Commit**
+- [x] ~~**Step 5: Commit**~~ — superseded: the orchestrator commits per front, not per task, so two concurrent lanes cannot race the git index
 
 ```bash
 git add internal/alpm/localdb.go internal/alpm/localdb_test.go
@@ -707,10 +716,16 @@ git commit -m "feat(alpm): local DB enumeration with unreadable-entry gaps"
 - Create: `internal/alpm/syncdb_test.go`
 
 **Interfaces:**
-- Consumes: nothing
+- Consumes: **`alpm.Package` (task 4)** — corrected 2026-08-04. This entry
+  originally read "Consumes: nothing", which is wrong: `IsForeign` takes a
+  `Package`. The error was not cosmetic. Go compiles a package's entire test
+  binary before applying `-run`, so task 5 landing on disk ahead of task 4 made
+  *every* test in `internal/alpm` unbuildable, and the specialists on tasks 2 and
+  3 had to verify in throwaway `/tmp` modules and could not run `go vet` in-tree.
+  **The genuinely independent trio is tasks 2, 3 and 4 — not 2, 3 and 5.**
 - Produces: `alpm.LoadSyncNames(syncPath string) (map[string]bool, []string, error)` returning the set of package names present in any sync DB plus unreadable DB filenames; `alpm.IsForeign(p Package, syncNames map[string]bool) bool`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/alpm/syncdb_test.go
@@ -789,12 +804,12 @@ func TestIsForeignIgnoresValidation(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/alpm/ -run 'TestLoadSyncNames|TestIsForeign' -v`
 Expected: FAIL — `undefined: LoadSyncNames`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/alpm/syncdb.go
@@ -880,12 +895,12 @@ func IsForeign(p Package, syncNames map[string]bool) bool {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/alpm/ -v`
 Expected: PASS (all tests)
 
-- [ ] **Step 5: Commit**
+- [x] ~~**Step 5: Commit**~~ — superseded: the orchestrator commits per front, not per task, so two concurrent lanes cannot race the git index
 
 ```bash
 git add internal/alpm/syncdb.go internal/alpm/syncdb_test.go
