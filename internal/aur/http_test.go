@@ -2,12 +2,14 @@ package aur
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -323,6 +325,221 @@ func TestInfoRejectsUnindexableResult(t *testing.T) {
 	}
 }
 
+// chunkServer stands up a loopback server that records each request's arg[]
+// values (call-indexed, 0-based) and answers with respond's status/body for
+// that call number. No test using it touches the network.
+func chunkServer(t *testing.T, respond func(call int, args []string) (int, string)) (c *HTTP, calls func() [][]string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen [][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		call := len(seen)
+		args := append([]string(nil), r.URL.Query()["arg[]"]...)
+		seen = append(seen, args)
+		mu.Unlock()
+		status, body := respond(call, args)
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return NewHTTP(srv.URL, srv.Client()), func() [][]string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([][]string(nil), seen...)
+	}
+}
+
+// TestInfoChunksLargeBatches pins E-7: a batch larger than the chunk ceiling
+// must be split across multiple requests rather than put into one arg[]
+// query string, which is what turns into a 414/413 (and per contract rule 1,
+// the caller then turns that single error into N gaps).
+func TestInfoChunksLargeBatches(t *testing.T) {
+	n := 2*infoChunkSize + 7
+	bases := make([]string, n)
+	for i := range bases {
+		bases[i] = fmt.Sprintf("pkg-%d", i)
+	}
+	c, calls := chunkServer(t, func(call int, args []string) (int, string) {
+		return http.StatusOK, `{"type":"multiinfo","resultcount":0,"results":[]}`
+	})
+	if _, err := c.Info(context.Background(), bases); err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	got := calls()
+	wantRequests := (n + infoChunkSize - 1) / infoChunkSize
+	if len(got) != wantRequests {
+		t.Fatalf("made %d requests, want %d", len(got), wantRequests)
+	}
+	seen := map[string]int{}
+	for _, args := range got {
+		if len(args) > infoChunkSize {
+			t.Errorf("a request carried %d args, want at most %d", len(args), infoChunkSize)
+		}
+		for _, a := range args {
+			seen[a]++
+		}
+	}
+	if len(seen) != n {
+		t.Errorf("union of arg[] has %d distinct names, want %d", len(seen), n)
+	}
+	for _, b := range bases {
+		if seen[b] != 1 {
+			t.Errorf("name %q appeared %d times across all requests, want exactly 1", b, seen[b])
+		}
+	}
+}
+
+// TestInfoMergesResultsAcrossChunks: a name that only appears in the LAST
+// chunk must still make it into the returned map.
+func TestInfoMergesResultsAcrossChunks(t *testing.T) {
+	n := 2*infoChunkSize + 3
+	bases := make([]string, n)
+	for i := range bases {
+		bases[i] = fmt.Sprintf("pkg-%d", i)
+	}
+	last := bases[n-1]
+	c, _ := chunkServer(t, func(call int, args []string) (int, string) {
+		for _, a := range args {
+			if a == last {
+				return http.StatusOK, fmt.Sprintf(`{"type":"multiinfo","resultcount":1,"results":[
+				  {"Name":%q,"PackageBase":%q,"Maintainer":"alice","Submitter":"alice",
+				   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`, last, last)
+			}
+		}
+		return http.StatusOK, `{"type":"multiinfo","resultcount":0,"results":[]}`
+	})
+	got, err := c.Info(context.Background(), bases)
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if p, ok := got[last]; !ok || p.Maintainer != "alice" {
+		t.Errorf("got[%q] = %+v, ok=%v, want the last chunk's result merged in", last, p, ok)
+	}
+}
+
+// TestInfoChunkFailureFailsWholeCall pins E-7 requirement 2: a partial map
+// with a nil error would be a silent absence for every name in the failed
+// chunk — the exact inversion contract rule 1 exists to prevent. A failing
+// chunk must fail the WHOLE call: nil map, non-nil error.
+func TestInfoChunkFailureFailsWholeCall(t *testing.T) {
+	n := 2*infoChunkSize + 1
+	bases := make([]string, n)
+	for i := range bases {
+		bases[i] = fmt.Sprintf("pkg-%d", i)
+	}
+	c, _ := chunkServer(t, func(call int, args []string) (int, string) {
+		if call == 1 {
+			return http.StatusInternalServerError, "boom"
+		}
+		return http.StatusOK, `{"type":"multiinfo","resultcount":0,"results":[]}`
+	})
+	got, err := c.Info(context.Background(), bases)
+	if err == nil {
+		t.Fatal("chunk 2 failing must fail the whole call")
+	}
+	if got != nil {
+		t.Errorf("got %v alongside the error, want nil", got)
+	}
+}
+
+// TestInfoCrossChunkKeyingNameWinsGlobally pins E-7 requirement 3: the R6
+// two-pass keying invariant (a package's own Name always wins its key) must
+// hold GLOBALLY across chunks, not per chunk. Chunk 1 returns a result named
+// "a" whose PackageBase is "b"; chunk 2 returns a result actually NAMED "b".
+// A per-chunk two-pass implementation can let chunk 1's PackageBase claim on
+// "b" stand, because chunk 1 never sees chunk 2's own-name result. Accumulate
+// first, then run both passes once over the union.
+func TestInfoCrossChunkKeyingNameWinsGlobally(t *testing.T) {
+	bases := make([]string, infoChunkSize+1)
+	for i := range bases[:infoChunkSize-1] {
+		bases[i] = fmt.Sprintf("filler-%d", i)
+	}
+	bases[infoChunkSize-1] = "a" // last entry of chunk 1
+	bases[infoChunkSize] = "b"   // sole entry of chunk 2
+
+	c, _ := chunkServer(t, func(call int, args []string) (int, string) {
+		switch call {
+		case 0:
+			return http.StatusOK, `{"type":"multiinfo","resultcount":1,"results":[
+			  {"Name":"a","PackageBase":"b","Maintainer":"mallory","Submitter":"mallory",
+			   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`
+		case 1:
+			return http.StatusOK, `{"type":"multiinfo","resultcount":1,"results":[
+			  {"Name":"b","PackageBase":"c","Maintainer":"alice","Submitter":"alice",
+			   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`
+		}
+		return http.StatusOK, `{"type":"multiinfo","resultcount":0,"results":[]}`
+	})
+	got, err := c.Info(context.Background(), bases)
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	p, ok := got["b"]
+	if !ok || p.Name != "b" || p.Maintainer != "alice" {
+		t.Errorf(`got["b"] = %+v, ok=%v, want the package NAMED "b" (chunk 2's own record), not chunk 1's PackageBase claim`, p, ok)
+	}
+}
+
+// TestInfoFirstChunkPreservesInputOrdering: check.Provenance sorts names
+// before calling Info, so chunk boundaries must be deterministic. Info must
+// not sort internally — that would duplicate a guarantee the caller already
+// provides — so the arg[] order of the first request must match input order.
+func TestInfoFirstChunkPreservesInputOrdering(t *testing.T) {
+	bases := []string{"zeta", "alpha", "mu"}
+	c, calls := chunkServer(t, func(call int, args []string) (int, string) {
+		return http.StatusOK, `{"type":"multiinfo","resultcount":0,"results":[]}`
+	})
+	if _, err := c.Info(context.Background(), bases); err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	got := calls()
+	if len(got) != 1 {
+		t.Fatalf("got %d requests, want 1", len(got))
+	}
+	for i, want := range bases {
+		if got[0][i] != want {
+			t.Errorf("arg[] order = %v, want %v", got[0], bases)
+		}
+	}
+}
+
+// TestInfoDuplicateNamesAcrossChunkBoundaryDoNotBreakResultCountCheck pins
+// E-7 requirement 6. check.Provenance dedups names via a set before calling
+// Info, so Info documents the caller's obligation rather than defensively
+// deduping: a duplicate straddling a chunk boundary is simply asked about
+// twice. That must not break the per-chunk resultcount check, which compares
+// a response's own resultcount to its own results length — not to how many
+// arg[] entries the request carried.
+func TestInfoDuplicateNamesAcrossChunkBoundaryDoNotBreakResultCountCheck(t *testing.T) {
+	bases := make([]string, infoChunkSize+2)
+	for i := range bases {
+		bases[i] = "dup"
+	}
+	c, calls := chunkServer(t, func(call int, args []string) (int, string) {
+		return http.StatusOK, `{"type":"multiinfo","resultcount":1,"results":[
+		  {"Name":"dup","PackageBase":"dup","Maintainer":"alice","Submitter":"alice",
+		   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`
+	})
+	got, err := c.Info(context.Background(), bases)
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if len(calls()) != 2 {
+		t.Fatalf("got %d requests, want 2", len(calls()))
+	}
+	if p, ok := got["dup"]; !ok || p.Maintainer != "alice" {
+		t.Errorf(`got["dup"] = %+v, ok=%v`, p, ok)
+	}
+	for i, args := range calls() {
+		for _, a := range args {
+			if a != "dup" {
+				t.Errorf("request %d carried unexpected arg %q, Info is not expected to dedup", i, a)
+			}
+		}
+	}
+}
+
 // TestGetRejectsOversizedBody pins F8: io.ReadAll over a LimitReader returns a
 // short read with err == nil, so padding past the cap silently truncated the
 // page and a tombstone beyond the cap vanished. The cap stays (it is a correct
@@ -493,11 +710,27 @@ func TestTombstoneMissingLogTableIsAnError(t *testing.T) {
 		}
 	})
 
-	t.Run("genuine 404", func(t *testing.T) {
+	// Amended 2026-08-04. This subtest asserted that any HTTP 404 is an error --
+	// while serving cgit's OWN 404 page, since the `notCgit` fixture is real cgit
+	// output (the variable name is a misnomer: it has no log table, but it is
+	// cgit-generated). Measurement refutes the assertion: librewolf-fix-bin, the
+	// verified malware removal, still answers 200 with a populated log table, so
+	// cgit retains logs after deletion and a 404 cannot conceal a tombstone.
+	// Treating it as a failure gapped every legitimately-absent package forever
+	// and silenced the aur-absent rule entirely.
+	//
+	// The protection this was reaching for survives, narrowed to what it can
+	// actually establish: a 404 from something OTHER than cgit is still an error.
+	// See TestTombstoneNonCgit404IsStillAnError and
+	// TestTombstoneCgitErrorBodyWith200IsStillAnError.
+	t.Run("cgit's own 404 is a definitive no-tombstone", func(t *testing.T) {
 		c := serveBody(t, http.StatusNotFound, notCgit)
-		_, _, err := c.Tombstone(context.Background(), "zzz-aurvet-does-not-exist-zzz")
-		if err == nil {
-			t.Fatal("an HTTP 404 must be an error, not an absence")
+		present, msg, err := c.Tombstone(context.Background(), "zzz-aurvet-does-not-exist-zzz")
+		if err != nil {
+			t.Fatalf("cgit 404 returned err=%v; want a definitive answer", err)
+		}
+		if present || msg != "" {
+			t.Errorf("got (%v, %q); want (false, \"\")", present, msg)
 		}
 	})
 

@@ -16,35 +16,22 @@ const limitProvenance = "Packaging provenance only; says nothing about whether t
 // SyncCoverageGaps turns the unreadable-sync-DB filenames that
 // alpm.LoadSyncNames reports into finding.Gaps.
 //
-// It exists because Provenance CANNOT detect this condition itself, and the
-// reason is structural rather than an oversight. Foreignness is
-// !syncNames[p.Name], so an oracle that failed to parse and an oracle that
-// answered "none of these packages are in a repository" arrive at Provenance
-// as the same empty map. spec.html §4.1 makes the distinguishing rule
-// structural on purpose — zero names WITH at least one tar entry — and the
-// tar entry count is exactly what the frozen signature
+// It exists because foreignness is !syncNames[p.Name], so an oracle that
+// failed to parse and an oracle that answered "none of these packages are in
+// a repository" would otherwise arrive at Provenance as the same empty map.
+// spec.html §4.1 makes the distinguishing rule structural on purpose — zero
+// names WITH at least one tar entry — and the tar entry count is exactly what
+// a bare syncNames map cannot carry.
 //
-//	Provenance(ctx, pkgs, syncNames, cl, network)
-//
-// does not carry. A numeric guard inside Provenance (len(syncNames) == 0 =>
-// gap everything) is the wrong fix twice over: it would fire on a legitimately
-// empty repository set, and it would miss a DB that parsed to a handful of
-// names while failing on the rest.
-//
-// So the propagation is the CALLER's obligation, and it is not optional. A
-// caller that loads sync DBs, gets a non-empty gap list back, and reports
-// Provenance's Result unmerged is presenting foreignness verdicts as complete
-// coverage when the oracle underneath them was not understood — the systemic
-// false accusation §4.1 exists to prevent. Merge these into the reported
-// Result:
-//
-//	names, dbGaps, err := alpm.LoadSyncNames(cfg.SyncPath)
-//	res := check.Provenance(ctx, pkgs, names, cl, cfg.Network)
-//	res.Gaps = append(res.Gaps, check.SyncCoverageGaps(dbGaps)...)
-//
-// Enforcing that by comment is weaker than enforcing it by signature; see the
-// lead-checks report, which escalates a signature revision at the next
-// re-freeze.
+// E-1: Provenance now takes the unreadable-DB list directly as a required
+// positional parameter, precisely so this stays the tested primitive rather
+// than an obligation enforced only by a comment. The frozen signature used to
+// give Provenance no way to see this list at all, which meant a caller could
+// merge it, forget to, or merge it after an early return had already handed
+// back a Result — and the worst case was silent: a completely empty,
+// completely "complete" Result for a run whose foreignness oracle was never
+// understood. A required parameter makes omitting it a compile error instead
+// of a code-review miss.
 func SyncCoverageGaps(unreadableDBs []string) []finding.Gap {
 	if len(unreadableDBs) == 0 {
 		return nil
@@ -125,8 +112,28 @@ type tombstoneOutcome struct {
 // aur.IsMalwareRemoval reaches SevCritical (contract rule 3); every other
 // removal — administrative or merely undetected — lands at SevSuspicious via
 // aur-absent.
-func Provenance(ctx context.Context, pkgs []alpm.Package, syncNames map[string]bool, cl aur.Client, network bool) finding.Result {
+//
+// unreadableSyncDBs is alpm.LoadSyncNames's second return value, verbatim:
+// the unreadable sync-DB filenames. It is converted with SyncCoverageGaps and
+// merged into the result (E-1).
+func Provenance(
+	ctx context.Context,
+	pkgs []alpm.Package,
+	syncNames map[string]bool,
+	unreadableSyncDBs []string,
+	cl aur.Client,
+	network bool,
+) finding.Result {
 	var res finding.Result
+
+	// LOAD-BEARING PLACEMENT, not stylistic: this must run before the
+	// len(foreign) == 0 early return below, before the !network early return,
+	// and before every other exit path in this function. A sync-DB parse
+	// failure means every foreignness verdict this sweep produces — including
+	// "no foreign packages at all" — rests on an oracle that was not fully
+	// understood, so the gap has to survive every exit, not just the ones that
+	// happen to reach the bottom of the function (E-1).
+	res.Gaps = append(res.Gaps, SyncCoverageGaps(unreadableSyncDBs)...)
 
 	var foreign []alpm.Package
 	for _, p := range pkgs {
@@ -221,6 +228,23 @@ func Provenance(ctx context.Context, pkgs []alpm.Package, syncNames map[string]b
 					RuleID: "aur-tombstone", Subject: p.Name,
 					Reason: fmt.Sprintf("cgit lookup failed: %v", out.err),
 				})
+				// The tombstone REASON is unknown, but the absence itself is
+				// not: Info already established that the AUR has no record of
+				// this package. Dropping the aur-absent finding along with the
+				// failed reason lookup discarded a fact we held, and suppressed
+				// the rule entirely on the reference system. The gap above still
+				// forces exit 3, so this cannot read as a complete verdict.
+				res.Findings = append(res.Findings, finding.Finding{
+					RuleID: "aur-absent", SubjectKind: "package", Subject: p.Name,
+					Severity: finding.SevSuspicious,
+					Summary:  "installed foreign package is absent from the AUR",
+					Evidence: append([]string{
+						"absent from the AUR index, searched by package name",
+						"whether it was removed, and why, could not be determined",
+						"validation=" + p.Validation,
+					}, baseEvidence(p)...),
+					Limits: "Absence alone is not compromise: dropped-from-repo, renamed and never-published packages look identical. The removal reason was not retrievable, so a malware removal cannot be excluded.",
+				})
 				continue
 			}
 			if out.found && aur.IsMalwareRemoval(out.msg) {
@@ -303,7 +327,26 @@ func Provenance(ctx context.Context, pkgs []alpm.Package, syncNames map[string]b
 		// an administrative removal of the old base is that same rename seen
 		// from the other side. Malware is the one wording that earns a finding
 		// here, and a cgit failure earns a gap rather than either answer.
-		if meta.PackageBase != "" && p.Base != "" && meta.PackageBase != p.Base {
+		//
+		// E-4b: authorised as E-4's own rule applied to a second field. The
+		// orchestrator scoped this lane to provenance.go "for E-1 / E-4 / E-7
+		// only"; the lead judged that closing an exit-0-on-malware hole in this
+		// already-authorised file, using the exact pattern E-4 established
+		// elsewhere in this function (INV-10: a check whose evidence is absent
+		// reports unavailable, it does not pass), falls inside that scope, and
+		// is disclosing this judgement to the orchestrator for ratification.
+		// Before this switch, `meta.PackageBase == ""` let a package declaring a
+		// malware-tombstoned pkgbase produce no finding, no gap, and exit 0 --
+		// the same defect shape E-4 fixed for aur-submitter-mismatch, left open
+		// on the one rule that can reach SevCritical.
+		switch {
+		case meta.PackageBase == "" || p.Base == "":
+			res.Gaps = append(res.Gaps, finding.Gap{
+				RuleID: "aur-tombstone", Subject: p.Name,
+				Reason: "declared pkgbase or AUR record pkgbase is absent; the " +
+					"declared-pkgbase comparison did not run",
+			})
+		case meta.PackageBase != p.Base:
 			out := tombstoneFor(p.Base)
 			switch {
 			case out.err != nil:
@@ -329,15 +372,33 @@ func Provenance(ctx context.Context, pkgs []alpm.Package, syncNames map[string]b
 			}
 		}
 		if meta.Maintainer == "" {
+			submitterEvidence := "submitter=" + meta.Submitter
+			if meta.Submitter == "" {
+				submitterEvidence = "submitter unavailable"
+			}
 			res.Findings = append(res.Findings, finding.Finding{
 				RuleID: "aur-orphaned", SubjectKind: "package", Subject: p.Name,
 				Severity: finding.SevSuspicious,
 				Summary:  "package is orphaned in the AUR",
-				Evidence: []string{"maintainer is unset", "submitter=" + meta.Submitter},
+				Evidence: []string{"maintainer is unset", submitterEvidence},
 				Limits:   "Orphaning is a takeover precondition, not evidence of compromise. " + limitProvenance,
 			})
 		}
-		if meta.Maintainer != "" && meta.Submitter != "" && meta.Maintainer != meta.Submitter {
+		// E-4/INV-10: a check whose evidence is absent reports unavailable, it
+		// does not pass. An absent Submitter used to read as "maintainer and
+		// submitter agree" — the exact takeover signal this rule exists to raise,
+		// turned off by the absence of the field it compares. This fires whenever
+		// Submitter == "", including when Maintainer is also empty: the orphaned
+		// state is known and keeps its own aur-orphaned finding above, while a
+		// missing Submitter is an independent unknown. Both can fire on the same
+		// package — one finding, one gap.
+		switch {
+		case meta.Submitter == "":
+			res.Gaps = append(res.Gaps, finding.Gap{
+				RuleID: "aur-submitter-mismatch", Subject: p.Name,
+				Reason: "AUR record carries no submitter; the maintainer/submitter identity comparison did not run",
+			})
+		case meta.Maintainer != "" && meta.Maintainer != meta.Submitter:
 			res.Findings = append(res.Findings, finding.Finding{
 				RuleID: "aur-submitter-mismatch", SubjectKind: "package", Subject: p.Name,
 				Severity: finding.SevSuspicious,

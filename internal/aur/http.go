@@ -16,6 +16,17 @@ import (
 const (
 	maxBody       = 8 << 20 // hard cap; a bundle/response bomb must not exhaust memory
 	userAgentName = "aurvet"
+
+	// infoChunkSize bounds how many bases go into a single Info request's
+	// arg[] list. The v5 RPC's practical arg[] ceiling is documented at
+	// roughly 250 entries before a request risks a 413/414; 200 keeps a
+	// margin below that so longer package names pushing the query string
+	// length up do not close the gap, while still batching efficiently for
+	// the reference system's population (39 foreign packages, one request).
+	// A const, not a parameter (E-7): the caller has no reason to tune this,
+	// and a tunable knob here is scope neither the escalation nor the frozen
+	// Client interface asked for.
+	infoChunkSize = 200
 )
 
 type HTTP struct {
@@ -49,6 +60,43 @@ type rpcResponse struct {
 // body — is a failed lookup, not an empty one (F10).
 var rpcSuccessTypes = map[string]bool{"multiinfo": true, "info": true}
 
+// httpStatusError carries a non-200 status together with its body, so a caller
+// can inspect the body before deciding whether the status means "failure" or
+// "answer".
+type httpStatusError struct {
+	code int
+	body []byte
+}
+
+func (e *httpStatusError) Error() string { return fmt.Sprintf("http %d", e.code) }
+
+// cgitInvalidBranchRe matches cgit's own not-a-branch error page, captured
+// verbatim in testdata/aur/cgit/log-404-nonexistent-branch.html.
+var cgitInvalidBranchRe = regexp.MustCompile(`(?i)cgit v[\d.]+|<div id='cgit'>`)
+
+// isNoSuchBranch reports whether err is cgit answering "this branch does not
+// exist" -- a definitive absence of any removal record, not a failed lookup.
+//
+// This distinction is load-bearing and rests on a measurement: librewolf-fix-bin,
+// the verified 2025 malware removal, STILL answers 200 with a populated log
+// table. cgit retains logs after package deletion, so a 404 cannot conceal a
+// tombstone. Treating it as "could not tell" made every legitimately-absent
+// package gap forever, which pinned a healthy system at exit 3 permanently and
+// suppressed the aur-absent rule entirely -- spec §5.1's cheapest, highest-signal
+// check fired on 0 of the 1 package it targets on the reference system.
+//
+// It is deliberately narrow: BOTH a 404 status AND a cgit-generated body. A
+// captive portal or proxy answering 404 with its own page is still an error, and
+// a 200 carrying this same body remains an error (F7) -- only cgit's own 404
+// counts as an answer.
+func isNoSuchBranch(err error) bool {
+	var se *httpStatusError
+	if !errors.As(err, &se) || se.code != http.StatusNotFound {
+		return false
+	}
+	return cgitInvalidBranchRe.Match(se.body)
+}
+
 // get fetches u and returns its body.
 //
 // F8: the size cap is enforced by reading one byte PAST it and erroring when
@@ -68,6 +116,13 @@ func (h *HTTP) get(ctx context.Context, u string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		// A 404 is reported with its body so Tombstone can tell cgit saying
+		// "no such branch" -- which is an ANSWER -- from any other 404, which
+		// is a failure. See errNoSuchBranch.
+		if resp.StatusCode == http.StatusNotFound {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			return nil, &httpStatusError{code: resp.StatusCode, body: b}
+		}
 		return nil, fmt.Errorf("http %d", resp.StatusCode)
 	}
 	limit := h.bodyCap
@@ -84,40 +139,82 @@ func (h *HTTP) get(ctx context.Context, u string) ([]byte, error) {
 	return body, nil
 }
 
+// Info fetches AUR metadata for bases, splitting the request into
+// infoChunkSize-sized chunks so one over-long arg[] list cannot turn into a
+// single 413/414 (E-7). Names are not deduplicated across the input — see the
+// chunking loop below.
 func (h *HTTP) Info(ctx context.Context, bases []string) (map[string]Pkg, error) {
 	if len(bases) == 0 {
 		return map[string]Pkg{}, nil
 	}
-	q := url.Values{"v": {"5"}, "type": {"info"}}
-	for _, b := range bases {
-		q.Add("arg[]", b)
+
+	// Every chunk's Results accumulate into one slice before any keying pass
+	// runs. Per contract rule 1, a failing chunk fails the WHOLE call — a
+	// partial map with a nil error would be a silent absence for every name in
+	// the failed chunk, so any error here returns immediately with a nil map.
+	var allResults []Pkg
+	for start := 0; start < len(bases); start += infoChunkSize {
+		end := start + infoChunkSize
+		if end > len(bases) {
+			end = len(bases)
+		}
+		// Not deduplicated: check.Provenance already dedups names via a set
+		// before calling Info (its nameSet), so a duplicate reaching here is
+		// the caller's to avoid, not Info's to filter. A duplicate straddling
+		// a chunk boundary is simply asked about twice; that does not disturb
+		// the per-chunk resultcount check below, which compares a response's
+		// own count to its own results length, not to the request's arg[]
+		// count.
+		chunk := bases[start:end]
+
+		q := url.Values{"v": {"5"}, "type": {"info"}}
+		for _, b := range chunk {
+			q.Add("arg[]", b)
+		}
+		body, err := h.get(ctx, h.base+"/rpc/?"+q.Encode())
+		if err != nil {
+			return nil, err
+		}
+		var r rpcResponse
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, err
+		}
+		// F10: three RPC failure shapes used to read as "these packages are not
+		// in the AUR". Per contract rule 1 a failure is a gap, never an
+		// absence, so each becomes an error and the caller records a
+		// finding.Gap. Validated per chunk (E-7 requirement 4): a chunk whose
+		// response is malformed must not be waved through because another
+		// chunk was fine.
+		//
+		//  1. a non-empty "error" field with no type:"error"
+		//     ({"resultcount":0,"results":[],"error":"Too many package results."})
+		//  2. an unrecognised or absent type (a bare `{}`)
+		//  3. resultcount disagreeing with the results array
+		if r.Error != "" {
+			return nil, fmt.Errorf("aur rpc: %s", r.Error)
+		}
+		if !rpcSuccessTypes[r.Type] {
+			return nil, fmt.Errorf("aur rpc: unrecognised response type %q", r.Type)
+		}
+		if r.ResultCount != len(r.Results) {
+			return nil, fmt.Errorf("aur rpc: resultcount %d but %d results", r.ResultCount, len(r.Results))
+		}
+		for i, p := range r.Results {
+			// R8: a result with neither identity indexes nowhere, yet it
+			// satisfies the resultcount check — so every requested base read
+			// as absent from a response that was actually broken. Per
+			// contract rule 1 that is a gap. Checked per chunk, same reason
+			// as the three checks above.
+			if p.Name == "" && p.PackageBase == "" {
+				return nil, fmt.Errorf("aur rpc: result %d has neither Name nor PackageBase", i)
+			}
+		}
+		allResults = append(allResults, r.Results...)
 	}
-	body, err := h.get(ctx, h.base+"/rpc/?"+q.Encode())
-	if err != nil {
-		return nil, err
-	}
-	var r rpcResponse
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, err
-	}
-	// F10: three RPC failure shapes used to read as "these packages are not in
-	// the AUR". Per contract rule 1 a failure is a gap, never an absence, so
-	// each becomes an error and the caller records a finding.Gap.
-	//
-	//  1. a non-empty "error" field with no type:"error"
-	//     ({"resultcount":0,"results":[],"error":"Too many package results."})
-	//  2. an unrecognised or absent type (a bare `{}`)
-	//  3. resultcount disagreeing with the results array
-	if r.Error != "" {
-		return nil, fmt.Errorf("aur rpc: %s", r.Error)
-	}
-	if !rpcSuccessTypes[r.Type] {
-		return nil, fmt.Errorf("aur rpc: unrecognised response type %q", r.Type)
-	}
-	if r.ResultCount != len(r.Results) {
-		return nil, fmt.Errorf("aur rpc: resultcount %d but %d results", r.ResultCount, len(r.Results))
-	}
-	// Keying happens in TWO passes, and the order is the fix for R6.
+
+	// Keying happens in TWO passes over the GLOBAL union of every chunk's
+	// Results, and the order is the fix for R6 — now enforced across chunk
+	// boundaries too, not only within one response.
 	//
 	// F15 requires cross-keying on both Name and PackageBase: the v5 endpoint
 	// matches package NAMES — `by=pkgbase` is rejected outright
@@ -133,29 +230,24 @@ func (h *HTTP) Info(ctx context.Context, bases []string) (map[string]Pkg, error)
 	// exactly the field a takeover check compares, so the caller was handed
 	// another package's provenance under a name it did not belong to.
 	//
+	// Running this per chunk instead of once over the union would reopen R6 at
+	// the chunk boundary: a chunk 2 PackageBase key could claim a key that a
+	// later chunk's own Name result would have claimed, because chunk 2 never
+	// sees chunk 3's results. Accumulating first and running both passes once
+	// is what keeps the invariant global.
+	//
 	// Invariant: a package's own Name always wins its key. Pass one claims
 	// every Name; pass two adds PackageBase keys only where nothing claimed
 	// them. Nothing is ever overwritten with a different Pkg.
-	out := make(map[string]Pkg, 2*len(r.Results))
-	for i, p := range r.Results {
-		// R8: a result with neither identity indexes nowhere, yet it satisfies
-		// the resultcount check — so every requested base read as absent from a
-		// response that was actually broken. Per contract rule 1 that is a gap.
-		//
-		// This deliberately does NOT verify that every requested base came
-		// back. Info's contract is that a missing key means the AUR does not
-		// have it; deciding absent-vs-gap for a base that simply was not in the
-		// response is task 8's job, not this function's.
-		if p.Name == "" && p.PackageBase == "" {
-			return nil, fmt.Errorf("aur rpc: result %d has neither Name nor PackageBase", i)
-		}
+	out := make(map[string]Pkg, 2*len(allResults))
+	for _, p := range allResults {
 		if p.Name != "" {
 			// Package names are unique in the AUR, so two results cannot
 			// legitimately claim the same Name key.
 			out[p.Name] = p
 		}
 	}
-	for _, p := range r.Results {
+	for _, p := range allResults {
 		if p.PackageBase == "" {
 			continue
 		}
@@ -656,6 +748,11 @@ func (h *HTTP) Tombstone(ctx context.Context, base string) (bool, string, error)
 	q := url.Values{"h": {base}}
 	body, err := h.get(ctx, h.base+"/cgit/aur.git/log/?"+q.Encode())
 	if err != nil {
+		// cgit answering "no such branch" is a definitive absence of any
+		// removal record, not a lookup failure. See isNoSuchBranch.
+		if isNoSuchBranch(err) {
+			return false, "", nil
+		}
 		return false, "", err
 	}
 	subjects, err := parseCgitLog(string(body))

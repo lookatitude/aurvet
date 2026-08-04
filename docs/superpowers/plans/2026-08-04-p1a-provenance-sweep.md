@@ -1696,7 +1696,7 @@ git commit -m "feat(check): provenance rules; failures become gaps, never absenc
 - Consumes: `finding.Result`
 - Produces: `report.Summary{Total, Foreign int}`; `report.Text(w io.Writer, r finding.Result, s Summary) error`; `report.JSON(w io.Writer, r finding.Result, s Summary) error`; `report.ExitCode(r finding.Result, min finding.Severity) int`; `report.Explain(w io.Writer, r finding.Result, id string) error`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/report/report_test.go
@@ -1782,12 +1782,12 @@ func TestExplainStatesLimits(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/report/ -v`
 Expected: FAIL — `undefined: Text`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/report/text.go
@@ -2037,12 +2037,12 @@ import (
 )
 ```
 
-- [ ] **Step 4: Run tests and exercise the binary**
+- [x] **Step 4: Run tests and exercise the binary**
 
 Run: `go test ./... && go build ./... && go run ./cmd/aurvet scan --no-network`
 Expected: tests PASS; `scan --no-network` prints a header with `coverage: incomplete` and exits `3`
 
-- [ ] **Step 5: Commit**
+- [x] ~~**Step 5: Commit**~~ — superseded: the orchestrator commits per lane
 
 ```bash
 git add internal/report cmd/aurvet

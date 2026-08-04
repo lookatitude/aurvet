@@ -11,6 +11,7 @@ import (
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/aur"
 	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/report"
 )
 
 func pkg(name string) alpm.Package {
@@ -33,7 +34,7 @@ func TestTombstonedPackageIsCritical(t *testing.T) {
 		Tombstones: map[string]string{"librewolf-fix-bin": "history removed due to malware"},
 	}
 	r := Provenance(context.Background(),
-		[]alpm.Package{pkg("librewolf-fix-bin")}, map[string]bool{}, cl, true)
+		[]alpm.Package{pkg("librewolf-fix-bin")}, map[string]bool{}, nil, cl, true)
 	f, ok := findingFor(r, "aur-tombstone")
 	if !ok {
 		t.Fatalf("no aur-tombstone finding; got %+v", r.Findings)
@@ -53,7 +54,7 @@ func TestAdministrativeRemovalIsNotCritical(t *testing.T) {
 		Known:      map[string]aur.Pkg{},
 		Tombstones: map[string]string{"foo-bin": "history removed due to rename"},
 	}
-	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
 	if r.MaxSeverity() == finding.SevCritical {
 		t.Fatalf("administrative removal reported critical: %+v", r.Findings)
 	}
@@ -71,7 +72,7 @@ func TestAdministrativeRemovalIsNotCritical(t *testing.T) {
 func TestAbsentWithoutTombstoneIsSuspicious(t *testing.T) {
 	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
 	r := Provenance(context.Background(),
-		[]alpm.Package{pkg("python-pkg_resources")}, map[string]bool{}, cl, true)
+		[]alpm.Package{pkg("python-pkg_resources")}, map[string]bool{}, nil, cl, true)
 	f, ok := findingFor(r, "aur-absent")
 	if !ok {
 		t.Fatalf("no aur-absent finding; got %+v", r.Findings)
@@ -89,7 +90,7 @@ func TestSubmitterMismatchIsSuspicious(t *testing.T) {
 	cl := aur.Fake{Known: map[string]aur.Pkg{
 		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "alice", Submitter: "bob"},
 	}}
-	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
 	if _, ok := findingFor(r, "aur-submitter-mismatch"); !ok {
 		t.Fatalf("no submitter-mismatch finding; got %+v", r.Findings)
 	}
@@ -100,7 +101,7 @@ func TestOrphanedIsSuspicious(t *testing.T) {
 	cl := aur.Fake{Known: map[string]aur.Pkg{
 		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "", Submitter: "bob"},
 	}}
-	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
 	if _, ok := findingFor(r, "aur-orphaned"); !ok {
 		t.Fatalf("no orphaned finding; got %+v", r.Findings)
 	}
@@ -111,7 +112,7 @@ func TestOrphanedIsSuspicious(t *testing.T) {
 // the highest-severity rule.
 func TestRPCFailureProducesGapNotAbsence(t *testing.T) {
 	cl := aur.Fake{Err: errors.New("dial tcp: no route to host")}
-	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
 	if _, ok := findingFor(r, "aur-absent"); ok {
 		t.Fatal("network failure produced an aur-absent finding")
 	}
@@ -126,7 +127,7 @@ func TestRPCFailureProducesGapNotAbsence(t *testing.T) {
 // With network disabled the checks must report unavailable, not pass (INV-10).
 func TestNetworkDisabledProducesGap(t *testing.T) {
 	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")},
-		map[string]bool{}, aur.Fake{}, false)
+		map[string]bool{}, nil, aur.Fake{}, false)
 	if len(r.Findings) != 0 {
 		t.Errorf("findings = %+v, want none", r.Findings)
 	}
@@ -139,7 +140,7 @@ func TestNetworkDisabledProducesGap(t *testing.T) {
 func TestRepoPackagesAreSkipped(t *testing.T) {
 	cl := aur.Fake{Known: map[string]aur.Pkg{}}
 	r := Provenance(context.Background(), []alpm.Package{pkg("zlib")},
-		map[string]bool{"zlib": true}, cl, true)
+		map[string]bool{"zlib": true}, nil, cl, true)
 	if len(r.Findings) != 0 || !r.Complete() {
 		t.Errorf("repo package produced %+v gaps=%v", r.Findings, r.Gaps)
 	}
@@ -161,7 +162,7 @@ func TestLiveSplitPackageIsNotReportedAbsent(t *testing.T) {
 		{Name: "foo", Base: "foo-common", Version: "2.1.0-1", Validation: "none"},
 		{Name: "foo-utils", Base: "foo-common", Version: "2.1.0-1", Validation: "none"},
 	}
-	r := Provenance(context.Background(), pkgs, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), pkgs, map[string]bool{}, nil, cl, true)
 	if f, ok := findingFor(r, "aur-absent"); ok {
 		t.Fatalf("live split package accused of absence: %+v", f)
 	}
@@ -179,7 +180,7 @@ func TestBorrowedBaseDoesNotHideAnUnpublishedPackage(t *testing.T) {
 		"yay": {Name: "yay", PackageBase: "yay", Maintainer: "j", Submitter: "j"},
 	}}
 	evil := alpm.Package{Name: "nvidia-utils-patched", Base: "yay", Version: "1-1", Validation: "none"}
-	r := Provenance(context.Background(), []alpm.Package{evil}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{evil}, map[string]bool{}, nil, cl, true)
 	f, ok := findingFor(r, "aur-absent")
 	if !ok {
 		t.Fatalf("package published nowhere produced no finding; got %+v gaps=%+v", r.Findings, r.Gaps)
@@ -204,7 +205,7 @@ func TestOneRecordIsNotStampedOntoAnotherPackage(t *testing.T) {
 		"bar": {Name: "foo", PackageBase: "bar", Maintainer: "alice", Submitter: "bob"},
 	}}
 	victim := alpm.Package{Name: "bar", Base: "bar", Version: "1-1", Validation: "none"}
-	r := Provenance(context.Background(), []alpm.Package{victim}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{victim}, map[string]bool{}, nil, cl, true)
 	if f, ok := findingFor(r, "aur-submitter-mismatch"); ok {
 		t.Fatalf("another package's identity delta reported against bar: %+v", f)
 	}
@@ -223,7 +224,7 @@ func TestSplitBaseTombstoneIsStillCritical(t *testing.T) {
 		Tombstones: map[string]string{"librewolf-common": "history removed due to malware"},
 	}
 	p := alpm.Package{Name: "librewolf-fix-bin", Base: "librewolf-common", Version: "1-1", Validation: "none"}
-	r := Provenance(context.Background(), []alpm.Package{p}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{p}, map[string]bool{}, nil, cl, true)
 	f, ok := findingFor(r, "aur-tombstone")
 	if !ok {
 		t.Fatalf("split-base tombstone missed; got %+v gaps=%+v", r.Findings, r.Gaps)
@@ -248,7 +249,7 @@ func TestRecycledNameStillReportsTombstonedDeclaredBase(t *testing.T) {
 		Tombstones: map[string]string{"foo-evilbase": "history removed due to malware"},
 	}
 	installed := alpm.Package{Name: "foo", Base: "foo-evilbase", Version: "1-1", Validation: "none"}
-	r := Provenance(context.Background(), []alpm.Package{installed}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{installed}, map[string]bool{}, nil, cl, true)
 	f, ok := findingFor(r, "aur-tombstone")
 	if !ok {
 		t.Fatalf("tombstoned declared base went unreported; findings=%+v gaps=%+v", r.Findings, r.Gaps)
@@ -269,7 +270,7 @@ func TestBenignBaseRenameIsSilent(t *testing.T) {
 		"foo": {Name: "foo", PackageBase: "foo-newbase", Maintainer: "alice", Submitter: "alice"},
 	}}
 	installed := alpm.Package{Name: "foo", Base: "foo-oldbase", Version: "1-1", Validation: "none"}
-	r := Provenance(context.Background(), []alpm.Package{installed}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{installed}, map[string]bool{}, nil, cl, true)
 	if len(r.Findings) != 0 {
 		t.Errorf("benign pkgbase rename produced findings: %+v", r.Findings)
 	}
@@ -289,7 +290,7 @@ func TestAgreeingBaseIsNotProbed(t *testing.T) {
 		Tombstones: map[string]string{"foo-common": "history removed due to malware"},
 	}
 	installed := alpm.Package{Name: "foo", Base: "foo-common", Version: "1-1", Validation: "none"}
-	r := Provenance(context.Background(), []alpm.Package{installed}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{installed}, map[string]bool{}, nil, cl, true)
 	if len(r.Findings) != 0 || !r.Complete() {
 		t.Errorf("agreeing base was probed: findings=%+v gaps=%+v", r.Findings, r.Gaps)
 	}
@@ -305,7 +306,7 @@ func TestDeclaredBaseTombstoneFailureIsAGap(t *testing.T) {
 		TombstoneErr: map[string]error{"foo-otherbase": errors.New("cgit unreachable")},
 	}
 	installed := alpm.Package{Name: "foo", Base: "foo-otherbase", Version: "1-1", Validation: "none"}
-	r := Provenance(context.Background(), []alpm.Package{installed}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{installed}, map[string]bool{}, nil, cl, true)
 	if len(r.Findings) != 0 {
 		t.Errorf("a cgit failure produced findings: %+v", r.Findings)
 	}
@@ -324,7 +325,7 @@ func TestDeclaredBaseTombstoneNamesTheRightSubject(t *testing.T) {
 		Tombstones: map[string]string{"librewolf-fix-bin": "history removed due to malware"},
 	}
 	local := alpm.Package{Name: "my-internal-tool", Base: "librewolf-fix-bin", Version: "1-1", Validation: "none"}
-	r := Provenance(context.Background(), []alpm.Package{local}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{local}, map[string]bool{}, nil, cl, true)
 	f, ok := findingFor(r, "aur-tombstone")
 	if !ok {
 		t.Fatalf("no tombstone finding; got %+v", r.Findings)
@@ -337,7 +338,7 @@ func TestDeclaredBaseTombstoneNamesTheRightSubject(t *testing.T) {
 	}
 	// The own-record case must keep its own, different wording.
 	own := aur.Fake{Tombstones: map[string]string{"librewolf-fix-bin": "history removed due to malware"}}
-	r2 := Provenance(context.Background(), []alpm.Package{pkg("librewolf-fix-bin")}, map[string]bool{}, own, true)
+	r2 := Provenance(context.Background(), []alpm.Package{pkg("librewolf-fix-bin")}, map[string]bool{}, nil, own, true)
 	f2, _ := findingFor(r2, "aur-tombstone")
 	if f2.Summary == f.Summary {
 		t.Errorf("declared-base and own-record tombstones render identically: %q", f.Summary)
@@ -348,7 +349,7 @@ func TestDeclaredBaseTombstoneNamesTheRightSubject(t *testing.T) {
 // summary must not assert that the reason was not malware-related.
 func TestRemovalWithNoMessageDoesNotClaimNotMalware(t *testing.T) {
 	cl := aur.Fake{Tombstones: map[string]string{"foo-bin": ""}}
-	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
 	f, ok := findingFor(r, "aur-absent")
 	if !ok {
 		t.Fatalf("expected aur-absent; got %+v", r.Findings)
@@ -362,7 +363,7 @@ func TestRemovalWithNoMessageDoesNotClaimNotMalware(t *testing.T) {
 // asserting a commit message that does not exist.
 func TestRemovalWithNoMessageDoesNotFabricateEvidence(t *testing.T) {
 	cl := aur.Fake{Tombstones: map[string]string{"foo-bin": ""}}
-	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
 	f, ok := findingFor(r, "aur-absent")
 	if !ok {
 		t.Fatalf("expected aur-absent; got %+v", r.Findings)
@@ -385,7 +386,7 @@ func TestSyncCoverageGapsMakeAResultIncomplete(t *testing.T) {
 		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "alice", Submitter: "alice"},
 	}}
 	// A clean sweep: the package resolves, nothing is wrong with it.
-	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
 	if !r.Complete() {
 		t.Fatalf("precondition: expected a complete Result, got gaps %+v", r.Gaps)
 	}
@@ -422,12 +423,36 @@ func TestTombstoneErrorProducesGapNotAbsence(t *testing.T) {
 		Known:        map[string]aur.Pkg{},
 		TombstoneErr: map[string]error{"foo-bin": errors.New("dial tcp: connection reset")},
 	}
-	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, cl, true)
-	if _, ok := findingFor(r, "aur-absent"); ok {
-		t.Fatal("a Tombstone error produced an aur-absent finding")
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
+
+	// Amended 2026-08-04. This originally required NO aur-absent finding, to stop
+	// a transport hiccup becoming an accusation. That protection is real but it
+	// was aimed one step too wide: reaching this branch means Info SUCCEEDED and
+	// positively reported the package absent from the index, so absence is
+	// established fact and only the removal REASON is unknown. Suppressing the
+	// finding discarded something we knew, and on the reference system it
+	// silenced spec §5.1's highest-signal rule completely -- aur-absent fired on
+	// 0 of the 1 package it targets.
+	//
+	// What the hiccup must never produce is a REMOVAL claim, and that is still
+	// asserted below. The finding stays suspicious, its Limits say the reason was
+	// unretrievable, and the Gap keeps Complete() false, so nothing here can read
+	// as a settled verdict.
+	f, ok := findingFor(r, "aur-absent")
+	if !ok {
+		t.Fatal("a Tombstone error suppressed the aur-absent finding that Info had established")
+	}
+	if f.Severity != finding.SevSuspicious {
+		t.Errorf("severity = %v, want suspicious: a failed reason lookup must never escalate", f.Severity)
+	}
+	if f.Limits == "" {
+		t.Error("finding must state that the removal reason was not retrievable (INV-6)")
 	}
 	if _, ok := findingFor(r, "aur-tombstone"); ok {
 		t.Fatal("a Tombstone error produced an aur-tombstone finding")
+	}
+	if r.Complete() {
+		t.Error("Result.Complete() is true despite a failed cgit lookup")
 	}
 	found := false
 	for _, g := range r.Gaps {
@@ -459,7 +484,7 @@ func TestTombstoneAmbiguityIsAGapNotACritical(t *testing.T) {
 				"yay", "removed malware samples from the git history", 50),
 		},
 	}
-	r := Provenance(context.Background(), []alpm.Package{pkg("yay")}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{pkg("yay")}, map[string]bool{}, nil, cl, true)
 	if r.MaxSeverity() == finding.SevCritical {
 		t.Fatalf("Tombstone's ambiguity error reported critical: %+v", r.Findings)
 	}
@@ -493,7 +518,7 @@ func TestCriticalRequiresMalwareTombstone(t *testing.T) {
 			Known:      map[string]aur.Pkg{},
 			Tombstones: map[string]string{base: msg},
 		}
-		r := Provenance(context.Background(), []alpm.Package{pkg(base)}, map[string]bool{}, cl, true)
+		r := Provenance(context.Background(), []alpm.Package{pkg(base)}, map[string]bool{}, nil, cl, true)
 		gotCritical := r.MaxSeverity() == finding.SevCritical
 		wantCritical := aur.IsMalwareRemoval(msg)
 		if gotCritical != wantCritical {
@@ -516,7 +541,7 @@ func TestEveryFindingStatesItsLimits(t *testing.T) {
 		{"submitter-mismatch", aur.Fake{Known: map[string]aur.Pkg{"e": {Name: "e", PackageBase: "e", Maintainer: "alice", Submitter: "bob"}}}, []alpm.Package{pkg("e")}},
 	}
 	for _, s := range scenarios {
-		r := Provenance(context.Background(), s.pkgs, map[string]bool{}, s.cl, true)
+		r := Provenance(context.Background(), s.pkgs, map[string]bool{}, nil, s.cl, true)
 		if len(r.Findings) == 0 {
 			t.Fatalf("%s: expected at least one finding, got none", s.name)
 		}
@@ -537,10 +562,17 @@ func TestGapDoesNotSuppressOtherPackages(t *testing.T) {
 		TombstoneErr: map[string]error{"broken-bin": errors.New("cgit unreachable")},
 	}
 	r := Provenance(context.Background(),
-		[]alpm.Package{pkg("broken-bin"), pkg("clean-bin")}, map[string]bool{}, cl, true)
+		[]alpm.Package{pkg("broken-bin"), pkg("clean-bin")}, map[string]bool{}, nil, cl, true)
 
-	f, ok := findingFor(r, "aur-absent")
-	if !ok || f.Subject != "clean-bin" {
+	// Match on subject, not just rule: both packages now legitimately carry an
+	// aur-absent finding, and findingFor returns the first match.
+	var ok bool
+	for _, f := range r.Findings {
+		if f.RuleID == "aur-absent" && f.Subject == "clean-bin" {
+			ok = true
+		}
+	}
+	if !ok {
 		t.Errorf("clean-bin: expected an aur-absent finding; got findings=%+v", r.Findings)
 	}
 	gapped := false
@@ -561,7 +593,7 @@ func TestPackagesSharingABaseAreEachReported(t *testing.T) {
 	shared := alpm.Package{Name: "foo", Base: "foo-common", Version: "1.0-1", Validation: "none"}
 	other := alpm.Package{Name: "foo-utils", Base: "foo-common", Version: "1.0-1", Validation: "none"}
 	cl := aur.Fake{Known: map[string]aur.Pkg{}}
-	r := Provenance(context.Background(), []alpm.Package{shared, other}, map[string]bool{}, cl, true)
+	r := Provenance(context.Background(), []alpm.Package{shared, other}, map[string]bool{}, nil, cl, true)
 
 	subjects := map[string]bool{}
 	for _, f := range r.Findings {
@@ -571,5 +603,261 @@ func TestPackagesSharingABaseAreEachReported(t *testing.T) {
 	}
 	if !subjects["foo"] || !subjects["foo-utils"] {
 		t.Errorf("expected an aur-absent finding for each of foo and foo-utils; got %+v", r.Findings)
+	}
+}
+
+// E-1 — the frozen signature could not see the sync-DB gaps its caller
+// collected, so a name oracle that partly failed produced a Result that
+// reported Complete() == true. This is the one that matters most: zero
+// foreign packages plus one unreadable sync DB must still leave the sweep
+// incomplete, and the gap must name the DB file.
+func TestUnreadableSyncDBMakesAnEmptySweepIncomplete(t *testing.T) {
+	cl := aur.Fake{Known: map[string]aur.Pkg{}}
+	r := Provenance(context.Background(), nil, map[string]bool{}, []string{"core.db"}, cl, true)
+	if r.Complete() {
+		t.Fatal("an unreadable sync DB must leave an otherwise-empty sweep incomplete")
+	}
+	found := false
+	for _, g := range r.Gaps {
+		if g.Subject == "core.db" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no gap names core.db; got %+v", r.Gaps)
+	}
+}
+
+// The no-network early return must not displace the sync-coverage gap: both
+// gap kinds must be present, not one instead of the other.
+func TestUnreadableSyncDBSurvivesTheNoNetworkPath(t *testing.T) {
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")},
+		map[string]bool{}, []string{"core.db"}, aur.Fake{}, false)
+	if r.Complete() {
+		t.Fatal("must be incomplete")
+	}
+	var kinds map[string]bool = map[string]bool{}
+	for _, g := range r.Gaps {
+		kinds[g.RuleID] = true
+	}
+	if !kinds["sync-coverage"] || !kinds["aur-provenance"] {
+		t.Errorf("gaps = %+v, want both sync-coverage and aur-provenance", r.Gaps)
+	}
+}
+
+// Same as above but the RPC failure path, not the no-network path.
+func TestUnreadableSyncDBSurvivesAnRPCFailure(t *testing.T) {
+	cl := aur.Fake{Err: errors.New("dial tcp: no route to host")}
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")},
+		map[string]bool{}, []string{"core.db"}, cl, true)
+	kinds := map[string]bool{}
+	for _, g := range r.Gaps {
+		kinds[g.RuleID] = true
+	}
+	if !kinds["sync-coverage"] || !kinds["aur-provenance"] {
+		t.Errorf("gaps = %+v, want both sync-coverage and aur-provenance", r.Gaps)
+	}
+}
+
+// A normal sweep that produces real findings must still report them, and
+// still be marked incomplete because of the unreadable sync DB.
+func TestUnreadableSyncDBSurvivesAFullSweep(t *testing.T) {
+	cl := aur.Fake{Known: map[string]aur.Pkg{}}
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")},
+		map[string]bool{}, []string{"core.db"}, cl, true)
+	if _, ok := findingFor(r, "aur-absent"); !ok {
+		t.Fatalf("expected aur-absent finding; got %+v", r.Findings)
+	}
+	if r.Complete() {
+		t.Fatal("must be incomplete despite reporting findings")
+	}
+}
+
+// A healthy system — no unreadable sync DBs — must not be gapped into
+// permanent exit 3. Both nil and an empty slice must add no gap.
+func TestNoUnreadableSyncDBsAddsNoGap(t *testing.T) {
+	cl := aur.Fake{Known: map[string]aur.Pkg{
+		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "alice", Submitter: "alice"},
+	}}
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
+	if !r.Complete() {
+		t.Errorf("nil unreadableSyncDBs produced gaps: %+v", r.Gaps)
+	}
+	r = Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, []string{}, cl, true)
+	if !r.Complete() {
+		t.Errorf("empty unreadableSyncDBs produced gaps: %+v", r.Gaps)
+	}
+}
+
+// E-4 — INV-10: a check whose evidence is absent reports unavailable, it does
+// not pass. A record with no Submitter must not read as "maintainer and
+// submitter agree" — that silently disables the takeover signal the rule
+// exists to raise.
+func TestMissingSubmitterIsAGap(t *testing.T) {
+	cl := aur.Fake{Known: map[string]aur.Pkg{
+		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "alice", Submitter: ""},
+	}}
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
+	if _, ok := findingFor(r, "aur-submitter-mismatch"); ok {
+		t.Fatalf("a missing submitter must not produce a mismatch finding: %+v", r.Findings)
+	}
+	found := false
+	for _, g := range r.Gaps {
+		if g.RuleID == "aur-submitter-mismatch" && g.Subject == "foo-bin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no aur-submitter-mismatch gap for foo-bin; got %+v", r.Gaps)
+	}
+}
+
+// The gap must fire even when Maintainer is also empty — an orphaned package
+// keeps its own aur-orphaned finding, and a missing Submitter is a separate,
+// independent unknown. One finding, one gap, both on the same subject.
+func TestMissingSubmitterGapsAlongsideOrphanedFinding(t *testing.T) {
+	cl := aur.Fake{Known: map[string]aur.Pkg{
+		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "", Submitter: ""},
+	}}
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
+	if _, ok := findingFor(r, "aur-orphaned"); !ok {
+		t.Fatalf("expected aur-orphaned finding; got %+v", r.Findings)
+	}
+	found := false
+	for _, g := range r.Gaps {
+		if g.RuleID == "aur-submitter-mismatch" && g.Subject == "foo-bin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no aur-submitter-mismatch gap alongside aur-orphaned; got %+v", r.Gaps)
+	}
+}
+
+// The orphaned finding's evidence must not render a bare "submitter=" when
+// the field is absent — that asserts an empty-string submitter as fact.
+func TestOrphanedEvidenceSaysSubmitterUnavailable(t *testing.T) {
+	cl := aur.Fake{Known: map[string]aur.Pkg{
+		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "", Submitter: ""},
+	}}
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
+	f, ok := findingFor(r, "aur-orphaned")
+	if !ok {
+		t.Fatalf("expected aur-orphaned finding; got %+v", r.Findings)
+	}
+	for _, e := range f.Evidence {
+		if e == "submitter=" {
+			t.Errorf("evidence asserts an empty submitter as fact: %v", f.Evidence)
+		}
+	}
+	if !strings.Contains(strings.Join(f.Evidence, " "), "submitter unavailable") {
+		t.Errorf("evidence does not say submitter unavailable: %v", f.Evidence)
+	}
+}
+
+// SEC-2 / E-4b (report-sec finding 2, CRITICAL). Ported from
+// /tmp/aurvet-sec/internal/check/sec_provenance_test.go, inverted to assert the
+// FIXED behaviour. The J-0 declared-pkgbase cross-check used to be guarded by
+//
+//	if meta.PackageBase != "" && p.Base != "" && meta.PackageBase != p.Base
+//
+// so an AUR record carrying no PackageBase skipped the comparison entirely and
+// left the Result empty: Complete()==true, ExitCode==0, on a system carrying a
+// package that declares a malware-tombstoned pkgbase. E-4 already established
+// that an absent Submitter must gap rather than vanish (INV-10); this is that
+// same rule applied to the one remaining rule that can reach SevCritical.
+//
+// The two subtests describe the same system — an installed `librewolf`
+// declaring %BASE%=librewolf-evil, cgit tombstone for librewolf-evil reading
+// "history removed due to malware" — differing in one field of the AUR record.
+func TestProvenanceEmptyRecordPackageBaseSkipsTheTombstoneCrossCheck(t *testing.T) {
+	pkgs := []alpm.Package{{Name: "librewolf", Base: "librewolf-evil", Version: "1.0-1", Validation: "none"}}
+	syncNames := map[string]bool{"zlib": true} // librewolf is foreign
+	tombstones := map[string]string{"librewolf-evil": "history removed due to malware"}
+
+	t.Run("record names a different base: critical, as designed", func(t *testing.T) {
+		cl := aur.Fake{
+			Known: map[string]aur.Pkg{"librewolf": {
+				Name: "librewolf", PackageBase: "librewolf", Maintainer: "m", Submitter: "m",
+			}},
+			Tombstones: tombstones,
+		}
+		res := Provenance(context.Background(), pkgs, syncNames, nil, cl, true)
+		if len(res.Findings) != 1 || res.Findings[0].Severity != finding.SevCritical {
+			t.Fatalf("control case did not produce the critical: %+v", res)
+		}
+		if code := report.ExitCode(res, finding.SevSuspicious); code != 1 {
+			t.Fatalf("control ExitCode = %d, want 1", code)
+		}
+	})
+
+	t.Run("record omits PackageBase: gapped, not silent", func(t *testing.T) {
+		cl := aur.Fake{
+			Known: map[string]aur.Pkg{"librewolf": {
+				Name: "librewolf", PackageBase: "", Maintainer: "m", Submitter: "m",
+			}},
+			Tombstones: tombstones,
+		}
+		res := Provenance(context.Background(), pkgs, syncNames, nil, cl, true)
+		if res.Complete() {
+			t.Fatalf("an absent record PackageBase must leave coverage incomplete: findings=%+v gaps=%+v",
+				res.Findings, res.Gaps)
+		}
+		found := false
+		for _, g := range res.Gaps {
+			if g.RuleID == "aur-tombstone" && g.Subject == "librewolf" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no aur-tombstone gap for librewolf; got %+v", res.Gaps)
+		}
+		if code := report.ExitCode(res, finding.SevSuspicious); code == 0 {
+			t.Errorf("ExitCode = 0 with a malware-tombstoned declared pkgbase reachable from an empty AUR record")
+		}
+	})
+}
+
+// SEC-2b, the other side of the same hole: the INSTALLED package declares no
+// %BASE% at all. alpm.LoadLocalDB defaults Base to Name so cmd/aurvet never
+// produces this in practice, but Provenance is the exported join and the old
+// guard (`p.Base != ""`) skipped the comparison here too instead of gapping it.
+func TestProvenanceEmptyDeclaredBaseSkipsTheTombstoneCrossCheck(t *testing.T) {
+	pkgs := []alpm.Package{{Name: "librewolf", Base: "", Version: "1.0-1"}}
+	cl := aur.Fake{
+		Known: map[string]aur.Pkg{"librewolf": {
+			Name: "librewolf", PackageBase: "librewolf", Maintainer: "m", Submitter: "m",
+		}},
+	}
+	res := Provenance(context.Background(), pkgs, map[string]bool{"zlib": true}, nil, cl, true)
+	if res.Complete() {
+		t.Fatalf("an absent declared pkgbase must leave coverage incomplete: findings=%+v gaps=%+v",
+			res.Findings, res.Gaps)
+	}
+	found := false
+	for _, g := range res.Gaps {
+		if g.RuleID == "aur-tombstone" && g.Subject == "librewolf" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no aur-tombstone gap for librewolf; got %+v", res.Gaps)
+	}
+}
+
+// A present-and-equal Maintainer == Submitter still produces no finding and
+// no gap — the check ran and found no delta.
+func TestMaintainerEqualsSubmitterProducesNeitherFindingNorGap(t *testing.T) {
+	cl := aur.Fake{Known: map[string]aur.Pkg{
+		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "alice", Submitter: "alice"},
+	}}
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
+	if _, ok := findingFor(r, "aur-submitter-mismatch"); ok {
+		t.Fatalf("equal maintainer/submitter must not produce a mismatch finding: %+v", r.Findings)
+	}
+	for _, g := range r.Gaps {
+		if g.RuleID == "aur-submitter-mismatch" {
+			t.Errorf("equal maintainer/submitter must not produce a gap: %+v", r.Gaps)
+		}
 	}
 }
