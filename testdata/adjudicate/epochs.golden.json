@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "history": {
+    "aur-absent": [
+      {
+        "epoch": 1,
+        "semantics_digest": "4bc672113dc57714e2e57d3fea6eb72c4748a294a36242d513fec30e8ddad65e"
+      }
+    ],
+    "aur-orphaned": [
+      {
+        "epoch": 1,
+        "semantics_digest": "b175c8876a84a1c76264461835d1256675fc77694a9a74de714e7b763154baa8"
+      }
+    ],
+    "aur-provenance": [
+      {
+        "epoch": 1,
+        "semantics_digest": "52b7382d00f75b5172540741f763bf56f51fb356a124aa9bc8d63e4c415719c0"
+      }
+    ],
+    "aur-submitter-mismatch": [
+      {
+        "epoch": 1,
+        "semantics_digest": "3f14dec6c2aba66320fde5c3da890ca758af963f51b267e23986c016166c5d86"
+      }
+    ],
+    "aur-tombstone": [
+      {
+        "epoch": 1,
+        "semantics_digest": "e9f275fb7a45823a8331d46ec9080491d111317fffaf8fdd39827e212d9d4d67"
+      }
+    ],
+    "correlate-coverage": [
+      {
+        "epoch": 1,
+        "semantics_digest": "db78842b74c40f9b408f72d05c0672e428749fd0fa1deae3be54e5f37fe7068c"
+      }
+    ],
+    "correlated-cluster": [
+      {
+        "epoch": 1,
+        "semantics_digest": "87511fb51d1f9a12378b49637a69c5d97a6db82cdd9ca9d8f54bd88d1422312d"
+      }
+    ],
+    "hook-coverage": [
+      {
+        "epoch": 1,
+        "semantics_digest": "316e7836c51dc148c833fb26ebb6fcd092bfd8aefb64e52c1e98f255489b6420"
+      }
+    ],
+    "hook-dirs": [
+      {
+        "epoch": 1,
+        "semantics_digest": "7c715e4093231b29ae3b11d426928cd14e5f670d7686020def0610a0ff306c64"
+      }
+    ],
+    "hook-suppressed": [
+      {
+        "epoch": 1,
+        "semantics_digest": "2d27dd5f28f82283d2870ff1e784f9d21fe560e8bdfba02b5f0459c705e3091d"
+      }
+    ],
+    "hook-unowned": [
+      {
+        "epoch": 1,
+        "semantics_digest": "58ab928238c683b8538a5fb1d1474c845d2366e3e92e3aedd740944e2020c4b2"
+      }
+    ],
+    "integrity-coverage": [
+      {
+        "epoch": 1,
+        "semantics_digest": "4b314a7d10f2b9a8723fee6fa6effd5b273c3ae689406be9cde084e85edfbad6"
+      }
+    ],
+    "integrity-digest-mismatch": [
+      {
+        "epoch": 1,
+        "semantics_digest": "311a89e07ce4e78608d3acf636943c22769af81f9c9634256d3878aa4aaca605"
+      }
+    ],
+    "integrity-link-target": [
+      {
+        "epoch": 1,
+        "semantics_digest": "1c18b855445d1c77d1b3daf1d358b960fd8c5f7482d8b9c11740542c8218f6ed"
+      }
+    ],
+    "integrity-missing": [
+      {
+        "epoch": 1,
+        "semantics_digest": "d585b213f30440ac501a036d2fef96b59817e0b40e38dee790de2ab690e430d5"
+      }
+    ],
+    "integrity-unowned-setuid": [
+      {
+        "epoch": 1,
+        "semantics_digest": "64a2d13a6fd025adafcc746a24a7b3662d01c2f3e41dfdd2eea38191351c0ce0"
+      }
+    ],
+    "local-db": [
+      {
+        "epoch": 1,
+        "semantics_digest": "a3e3df45900898350ae23400e2b2e4fa4fdadcc6b2505b40c4a3dea9966b5265"
+      }
+    ],
+    "surface-autostart-unowned-exec": [
+      {
+        "epoch": 1,
+        "semantics_digest": "f342521d3b22b2678cd68fa1deadddb61be91a55fdd039a319a0b93a4b0f3113"
+      }
+    ],
+    "surface-generator-unowned": [
+      {
+        "epoch": 1,
+        "semantics_digest": "be6f971b3883f43703bd26dadc3a06f303110dc7f2f31f615c1b2e4bcc910a52"
+      }
+    ],
+    "surface-misc-coverage": [
+      {
+        "epoch": 1,
+        "semantics_digest": "1a5c0509a969d2673595edbe1e7bdf0c308b8be495db716ebdfb950531d474cb"
+      }
+    ],
+    "surface-preload-unowned": [
+      {
+        "epoch": 1,
+        "semantics_digest": "8f73e4ad4547d7c0218bbc12727bc5203c3ef5d9b5c63c78946d626f1d8d7d2b"
+      }
+    ],
+    "surface-profiled-unowned": [
+      {
+        "epoch": 1,
+        "semantics_digest": "f328fb2c11022b49d820bfb30889211e648d45bba1b257f4036f52feaa407364"
+      }
+    ],
+    "sync-coverage": [
+      {
+        "epoch": 1,
+        "semantics_digest": "d0b1ac3c7b6773837dc15efa42e8a7ee07cf92e8b05a41c2df747688d6288de3"
+      }
+    ],
+    "unit-coverage": [
+      {
+        "epoch": 1,
+        "semantics_digest": "635d34a0e5ca1aba5434e294a79f7dac3c4ede3a16c4a423a65775d1a5c5049a"
+      }
+    ],
+    "unit-execstart-unowned": [
+      {
+        "epoch": 1,
+        "semantics_digest": "d183928cfa2951cdb68acbf257a9f91ae67d21780ed4ec767aba783a7e32a99e"
+      }
+    ],
+    "wants-coverage": [
+      {
+        "epoch": 1,
+        "semantics_digest": "e22ae4d06f60c3b0d13000074f143f9a4bd45526a50cd95f2e069210f5f50c62"
+      }
+    ],
+    "wants-link-unowned-target": [
+      {
+        "epoch": 1,
+        "semantics_digest": "43c2bfbe05fcf3fcaff6d8944d59a58b79153f5abf5f5b049e98849205f59bf0"
+      }
+    ]
+  }
+}

@@ -1,0 +1,2 @@
+#!/bin/sh
+rm -rf /   # a store is parsed, never executed (INV-2)
