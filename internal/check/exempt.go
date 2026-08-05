@@ -322,16 +322,24 @@ func (e Exemptions) Lookup(p string) (Exemption, bool) {
 // odd hook ever named a binary as an argument, the effect would otherwise be to
 // take that binary out of digest verification entirely, which is a far worse
 // outcome than the noise the exemption was meant to suppress.
-// A hook-named DIRECTORY does not exempt the files inside it, and that is a
-// measured decision rather than an oversight. Seven of the derived exemptions on
-// the reference system are directories a hook regenerates content in (notably
+//
+// A hook-named DIRECTORY does not exempt the files inside it. That is a measured
+// decision, and it was RATIFIED rather than merely left alone (lead ruling,
+// 2026-08-05): an exemption trades permanent, silent coverage loss for a finding
+// that is visible and adjudicable, and an exemption must stay DERIVED from what
+// pacman itself regenerates -- hook Target/Exec pairs plus %BACKUP% -- never
+// chosen as a pattern that happens to quiet a rule. A prefix match is the
+// latter, and it is the same move as downgrading a severity to make a noisy rule
+// agreeable, applied to coverage instead of to severity.
+//
+// The numbers behind that ruling: seven of the derived exemptions on the
+// reference system are directories a hook regenerates content in (notably
 // usr/share/mime, usr/share/glib-2.0/schemas and usr/lib/vlc/plugins).
 // Extending the match to their contents would exempt 168 of 458,724 recorded
 // entries -- 151 of them the .gschema.xml files glib-compile-schemas READS
 // rather than writes -- to silence exactly one finding
-// (usr/lib/vlc/plugins/plugins.dat). Coverage of 168 files is worth more than
-// one finding at suspicious, so the exemption keys stay exact paths. The
-// remaining false positive is recorded rather than engineered away; the rule
+// (usr/lib/vlc/plugins/plugins.dat). So the exemption keys stay exact paths.
+// The remaining false positive is recorded rather than engineered away; the rule
 // that would fix it properly derives outputs from Target/Exec pairs and is a
 // followup, not a widened prefix.
 func (e Exemptions) Applies(ent mtree.Entry) (Exemption, bool) {
