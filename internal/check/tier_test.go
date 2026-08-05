@@ -368,19 +368,69 @@ func TestSecurityRelevant(t *testing.T) {
 	}
 }
 
-// A path an mtree should never contain must never reach a syscall.
+// TestVerifyRefusesALinkReachedThroughAnEscapingDirectory is the assertion with
+// teeth behind reading link targets through fsx.ReadLinkConfined rather than a
+// plain readlink: a DIRECTORY component that is a symlink out of the tree must
+// refuse the whole read.
+//
+// It is written as an escape rather than as a malformed path because malformed
+// paths refuse for boring reasons -- ENOENT, EINVAL -- and a test they satisfy
+// cannot distinguish a confined implementation from an unconfined one. This one
+// can: pointed at os.Readlink instead, it reports the target and fails.
+func TestVerifyRefusesALinkReachedThroughAnEscapingDirectory(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.Symlink("../../../etc/shadow", filepath.Join(outside, "bait")); err != nil {
+		t.Fatal(err)
+	}
+	root, dir := tierRoot(t)
+	// "usr" inside the root is a symlink to a directory outside it.
+	if err := os.Symlink(outside, filepath.Join(dir, "usr")); err != nil {
+		t.Fatal(err)
+	}
+	entries := []mtree.Entry{{Path: "./usr/bait", Type: "link", Link: "../../../etc/shadow"}}
+
+	obs := TierFull.Verify(root, entries, Exemptions{})
+	o := obs["./usr/bait"]
+	if o.Kind != ObsUnreadable {
+		t.Fatalf("a link reached through an escaping directory was read (kind=%v, link=%q); the "+
+			"directory components must resolve through os.Root", o.Kind, o.Link)
+	}
+	if o.Link != "" {
+		t.Errorf("refused, yet a target was reported: %q", o.Link)
+	}
+	res := Integrity("foo", entries, obs, Exemptions{}, TierFull)
+	if len(res.Findings) != 0 {
+		t.Errorf("an escape produced a finding rather than a gap (INV-9): %+v", res.Findings)
+	}
+	if _, ok := gapForSubject(res, "integrity-link-target", "./usr/bait"); !ok {
+		t.Errorf("no gap for a refused link: %+v", res.Gaps)
+	}
+}
+
+// A path an mtree should never contain must never reach a syscall -- and that
+// has to hold on BOTH paths out of observe(), the digest one through
+// fsx.OpenConfined and the symlink one through fsx.ReadLinkConfined.
 func TestVerifyRefusesHostilePaths(t *testing.T) {
 	root, _ := tierRoot(t)
-	for _, p := range []string{"/etc/passwd", "./usr/../../etc/passwd", "", "./usr/bin/\x00foo"} {
-		entries := []mtree.Entry{{Path: p, Type: "file", SHA256: sha256Of("x")}}
-		obs := TierFull.Verify(root, entries, Exemptions{})
-		o, ok := obs[p]
-		if !ok {
-			t.Errorf("path %q produced no observation at all; a refusal must be attributable", p)
-			continue
-		}
-		if o.Kind != ObsUnreadable {
-			t.Errorf("path %q: kind = %v, want ObsUnreadable", p, o.Kind)
+	hostile := []string{"/etc/passwd", "./usr/../../etc/passwd", "", "./usr/bin/\x00foo", "./usr//bin/x"}
+	for _, kind := range []string{"file", "link"} {
+		for _, p := range hostile {
+			e := mtree.Entry{Path: p, Type: kind, SHA256: sha256Of("x")}
+			if kind == "link" {
+				e.Link = "somewhere"
+			}
+			obs := TierFull.Verify(root, []mtree.Entry{e}, Exemptions{})
+			o, ok := obs[p]
+			if !ok {
+				t.Errorf("type=%s path %q produced no observation at all; a refusal must be attributable", kind, p)
+				continue
+			}
+			if o.Kind != ObsUnreadable {
+				t.Errorf("type=%s path %q: kind = %v, want ObsUnreadable", kind, p, o.Kind)
+			}
+			if o.Link != "" {
+				t.Errorf("type=%s path %q: refused, yet a target was reported (%q)", kind, p, o.Link)
+			}
 		}
 	}
 }
