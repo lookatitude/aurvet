@@ -1,0 +1,11 @@
+%FILES%
+usr/
+usr/bin/
+usr/bin/printbaz
+usr/lib/
+usr/lib/systemd/
+usr/lib/systemd/system/
+usr/lib/systemd/system/printbaz-browse.service
+usr/lib/systemd/system/printbaz.service
+usr/lib/systemd/system/printbaz.socket
+

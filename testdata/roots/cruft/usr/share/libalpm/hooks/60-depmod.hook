@@ -1,0 +1,13 @@
+# Package-owned (kmod). Masked by etc/pacman.d/hooks/60-depmod.hook -> /dev/null
+# in this root: see README.md, "Suppression that is benign here".
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/
+
+[Action]
+Description = Updating module dependencies...
+When = PostTransaction
+Exec = /usr/bin/depmod --all

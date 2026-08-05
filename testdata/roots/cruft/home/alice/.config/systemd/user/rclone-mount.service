@@ -1,0 +1,10 @@
+# A hand-written USER unit. Unowned; per-user surfaces are enumerated from
+# etc/passwd, not from the running user's environment (INV-4).
+[Unit]
+Description=Mount the remote via rclone (hand-written, unowned)
+
+[Service]
+ExecStart=/usr/local/bin/hand-built-tool --mount
+
+[Install]
+WantedBy=default.target

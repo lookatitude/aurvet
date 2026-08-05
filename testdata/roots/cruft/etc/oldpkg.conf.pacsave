@@ -1,0 +1,2 @@
+# fixture placeholder -- text, mode 0644, never executed (INV-2).
+# a .pacsave left by pacman -Rn on a package with a %BACKUP% file

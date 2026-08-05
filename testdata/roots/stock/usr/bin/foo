@@ -1,0 +1,2 @@
+# fixture placeholder for a package-owned binary. Not an executable:
+# the fixtures are parsed, never run (INV-2).

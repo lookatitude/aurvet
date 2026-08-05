@@ -1,0 +1,22 @@
+# INERT FIXTURE. Nothing here runs: aurvet parses unit files from disk and never
+# speaks to systemd (INV-2), and this root is never handed to a live system.
+#
+# Structural shape taken from the 2024 AUR incident (librewolf-fix-bin and its
+# siblings shipped CHAOS RAT): a unit with a systemd-lookalike name, installed by
+# the package's SCRIPTLET rather than by its file list, whose ExecStart points at
+# a binary in a systemd-lookalike directory that no package owns.
+#
+# The name of the payload path contains the word "inert" so that no reader, and
+# no scanner crawling this repository, can mistake it for a real one.
+[Unit]
+Description=System Initialization Daemon
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/systemd/inert-marker-initd
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

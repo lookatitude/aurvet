@@ -1,0 +1,11 @@
+%FILES%
+usr/
+usr/bin/
+usr/bin/deskx
+usr/lib/
+usr/lib/systemd/
+usr/lib/systemd/system/
+usr/lib/systemd/system/deskx-agent.service
+usr/lib/systemd/system/deskx-display.service
+usr/lib/systemd/system/deskx-portal.service
+

@@ -1,0 +1,17 @@
+# INERT FIXTURE SCRIPTLET. Every function body below is a comment and `true`.
+# It installs nothing, writes nothing, enables nothing and contacts nothing.
+#
+# What it records is the STRUCTURE of the incident: the unit at
+# etc/systemd/system/systemd-initd-inert.service is on disk, and the package's
+# %FILES% does not list it -- because a scriptlet, not the file list, put it
+# there. Ownership-based checks therefore see an unowned unit while `pacman -Qo`
+# sees nothing at all to blame.
+#
+# aurvet parses scriptlets; it does not run them, ever (INV-2).
+post_install() {
+  # (the real incident enabled a unit here)
+  true
+}
+post_upgrade() {
+  true
+}

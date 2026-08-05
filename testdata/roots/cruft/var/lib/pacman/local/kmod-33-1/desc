@@ -1,0 +1,18 @@
+%NAME%
+kmod
+
+%VERSION%
+33-1
+
+%BASE%
+kmod
+
+%VALIDATION%
+pgp
+
+%PACKAGER%
+Fixture Packager <fixture@example.invalid>
+
+%INSTALLDATE%
+1770000200
+

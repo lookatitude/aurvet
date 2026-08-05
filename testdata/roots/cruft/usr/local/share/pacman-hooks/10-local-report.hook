@@ -1,0 +1,14 @@
+# In the EXTRA hook dir this root's pacman.conf adds via HookDir. Unowned --
+# /usr/local is admin territory by definition. Covering it at all requires
+# honouring the HookDir override rather than the compiled-in default.
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = *
+
+[Action]
+Description = Recording the transaction locally...
+When = PostTransaction
+Exec = /usr/local/bin/hand-built-tool --log-transaction

@@ -1,0 +1,7 @@
+# Package-owned (systemd). Present so the malicious unit is not the only unit in
+# the root: a rule that reports "every unit" would look correct without it.
+[Unit]
+Description=Journal Service (fixture)
+
+[Service]
+ExecStart=/usr/bin/systemctl --fixture-journald

@@ -1,0 +1,13 @@
+# Package-owned (kmod). SHADOWED by etc/pacman.d/hooks/60-depmod.hook in this
+# root -- a same-named file in the higher-priority admin dir. See README.md.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/
+
+[Action]
+Description = Updating module dependencies...
+When = PostTransaction
+Exec = /usr/bin/depmod --all

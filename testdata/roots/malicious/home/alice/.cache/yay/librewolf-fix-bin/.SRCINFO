@@ -1,0 +1,12 @@
+pkgbase = librewolf-fix-bin
+	pkgdesc = Fixed build of the librewolf browser (FIXTURE -- inert)
+	pkgver = 1.2.0
+	pkgrel = 1
+	url = https://librewolf-fix.example.invalid/
+	arch = x86_64
+	license = MPL2
+	install = librewolf-fix-bin.install
+	source = https://cdn7-dl.librewolf-fix-mirror.example.invalid/librewolf-fix-1.2.0-x86_64.tar.zst
+	sha256sums = SKIP
+
+pkgname = librewolf-fix-bin

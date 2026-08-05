@@ -1,0 +1,18 @@
+%NAME%
+netbar
+
+%VERSION%
+2.1-1
+
+%BASE%
+netbar
+
+%VALIDATION%
+pgp
+
+%PACKAGER%
+Fixture Packager <fixture@example.invalid>
+
+%INSTALLDATE%
+1770000400
+

@@ -1,0 +1,11 @@
+# Package-owned unit: listed in the owning package's %FILES%. ExecStart resolves
+# to a package-owned binary, so nothing here is reportable.
+[Unit]
+Description=sysutil volatile files
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sysutil --tmpfiles
+
+[Install]
+WantedBy=multi-user.target

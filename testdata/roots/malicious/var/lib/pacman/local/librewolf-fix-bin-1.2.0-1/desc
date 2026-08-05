@@ -1,0 +1,24 @@
+%NAME%
+librewolf-fix-bin
+
+%VERSION%
+1.2.0-1
+
+%BASE%
+librewolf-fix-bin
+
+%DESC%
+Fixed build of the librewolf browser (FIXTURE -- inert)
+
+%URL%
+https://librewolf-fix.example.invalid/
+
+%VALIDATION%
+none
+
+%PACKAGER%
+Unknown Packager
+
+%INSTALLDATE%
+1770099000
+

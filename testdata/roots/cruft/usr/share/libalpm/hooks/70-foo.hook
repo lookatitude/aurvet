@@ -1,0 +1,11 @@
+# Package-owned (foo-daemon). Ordinary, unshadowed, unmasked.
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = foo-daemon
+
+[Action]
+Description = Reloading foo state...
+When = PostTransaction
+Exec = /usr/bin/foo-daemon --reload-state

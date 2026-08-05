@@ -1,0 +1,18 @@
+%NAME%
+systemd
+
+%VERSION%
+257.2-1
+
+%BASE%
+systemd
+
+%VALIDATION%
+pgp
+
+%PACKAGER%
+Fixture Packager <fixture@example.invalid>
+
+%INSTALLDATE%
+1770000100
+

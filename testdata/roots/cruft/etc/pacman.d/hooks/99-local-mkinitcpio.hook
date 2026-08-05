@@ -1,0 +1,12 @@
+# Hand-written ADMIN hook in the admin hook dir. Unowned by design: this
+# directory exists so admins can add hooks, and a hook here shadows a system
+# hook only if it has the SAME FILE NAME. This one shadows nothing.
+[Trigger]
+Type = Path
+Operation = Upgrade
+Target = usr/lib/modules/*/vmlinuz
+
+[Action]
+Description = Rebuilding the locally-built kernel's initramfs...
+When = PostTransaction
+Exec = /usr/bin/sysutil --rebuild-initramfs

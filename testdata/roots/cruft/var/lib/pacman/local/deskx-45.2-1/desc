@@ -1,0 +1,18 @@
+%NAME%
+deskx
+
+%VERSION%
+45.2-1
+
+%BASE%
+deskx
+
+%VALIDATION%
+pgp
+
+%PACKAGER%
+Fixture Packager <fixture@example.invalid>
+
+%INSTALLDATE%
+1770000700
+

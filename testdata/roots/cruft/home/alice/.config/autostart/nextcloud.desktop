@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Nextcloud desktop sync client
+Exec=/usr/bin/prettier --pretend-this-is-nextcloud
+X-GNOME-Autostart-enabled=true

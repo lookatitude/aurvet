@@ -1,0 +1,15 @@
+# UNOWNED, and it has the SAME FILE NAME as the package-owned system hook, in a
+# higher-priority directory: pacman runs THIS one and never the packaged one.
+# The packaged hook's work silently stops happening. Detection must cover hooks
+# SUPPRESSED, not only hooks added.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/
+
+[Action]
+Description = Updating module dependencies...
+When = PostTransaction
+Exec = /usr/bin/true

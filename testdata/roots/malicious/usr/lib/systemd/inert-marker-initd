@@ -1,0 +1,10 @@
+#!/bin/sh
+# INERT MARKER -- NOT A PAYLOAD, NOT EXECUTABLE (mode 0644), NO NETWORK CODE.
+#
+# This file stands in for the implant binary only so that the unit's ExecStart
+# resolves to a real, unowned path inside a package-owned directory
+# (/usr/lib/systemd/ is owned by systemd; this file is owned by nothing). That
+# masquerade is the whole point of the fixture.
+#
+# The body is this comment and one no-op.
+true

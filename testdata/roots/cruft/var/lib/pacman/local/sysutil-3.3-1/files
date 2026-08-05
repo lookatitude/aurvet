@@ -1,0 +1,12 @@
+%FILES%
+usr/
+usr/bin/
+usr/bin/sysutil
+usr/lib/
+usr/lib/systemd/
+usr/lib/systemd/system/
+usr/lib/systemd/system/sysutil-journal.service
+usr/lib/systemd/system/sysutil-modules.service
+usr/lib/systemd/system/sysutil-random.service
+usr/lib/systemd/system/sysutil-tmpfiles.service
+

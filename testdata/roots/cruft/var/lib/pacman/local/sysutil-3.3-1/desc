@@ -1,0 +1,18 @@
+%NAME%
+sysutil
+
+%VERSION%
+3.3-1
+
+%BASE%
+sysutil
+
+%VALIDATION%
+pgp
+
+%PACKAGER%
+Fixture Packager <fixture@example.invalid>
+
+%INSTALLDATE%
+1770000600
+

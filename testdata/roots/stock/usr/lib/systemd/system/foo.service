@@ -1,0 +1,18 @@
+# testdata/roots/stock/usr/lib/systemd/system/foo.service
+#
+# Package-owned: listed in foo-bin's %FILES%. ExecStart resolves to /usr/bin/foo,
+# which foo-bin also owns. This is the shape that must produce NO finding --
+# every path involved is accounted for by a package.
+#
+# Nothing here is ever handed to systemd: aurvet parses unit files from disk and
+# never talks to systemd (INV-2), so the comments are safe and the file is inert.
+[Unit]
+Description=Foo service (fixture)
+Documentation=man:foo(8)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/foo --system
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+# Package-owned socket unit. No ExecStart, same reason as foo-cleanup.timer.
+[Unit]
+Description=printbaz listening socket (fixture)
+
+[Socket]
+ListenStream=/run/printbaz/printbaz.sock
+
+[Install]
+WantedBy=sockets.target

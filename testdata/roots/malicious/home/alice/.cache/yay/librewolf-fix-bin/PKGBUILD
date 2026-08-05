@@ -1,0 +1,22 @@
+# INERT FIXTURE PKGBUILD. Not buildable and not meant to be: every host below is
+# in the RFC 2606 .invalid TLD, which cannot resolve, and no real address of any
+# kind appears in this file.
+#
+# The structural fact this encodes is OFF-UPSTREAM SOURCE: url= names the
+# project, source= fetches the binary from an unrelated host. That is the AUR
+# side of the same incident whose host side is etc/systemd/system/
+# systemd-initd-inert.service.
+pkgname=librewolf-fix-bin
+pkgver=1.2.0
+pkgrel=1
+pkgdesc="Fixed build of the librewolf browser (FIXTURE -- inert)"
+arch=('x86_64')
+url="https://librewolf-fix.example.invalid/"
+license=('MPL2')
+install=librewolf-fix-bin.install
+source=("https://cdn7-dl.librewolf-fix-mirror.example.invalid/librewolf-fix-$pkgver-x86_64.tar.zst")
+sha256sums=('SKIP')
+
+package() {
+  install -Dm644 "$srcdir/placeholder" "$pkgdir/usr/bin/librewolf-fix"
+}

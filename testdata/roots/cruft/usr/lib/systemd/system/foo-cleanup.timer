@@ -1,0 +1,12 @@
+# Package-owned timer. NOTE: a .timer has no ExecStart -- it activates a unit.
+# A parser that assumes every unit has an ExecStart reports a phantom here.
+[Unit]
+Description=Daily foo cleanup (fixture)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=foo-sync.service
+
+[Install]
+WantedBy=timers.target

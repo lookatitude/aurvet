@@ -1,0 +1,11 @@
+# Package-owned unit: listed in the owning package's %FILES%. ExecStart resolves
+# to a package-owned binary, so nothing here is reportable.
+[Unit]
+Description=foo daemon (fixture)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/foo-daemon --daemon
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+# HAND-WRITTEN by the admin. Owned by NO package -- this is the one entry in
+# this root's *.wants set that the triage rule must report, and the only one.
+# It is benign (a local rsync wrapper), and the tool cannot know that: see
+# README.md, "The one true positive".
+[Unit]
+Description=Nightly backup to the NAS (hand-written, unowned)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hand-built-tool --backup /home/alice
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# INERT MARKER -- a TEXT file with a .so name. It is not an ELF object, contains
+# no code of any kind, and could not be loaded by ld.so if anything tried.
+# It exists so etc/ld.so.preload names an unowned path in the same directory the
+# unit's ExecStart points into: that shared directory is what makes the findings
+# correlate into one cluster instead of three unrelated alerts.
