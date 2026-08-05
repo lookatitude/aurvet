@@ -8,20 +8,19 @@
 *.out
 coverage.*
 
-# Guild run telemetry — machine-generated, verbose, and it captures raw tool
-# output including local absolute paths. The durable records we DO keep are
-# .guild/runs/*/review/** (gate outcomes and review loops), tracked below.
-.guild/runs/*/logs/
-.guild/runs/*/events.ndjson
-.guild/runs/*/resolved-settings.json
-.guild/runs/*/agent-bus/
-
-# Transient pointer to the in-flight run — local state, not history
-.guild/runs/current-run-id
-
-# Host capability probe — machine-specific
-.guild/hosts/
+# Guild workspace — local orchestration state, excluded from the repo in full.
+#
+# Previously only the noisiest subtrees were ignored (runs/*/logs/, agent-bus/,
+# resolved-settings.json, hosts/) while specs, plans, agents, wiki pages and run
+# receipts were tracked. That split leaked local absolute paths into history via
+# the tracked half — handoff receipts and review/verify artifacts quote tool
+# output and file paths verbatim — so the whole directory is now excluded and was
+# purged from history before the first push.
+#
+# Nothing here is needed to build, test or audit the tool: the durable record is
+# the commit history, docs/spec.html, and docs/superpowers/plans/. Guild
+# regenerates this workspace locally on demand.
+.guild/
 
 # Local-only operator config
-.guild/settings.local.json
 *.local.json
