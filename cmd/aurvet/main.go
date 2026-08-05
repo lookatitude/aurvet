@@ -46,6 +46,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"list only findings new since the previous scan; the exit code still reflects the full result")
 	minSeverity := fs.String("min-severity", "",
 		"reporting floor: info, suspicious, critical (default from config)")
+	// review/install lead with rule hits and a diff against the last approved
+	// recipe. The full text is available on request, because a gate that prints
+	// a 400-line PKGBUILD by default teaches its operator to scroll past it.
+	showRecipe := fs.Bool("show-recipe", false,
+		"review/install: print the recipe text in full as well as the rule hits and the diff")
 
 	// Go's flag package stops parsing at the first non-flag argument, so a
 	// single fs.Parse would leave `aurvet scan --no-network` with noNet unset
@@ -69,7 +74,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if len(operands) == 0 {
 		fmt.Fprintln(stderr, "usage: aurvet [flags] <command>")
-		fmt.Fprintln(stderr, "commands: scan, snapshot, explain, doctor, version")
+		fmt.Fprintln(stderr, "commands: scan, review, install, snapshot, explain, doctor, version")
 		return exitUsage
 	}
 
@@ -145,6 +150,41 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return exitUsage
 		}
 		return runSnapshot(*offlineRoot, *jsonOut, cmdArgs[0], stdout, stderr)
+
+	// review ANALYSES and never builds (INV-2). One subject, like snapshot, so
+	// the exit code is unambiguous about whose recipe was incomplete.
+	case "review":
+		if len(cmdArgs) != 1 {
+			fmt.Fprintln(stderr, "usage: aurvet review <dir|pkgbase>")
+			fmt.Fprintln(stderr, "  analyses a recipe and never builds it; leads with rule hits and the diff against the last approved recipe")
+			return exitUsage
+		}
+		return runReview(reviewOpts{
+			offlineRoot: *offlineRoot,
+			jsonOut:     *jsonOut,
+			minSeverity: *minSeverity,
+			showRecipe:  *showRecipe,
+			subject:     cmdArgs[0],
+		}, stdout, stderr)
+
+	// install fetches, reviews the whole dependency closure, prompts,
+	// snapshots, and then hands the vetted directory to the helper. It never
+	// runs makepkg and never runs the helper (INV-2).
+	case "install":
+		if len(cmdArgs) != 1 {
+			fmt.Fprintln(stderr, "usage: aurvet install <pkgbase>")
+			fmt.Fprintln(stderr, "  fetches and reviews the dependency closure, prompts, snapshots, then hands the vetted directory over")
+			fmt.Fprintln(stderr, "  it does NOT build: aurvet never runs makepkg or your helper for you")
+			return exitUsage
+		}
+		return runInstall(installOpts{
+			offlineRoot: *offlineRoot,
+			noNet:       *noNet,
+			jsonOut:     *jsonOut,
+			minSeverity: *minSeverity,
+			showRecipe:  *showRecipe,
+			pkgbase:     cmdArgs[0],
+		}, stdout, stderr)
 
 	case "explain":
 		if len(cmdArgs) == 0 {

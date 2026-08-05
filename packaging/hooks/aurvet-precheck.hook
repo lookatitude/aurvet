@@ -1,0 +1,46 @@
+# packaging/hooks/aurvet-precheck.hook
+#
+# PreTransaction provenance check, SHIPPED INERT AND WARN-ONLY.
+#
+# It reports the approval status and rule hits for the incoming targets before
+# the transaction proceeds, and it cannot stop anything: pacman aborts on a
+# hook's non-zero exit ONLY when the hook declares AbortOnFail, and this hook
+# deliberately does not. Turning it into a gate is one line, added by the
+# operator who wants it and who has read what it costs:
+#
+#     AbortOnFail
+#
+# Add it under [Action] and a non-zero exit from the command below aborts the
+# transaction. Do not add it lightly: aurvet exits 3 for INCOMPLETE COVERAGE,
+# which is the normal outcome on a system whose provenance has already rotted, so
+# an unconditional AbortOnFail will block ordinary upgrades until the coverage
+# gaps are dealt with. That is a defensible choice; it is not a default.
+#
+# Two further things this hook cannot do, stated here rather than discovered:
+#
+#   - It cannot gate a BUILD. makepkg ran before pacman was invoked. The
+#     build-time-fetch vector -- the one the incident reports keep showing --
+#     has already fired by the time this runs. `aurvet install` is the gate.
+#   - It sees package NAMES, not recipes. The wrapper maps each name to its
+#     pkgbase and reviews the recipe in the helper cache if one is still there;
+#     with a cleaned cache there is nothing to review and the wrapper says so
+#     rather than passing silently.
+#
+# Orphan safety, which is the highest-blast-radius property in this project:
+# Exec names /bin/sh (present on every system that can run pacman at all) and
+# tests for the wrapper before running it. With aurvet removed, the wrapper is
+# gone, the test fails and the command exits 0. An Exec pointing straight at
+# /usr/bin/aurvet would fail every transaction after the package was removed --
+# including the transaction that would reinstall it.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = aurvet: provenance check on incoming targets (warn-only; this hook cannot gate a build)
+When = PreTransaction
+Exec = /bin/sh -c '[ -x /usr/share/aurvet/aurvet-hook ] || exit 0; exec /usr/share/aurvet/aurvet-hook pre'
+NeedsTargets

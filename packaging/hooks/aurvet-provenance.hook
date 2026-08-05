@@ -1,0 +1,37 @@
+# packaging/hooks/aurvet-provenance.hook
+#
+# PostTransaction provenance capture. This is what a pacman hook is genuinely
+# good for (spec §10): by the time pacman runs, the build has happened and the
+# evidence -- the clone, the .SRCINFO, the upstream commit -- is present and
+# about to start rotting. 41% of foreign packages on the reference system
+# already have no provenance at all, and the cache that holds the rest is 88 GB,
+# so it gets cleaned. Capturing here is capturing while it still exists.
+#
+# What this hook is NOT: a gate. It cannot be one. makepkg has already run
+# prepare(), build() and package() as the invoking user before pacman sees
+# anything, so the build-time-fetch vector has already fired and no hook can see
+# a PKGBUILD. `aurvet install` is the gate.
+#
+# Exec routes through /bin/sh and tests for the wrapper before running it, so
+# removing aurvet cannot brick pacman: with the package gone the wrapper is gone
+# too, the test fails, and the hook exits 0. A hook whose Exec names a missing
+# binary fails EVERY subsequent transaction -- including the one that would
+# reinstall the missing binary -- and the operator's only recovery is editing
+# files as root with no working pacman.
+#
+# NeedsTargets makes pacman write the matched targets to the command's stdin. For
+# Type = Package those are PACKAGE NAMES; the wrapper resolves each to its
+# pkgbase before calling aurvet, because 433 of 1409 packages on the reference
+# system are split and a snapshot records what one BUILD produced.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = aurvet: capture provenance for the packages in this transaction
+When = PostTransaction
+Exec = /bin/sh -c '[ -x /usr/share/aurvet/aurvet-hook ] || exit 0; exec /usr/share/aurvet/aurvet-hook post'
+NeedsTargets

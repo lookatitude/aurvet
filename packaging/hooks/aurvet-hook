@@ -1,0 +1,146 @@
+#!/bin/sh
+# packaging/hooks/aurvet-hook -- installed as /usr/share/aurvet/aurvet-hook
+#
+# The single indirection both pacman hooks route through. It exists for one
+# reason: a pacman hook whose Exec cannot run makes EVERY subsequent transaction
+# fail, including the transaction that would repair it. So the hooks name
+# /bin/sh, test for this file, and this file tests for aurvet. Every layer exits
+# 0 when the layer below it is absent.
+#
+# Modes:
+#   pre    warn-only provenance check on the incoming targets. Propagates the
+#          worst aurvet exit code, so that adding AbortOnFail to the hook (one
+#          line, opt-in) actually gates. Exits 0 when aurvet is not installed.
+#   post   provenance capture for the packages in the transaction. ALWAYS exits
+#          0: a failed capture must never fail a transaction, and pacman would
+#          not abort on a PostTransaction failure anyway.
+#
+# Targets arrive on stdin (the hooks declare NeedsTargets) as PACKAGE NAMES.
+# They are mapped to pkgbases here, because 433 of 1409 packages on the
+# reference system are split: keyed on the name, a snapshot of a split package
+# would be filed under the wrong unit -- and up to five times over for one
+# build.
+#
+# Nothing here parses a PKGBUILD, evaluates anything from a package, or calls
+# pacman: calling pacman from inside a pacman hook risks the database lock, and
+# the one field needed (%BASE%) is a literal line in the local database.
+
+set -u
+
+mode=${1:-}
+
+# Overridable for tests, which must never touch the live database.
+: "${AURVET_HOOK_DBPATH:=/var/lib/pacman/local}"
+# Bounds the whole hook. A PreTransaction hook is on the critical path of every
+# transaction, and an unbounded check there is a system that stops upgrading.
+: "${AURVET_HOOK_TIMEOUT:=20}"
+
+# aurvet absent -> nothing to do, and say nothing: this is the state of every
+# system that has removed the package, and a hook that complained would be a
+# hook the operator disables.
+command -v aurvet >/dev/null 2>&1 || exit 0
+
+# field FILE KEY -- the value on the line after "%KEY%" in a pacman desc file.
+#
+# Shell builtins only, no sed and no awk. A hook must not assume anything about
+# its own environment beyond /bin/sh: if this needed sed and sed were missing (a
+# broken PATH, a half-finished transaction), the lookup would fail silently and
+# every split package would be filed under the wrong key with nothing said.
+field() {
+	_want="%$2%"
+	_take=0
+	while IFS= read -r _line || [ -n "$_line" ]; do
+		if [ "$_take" = 1 ]; then
+			printf '%s\n' "$_line"
+			return 0
+		fi
+		[ "$_line" = "$_want" ] && _take=1
+	done <"$1"
+	return 0
+}
+
+# pkgbase_of NAME -- the %BASE% recorded for an installed package, or the name
+# itself when the database does not say (which is what pacman itself assumes for
+# a non-split package).
+pkgbase_of() {
+	_name=$1
+	_found=
+	for _d in "$AURVET_HOOK_DBPATH/$_name"-*/; do
+		[ -f "$_d/desc" ] || continue
+		# The glob "foo-*" also matches "foo-bar-1.0-1", so %NAME% must match
+		# exactly or a split sibling's record would answer for this package.
+		[ "$(field "$_d/desc" NAME)" = "$_name" ] || continue
+		_found=$_d
+		break
+	done
+	if [ -z "$_found" ]; then
+		printf '%s\n' "$_name"
+		return 0
+	fi
+	_base=$(field "$_found/desc" BASE)
+	[ -n "$_base" ] || _base=$_name
+	printf '%s\n' "$_base"
+}
+
+# run_bounded CMD... -- run under a time budget when timeout(1) is available.
+# Not required: coreutils is in base, but a hook must not assume its own
+# environment either.
+run_bounded() {
+	if command -v timeout >/dev/null 2>&1; then
+		timeout -k 5 "$AURVET_HOOK_TIMEOUT" "$@"
+	else
+		"$@"
+	fi
+}
+
+# Read the targets, map to pkgbases, de-duplicate. A split base arriving as five
+# package names is ONE recipe and must be reviewed and captured once.
+bases=""
+while IFS= read -r target; do
+	[ -n "$target" ] || continue
+	base=$(pkgbase_of "$target")
+	case " $bases " in
+	*" $base "*) continue ;;
+	esac
+	bases="$bases $base"
+done
+
+worst=0
+
+case "$mode" in
+pre)
+	for base in $bases; do
+		run_bounded aurvet review "$base" >&2
+		code=$?
+		# 3 (incomplete coverage) outranks 1 (findings), the same order the CLI
+		# contract uses: an unreviewed closure is worse news than a reviewed one
+		# with hits.
+		case "$code:$worst" in
+		3:*) worst=3 ;;
+		*:3) ;;
+		0:*) ;;
+		*) [ "$code" -gt "$worst" ] && worst=$code ;;
+		esac
+	done
+	if [ "$worst" -ne 0 ]; then
+		printf 'aurvet: WARNING: the checks above did not pass cleanly (worst exit %s).\n' "$worst" >&2
+		printf 'aurvet: this hook is warn-only: add AbortOnFail to the PreTransaction hook to make it gate.\n' >&2
+		printf 'aurvet: it cannot gate a BUILD in any case -- makepkg has already run. Use `aurvet install`.\n' >&2
+	fi
+	# Propagated so that opting in to AbortOnFail is genuinely one line. With no
+	# AbortOnFail, pacman prints a warning and continues.
+	exit "$worst"
+	;;
+post)
+	for base in $bases; do
+		run_bounded aurvet snapshot "$base" >/dev/null 2>&1 || true
+	done
+	# Always 0. A capture that failed is a coverage gap in aurvet's own state,
+	# reported by `aurvet scan`; it is not a reason to fail a transaction.
+	exit 0
+	;;
+*)
+	printf 'usage: aurvet-hook pre|post  (targets on stdin)\n' >&2
+	exit 0
+	;;
+esac
