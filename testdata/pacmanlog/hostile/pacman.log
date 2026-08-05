@@ -1,0 +1,6 @@
+[2026-05-01T09:00:00+0100] [ALPM] installed good (1-1)
+this line has no structure at all
+[not-a-timestamp] [ALPM] installed nope (1-1)
+[2026-05-01T09:00:02+0100] [ALPM] verbified something entirely unknown
+[2026-05-01T09:00:03+0100] [ALPM-SCRIPTLET] Initializing machine ID from random generator.
+[2026-05-01T09:00:04+0100] [ALPM] installed later (2-1)
