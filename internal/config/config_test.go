@@ -176,7 +176,7 @@ func TestDoctorStateDirSourceNamesTheCaseThatFired(t *testing.T) {
 		{"offline root", "/mnt/target", 1000, "/home/x/.state", "/home/x", "offline-root"},
 		{"xdg state home", "/", 1000, "/home/x/.state", "/home/x", "xdg-state-home"},
 		{"home default", "/", 1000, "", "/home/x", "home-default"},
-		{"fallback unwritable", "/", 1000, "", "", "fallback-unwritable"},
+		{"fallback unwritable", "/", 1000, "", "", SourceFallbackUnwritable},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,4 +198,75 @@ func TestDoctorStateDirSourceNamesTheCaseThatFired(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDoctorWarnsOnlyOnUnwritableStateDir pins carried follow-up 1 from
+// run-4d35d530: the fallback state-dir case is unusable by an unprivileged
+// process, and doctor previously reported it with no indication of that. The
+// negative half matters as much as the positive one -- a warning that fires on
+// healthy resolutions is noise, and noise is how a real warning gets ignored.
+func TestDoctorWarnsOnlyOnUnwritableStateDir(t *testing.T) {
+	cases := []struct {
+		name     string
+		root     string
+		euid     int
+		xdg      string
+		home     string
+		wantWarn bool
+	}{
+		{"fallback is warned", "/", 1000, "", "", true},
+		{"xdg is not warned", "/", 1000, "/home/x/.state", "/home/x", false},
+		{"home default is not warned", "/", 1000, "", "/home/x", false},
+		{"offline root is not warned", "/mnt/target", 1000, "", "", false},
+		{"euid0 is not warned", "/", 0, "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", tc.xdg)
+			t.Setenv("HOME", tc.home)
+
+			c, err := Resolve(tc.root, tc.euid)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+
+			var line DoctorLine
+			var found bool
+			for _, l := range c.Doctor() {
+				if l.Key == "state_dir" {
+					line, found = l, true
+				}
+			}
+			if !found {
+				t.Fatal("Doctor() has no state_dir line")
+			}
+
+			if tc.wantWarn && line.Warning == "" {
+				t.Errorf("state_dir source %q resolved to %q but carries no warning; "+
+					"an unprivileged write there fails with EACCES and --since-last "+
+					"cannot persist a baseline", line.Source, line.Value)
+			}
+			if !tc.wantWarn && line.Warning != "" {
+				t.Errorf("state_dir source %q is usable but carries warning %q",
+					line.Source, line.Warning)
+			}
+		})
+	}
+
+	// Every other key must be warning-free in all cases; state_dir is the only
+	// resolution with a known-broken outcome. If another key grows one, this
+	// test should be widened deliberately rather than silently passing.
+	t.Run("no other key warns", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", "")
+		t.Setenv("HOME", "")
+		c, err := Resolve("/", 1000)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		for _, l := range c.Doctor() {
+			if l.Key != "state_dir" && l.Warning != "" {
+				t.Errorf("key %q unexpectedly warns: %q", l.Key, l.Warning)
+			}
+		}
+	})
 }

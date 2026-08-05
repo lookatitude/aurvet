@@ -51,6 +51,11 @@ type DoctorLine struct {
 	Key    string
 	Value  string
 	Source string
+
+	// Warning is non-empty when this key resolved to something that will not
+	// work. Empty for every healthy resolution, so a caller can render it
+	// unconditionally without special-casing.
+	Warning string
 }
 
 // Resolve derives all paths from root. euid and root together select the
@@ -112,16 +117,36 @@ func resolveStateDir(root string, euid int) (dir, source string) {
 	if home := os.Getenv("HOME"); filepath.IsAbs(home) {
 		return filepath.Join(home, ".local/state/aurvet"), "home-default"
 	}
-	return "/var/lib/aurvet", "fallback-unwritable"
+	return "/var/lib/aurvet", SourceFallbackUnwritable
 }
 
+// SourceFallbackUnwritable is the state_dir provenance for the one resolution
+// case that is known-degraded: an unprivileged live run with neither
+// XDG_STATE_HOME nor HOME set to an absolute path. Named rather than inlined so
+// Doctor can test for it without matching a string literal in two places.
+const SourceFallbackUnwritable = "fallback-unwritable"
+
 // Doctor reports the resolved configuration with per-key provenance.
+//
+// A resolution that cannot work is reported as such rather than printed as
+// though it were fine. `state_dir` is the only key with that failure mode: in
+// the fallback case an unprivileged process gets /var/lib/aurvet, every write
+// fails with EACCES, and --since-last therefore cannot persist a baseline. That
+// used to surface only as a mkdir error at the moment of use, which reads as a
+// bug in --since-last rather than as a configuration problem doctor could have
+// named. Reporting it here is the INV-3 habit applied to configuration: do not
+// present something as working when it is known not to be.
 func (c Config) Doctor() []DoctorLine {
+	stateDir := DoctorLine{Key: "state_dir", Value: c.StateDir, Source: c.stateDirSource}
+	if c.stateDirSource == SourceFallbackUnwritable {
+		stateDir.Warning = "not writable by this user — neither XDG_STATE_HOME nor HOME is an absolute path, so --since-last cannot persist a baseline"
+	}
+
 	return []DoctorLine{
-		{"root", c.Root, "flag-or-default"},
-		{"db_path", c.DBPath, "derived"},
-		{"sync_path", c.SyncPath, "derived"},
-		{"state_dir", c.StateDir, c.stateDirSource},
-		{"min_severity", c.MinSeverity, "default"},
+		{Key: "root", Value: c.Root, Source: "flag-or-default"},
+		{Key: "db_path", Value: c.DBPath, Source: "derived"},
+		{Key: "sync_path", Value: c.SyncPath, Source: "derived"},
+		stateDir,
+		{Key: "min_severity", Value: c.MinSeverity, Source: "default"},
 	}
 }

@@ -112,6 +112,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		for _, l := range cfg.Doctor() {
 			fmt.Fprintf(stdout, "%-14s %-46s (%s)\n", l.Key, l.Value, l.Source)
+			// A degraded resolution is printed on stderr as well as being
+			// visible in the report, so it survives `aurvet doctor | grep`
+			// and is not lost in a wall of healthy lines.
+			if l.Warning != "" {
+				fmt.Fprintf(stdout, "%-14s   ! %s\n", "", l.Warning)
+				fmt.Fprintf(stderr, "aurvet: %s %s\n", l.Key, l.Warning)
+			}
 		}
 		return exitClean
 
