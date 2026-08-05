@@ -1,0 +1,13 @@
+pkgbase=flutter
+_group=flutter
+groups=("$_group")
+pkgver=3.41.2
+
+pkgname=("${_group}" "${_group}-common" "${_group}-gradle" "${_group}-tool" "${_group}-devel" "${_group}-target-linux" "${_group}-target-android" "${_group}-target-web" "${_group}-intellij-patch" "${_group}-artifacts-engine-common-google-bin" "${_group}-artifacts-engine-linux-google-bin" "${_group}-artifacts-engine-web-google-bin" "${_group}-artifacts-engine-android-google-bin" "${_group}-artifacts-sky-engine-google-bin" "${_group}-artifacts-material-fonts-google-bin" "${_group}-artifacts-gradle-google-bin" "${_group}-artifacts-dart-google-bin")
+
+for _p in "${pkgname[@]}"; do
+  eval "package_$_p() {
+    $(declare -f "_package${_p#$_group}")
+    _package${_p#$_group}
+  }"
+done

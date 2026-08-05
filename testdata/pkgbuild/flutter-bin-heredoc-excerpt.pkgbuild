@@ -1,0 +1,21 @@
+_gen_scripts() {
+  cat > flutter_dart.sh << 'END'
+#!/usr/bin/env bash
+
+source /opt/flutter/bin/aur_init.sh
+
+if ! grep -q '/usr/bin' <<< "$(which dart)"; then
+  exec dart "$@"
+fi
+END
+
+  cat > flutter.sh << 'END'
+#!/usr/bin/env bash
+
+source /opt/flutter/bin/aur_init.sh
+
+if ! grep -q '/usr/bin' <<< "$(which flutter)"; then
+  exec flutter "$@"
+fi
+END
+}
