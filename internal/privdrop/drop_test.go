@@ -200,6 +200,28 @@ func TestPrivilegeLifecycleWithRealCapabilities(t *testing.T) {
 	}
 	requireHelperRan(t, out, errOut, code, timedOut)
 
+	// A namespace can be created and still confer NOTHING, which the
+	// nsRefusedCode check above does not cover. MEASURED on GitHub's
+	// ubuntu-latest runner: CLONE_NEWUSER succeeded, the helper ran to
+	// completion, and it started with an empty capability set
+	// (start_has_dac_read_search=0, start_has_setpcap=0, read_at_start=refused).
+	//
+	// Every assertion below describes what happens to capabilities the process
+	// HOLDS. With none held, the test does not fail -- it has no subject, and
+	// the twelve mismatches that follow would be reporting the absence of a
+	// precondition as a defect in the code under test.
+	//
+	// Skipped LOUDLY rather than quietly: a privilege assertion that skips
+	// silently reads as a pass, which is INV-3 violated inside the test suite.
+	// See the CI follow-up about running this in an environment that can grant
+	// capabilities -- until then it is unverified on every hosted runner.
+	if strings.Contains(out, "start_has_dac_read_search=0") || strings.Contains(out, "start_has_setpcap=0") {
+		t.Skipf("the user namespace was created but conferred no capabilities "+
+			"(start_has_dac_read_search / start_has_setpcap are 0), so the capability "+
+			"lifecycle has no subject in this environment and is UNVERIFIED here; "+
+			"helper stdout: %s", strings.TrimSpace(out))
+	}
+
 	for _, want := range []string{
 		// Non-vacuity: the process really held CAP_DAC_READ_SEARCH and really
 		// could read a file its own DAC bits forbid.
