@@ -38,35 +38,56 @@ state.
 
 ## Status
 
-**Early. The provenance tier's foundations are built and tested; the `scan`
-command that drives them is not wired up yet.** This is a working repository,
-not a release.
+> **v0.0.1 — pre-1.0, alpha, and not independently audited.**
+> The provenance tier works end to end. Nothing here is signed yet and there is
+> no AUR package. Treat the output as evidence to investigate, not as a verdict.
+> If you need a guarantee about your system, this is not yet the tool that gives
+> you one.
 
-| Component | State |
-|---|---|
-| `doctor` — show resolved configuration and where each value came from | **works** |
-| pacman local DB, `files`/`%BACKUP%`, sync DB parsers, foreign classification | **built**, 19 tests |
-| finding model, fingerprints, coverage accounting | **built** |
-| AUR client — batched RPC, cgit malware-tombstone detection | **built**, hardened over two adversarial review rounds |
-| `scan` — run the provenance checks and report | not yet wired |
-| `snapshot` / `diff` — tamper-evident baselines | planned |
-| `install` — pre-install gate | planned |
-| file integrity, persistence surfaces, packaging | planned |
+Today `aurvet` covers the **provenance tier**: `scan`, `explain`, `doctor` and
+`version`, with text/JSON output, report persistence and `--since-last`. It does
+**not** yet verify file integrity — see [Limits](#limits).
 
-Planned command surface: `scan`, `explain`, `snapshot`, `diff`, `install`,
-`baseline`, `update`, `triage`, `doctor`.
+Delivery status and roadmap are tracked outside this file; `docs/roadmap.html`
+holds the plan.
 
 ## Build
 
-Go 1.24+ (the floor is 1.24 for `os.Root`; Arch ships 1.26).
+Go 1.24+ (the floor is 1.24 for `os.Root`; Arch ships 1.26). No third-party
+dependencies — and CI fails if one appears.
 
 ```sh
-git clone <this repo> && cd aurvet
-go build ./cmd/aurvet
+git clone https://github.com/lookatitude/aurvet && cd aurvet
+make build
 ./aurvet doctor
 ```
 
-No third-party dependencies.
+`make help` lists every target. There is **no AUR package yet**, deliberately —
+see [Status](#status).
+
+### Verifying a release
+
+Release artifacts ship with `SHA256SUMS`:
+
+```sh
+sha256sum -c SHA256SUMS
+```
+
+Binaries are statically linked (no `DT_NEEDED`, no `PT_INTERP`) and built
+reproducibly — two independent CI runners must produce byte-identical output or
+the release is not published. To reproduce a build yourself:
+
+```sh
+make verify-reproducible
+```
+
+This needs a **stock** Go toolchain matching the `toolchain` directive in
+`go.mod`. A `GOEXPERIMENT`-patched toolchain emits different bytes from a stock
+release of the same version, so it will report a mismatch that is explained by
+your toolchain rather than by tampering — the target prints the toolchain identity
+it used so you can tell the two apart.
+
+Artifacts are **not OpenPGP-signed yet**; the release key does not exist.
 
 ## Use
 
@@ -163,6 +184,10 @@ constructed.
 | `docs/design-review.html` | the adversarial review that produced the spec, marking which claims were verified against a live system and which were only reported |
 | `docs/roadmap.html` | full delivery plan |
 | `docs/interface-contracts-p1a.md` | frozen cross-component signatures and open items |
+| `docs/RELEASING.md` | how a release is cut, and which controls are still missing |
+| `docs/reporting-malware.md` | what to do when a finding is real |
+| `CONTRIBUTING.md` | branch flow, commit contract, invariants a patch must not break |
+| `SECURITY.md` | how to report a vulnerability — including a false clean, which counts as one |
 
 ## Limits
 

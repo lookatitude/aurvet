@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a capability or a change in behaviour
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Check `docs/roadmap.html` first — much is already planned and scheduled
+        into a phase.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can you not currently find out about your system?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: falsepositives
+    attributes:
+      label: What would this wrongly flag?
+      description: >
+        For a detection idea, this is the important question. What benign
+        configuration would trip it, and what severity would it deserve given
+        that? A rule that fires on a large share of clean systems costs more
+        attention than it earns.

@@ -1,0 +1,184 @@
+# Release — triggered by a v* tag on main.
+#
+# Publishes: a deterministic `git archive` source tarball, x86_64 + aarch64
+# static binaries, and SHA256SUMS. Refuses to publish unless two independent
+# runners produce byte-identical binaries.
+#
+# Spec §16's argument, which this file implements: "a tool warning about
+# unvetted AUR packages would itself arrive as one, and its AUR account is the
+# highest-value takeover target available. Reproducible builds convert 'trust
+# me' into 'check me'."
+#
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ CONTROLS REQUIRED BY SPEC §16 THAT ARE **ABSENT** AT v0.0.1              │
+# │                                                                          │
+# │ 1. OWN-PKGBUILD-PASSES-OWN-INDICATORS RELEASE GATE — **NOT IMPLEMENTED** │
+# │    §16 requires that "aurvet's own PKGBUILD must pass aurvet's own       │
+# │    indicators as an automated release gate". It cannot exist yet: it     │
+# │    depends on internal/pkgbuild, which arrives in P2. There is also no   │
+# │    PKGBUILD in this repository yet.                                      │
+# │                                                                          │
+# │ 2. OPENPGP RELEASE SIGNING — **NOT IMPLEMENTED**                         │
+# │    §16 requires a second OpenPGP identity for release artifacts, because │
+# │    makepkg only understands OpenPGP (validpgpkeys) and ed25519 alone     │
+# │    gives AUR users no verification path. Generating that key is a human  │
+# │    action. The seam is marked below; it is NOT stubbed, because a step    │
+# │    that looked like signing but signed nothing would be worse than its   │
+# │    visible absence.                                                      │
+# │                                                                          │
+# │ Consequence, stated plainly: a v0.0.x artifact is reproducible but NOT   │
+# │ signed, and its packaging recipe has not been vetted by the tool itself. │
+# │ docs/RELEASING.md repeats this. Do not remove these notes without        │
+# │ implementing the controls.                                              │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
+# Actions are pinned to commit SHAs, never tags: a tag is mutable and can be
+# repointed by anyone who can push tags upstream. The `# vX.Y.Z` comments record
+# what each SHA was, so bumps stay reviewable.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # Stage 1 — independent reproducibility check. Two runners build the same
+  # target and we compare hashes. This runs BEFORE publishing so a
+  # non-reproducible build fails the release instead of shipping.
+  reproduce:
+    name: reproducibility (runner ${{ matrix.runner }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Two independent job executions. Distinct fresh VMs, so an artifact
+        # difference reflects the build, not shared state.
+        runner: [a, b]
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "0"
+      GOFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git archive and the commit-date epoch need real history
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Reads the `toolchain` directive from go.mod (setup-go prefers it
+          # over the `go` directive), which is what actually pins the release
+          # compiler — GOTOOLCHAIN=local alone would ignore that directive.
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: record toolchain identity
+        run: |
+          go version | tee toolchain.txt
+          # A GOEXPERIMENT-patched toolchain emits different bytes from a stock
+          # release of the same version, and go.mod cannot pin a GOEXPERIMENT.
+          # Fail loudly rather than publish an artifact nobody can reproduce.
+          if go version | grep -q 'X:'; then
+            echo "::error::toolchain carries a GOEXPERIMENT; release builds require a stock toolchain"
+            exit 1
+          fi
+
+      - name: build release artifacts
+        run: make dist VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: hash artifacts
+        run: |
+          cd dist && sha256sum aurvet-* | tee ../hashes-${{ matrix.runner }}.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repro-${{ matrix.runner }}
+          path: |
+            dist/
+            hashes-${{ matrix.runner }}.txt
+          retention-days: 7
+
+  # Stage 2 — compare the two runners, then publish only on a match.
+  publish:
+    name: verify reproducibility and publish
+    needs: reproduce
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to create the GitHub release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: incoming
+
+      - name: two-runner reproducibility diff
+        run: |
+          set -euo pipefail
+          a=incoming/repro-a/hashes-a.txt
+          b=incoming/repro-b/hashes-b.txt
+          echo "runner a:"; cat "$a"
+          echo "runner b:"; cat "$b"
+          # Compare hash+filename pairs. Any difference means the build is not
+          # reproducible, which invalidates the entire "check me, don't trust
+          # me" proposition — so refuse to publish rather than ship an artifact
+          # whose provenance cannot be independently confirmed.
+          if ! diff <(sort "$a") <(sort "$b"); then
+            echo "::error::builds are NOT reproducible across runners; refusing to publish"
+            exit 1
+          fi
+          echo "reproducible across two independent runners"
+
+      - name: assemble artifacts and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp incoming/repro-a/dist/aurvet-* dist/
+          # Explicit glob + `--`: a bare `*` would also checksum SHA256SUMS
+          # itself, and shellcheck SC2035 flags unanchored globs because a
+          # leading dash would be parsed as an option.
+          cd dist && sha256sum -- aurvet-* > SHA256SUMS && cat SHA256SUMS
+
+      # ─── OPENPGP SIGNING SEAM — INTENTIONALLY EMPTY ────────────────────────
+      # When a release key exists (spec §16: a SECOND OpenPGP identity, distinct
+      # from any commit-signing key), sign SHA256SUMS here and attach the
+      # detached signature. makepkg's validpgpkeys needs OpenPGP specifically.
+      # Deliberately not stubbed — see the header block.
+      # ───────────────────────────────────────────────────────────────────────
+
+      - name: publish release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: |
+            dist/aurvet-*
+            dist/SHA256SUMS
+          # GitHub's auto-generated source archives are NOT the release tarball:
+          # §16 notes their checksums are not contractually stable and they
+          # contain LFS pointers rather than content. Ours comes from
+          # `git archive` via `make dist` and is listed above.
+          body: |
+            ## Verifying this release
+
+            ```
+            sha256sum -c SHA256SUMS
+            ```
+
+            Binaries are statically linked (no `DT_NEEDED`, no `PT_INTERP`) and
+            built reproducibly: two independent CI runners produced
+            byte-identical output, or this release would not exist.
+
+            To reproduce locally you need a **stock** Go toolchain matching the
+            `toolchain` directive in `go.mod` — a `GOEXPERIMENT`-patched
+            toolchain emits different bytes. Then: `make verify-reproducible`.
+
+            ### Not yet in place at this version
+
+            - **Artifacts are not OpenPGP-signed.** The release key does not exist yet.
+            - **No AUR package.** Install from source.
+            - The spec-required "aurvet's own PKGBUILD passes aurvet's own
+              indicators" release gate is **not implemented** (it needs
+              `internal/pkgbuild`, arriving in P2).
+
+            See `docs/RELEASING.md` and `SECURITY.md`.
+          fail_on_unmatched_files: true

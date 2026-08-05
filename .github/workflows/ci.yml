@@ -1,0 +1,101 @@
+# CI — the merge gate.
+#
+# Every action is pinned to a COMMIT SHA, never a tag. A tag is mutable: `@v7`
+# can be repointed at new code by anyone who can push tags to that repository.
+# This project exists to warn people about running unvetted third-party code
+# from a moving reference, so pulling our own CI from one would be incoherent.
+# The `# vX.Y.Z` comment beside each pin records what the SHA corresponded to
+# when it was added, so a bump is reviewable rather than opaque.
+name: ci
+
+on:
+  pull_request:
+    branches: [dev, next, main]
+  push:
+    branches: [dev, next, main]
+
+# Least privilege. Nothing in CI needs to write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: build · vet · test · fmt · deps · linkage
+    runs-on: ubuntu-latest
+    env:
+      # GOTOOLCHAIN=local refuses to silently fetch a toolchain other than the
+      # one pinned by go.mod's `toolchain` directive. A surprise toolchain would
+      # break reproducibility invisibly, which for this project is a security
+      # property (spec §16), not a build detail.
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "0"
+      # Cleared deliberately: spec §16 records that GOFLAGS' -ldflags is
+      # REPLACED, not merged, by a command-line -ldflags. An inherited value
+      # would silently drop our version injection or flip the link mode.
+      GOFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Read the version from go.mod so the pin lives in exactly one place.
+          go-version-file: go.mod
+          check-latest: false
+
+      - name: go version in use
+        run: go version
+
+      - name: build
+        run: make build
+
+      - name: vet
+        run: make vet
+
+      - name: gofmt
+        run: make fmt-check
+
+      # The zero-third-party-dependency policy is P1-A's, and it is load-bearing
+      # for the packaging story: spec §16 notes that without vendored deps,
+      # build() performs a network fetch and aurvet's own PKGBUILD would trip
+      # aurvet's own critical rule.
+      #
+      # WHEN P1-B LANDS: golang.org/x/sys becomes the single sanctioned
+      # dependency (decision D-3, for capset/prctl). To allow it, add it to the
+      # allowlist below rather than deleting this gate.
+      - name: no unsanctioned dependencies
+        run: |
+          set -euo pipefail
+          allowed=""   # P1-B: set to "golang.org/x/sys"
+          deps="$(go list -m all | tail -n +2 || true)"
+          if [ -z "$deps" ]; then
+            echo "no third-party modules — policy satisfied"
+            exit 0
+          fi
+          echo "third-party modules present:"; echo "$deps"
+          bad=0
+          while read -r mod _; do
+            [ -z "$mod" ] && continue
+            case " $allowed " in
+              *" $mod "*) echo "  allowed: $mod" ;;
+              *) echo "  NOT SANCTIONED: $mod"; bad=1 ;;
+            esac
+          done <<< "$deps"
+          if [ "$bad" -ne 0 ]; then
+            echo
+            echo "Every dependency must be justified in the PR that adds it (spec §16)."
+            exit 1
+          fi
+
+      # Runs the whole suite, which includes TestBinaryIsStaticallyLinked (no
+      # DT_NEEDED, no PT_INTERP) and the end-to-end version-injection tests.
+      # NOT run with -short: -short skips exactly those binary-building tests,
+      # and a skipped linkage test is the same as no linkage test.
+      - name: test
+        run: make test
+
+      - name: version identity of this build
+        run: make version

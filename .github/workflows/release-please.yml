@@ -1,0 +1,39 @@
+# release-please — maintains the release PR on `next`.
+#
+# Division of labour, deliberately split so one tool does not both decide the
+# version and publish the binaries:
+#
+#   release-please  → CHANGELOG.md + version bump, as a PR against `next`
+#   release.yml     → tagging on `main` and publishing signed/hashed artifacts
+#
+# skip-github-release is therefore set: release-please must NOT create the tag or
+# the GitHub release, because release.yml owns artifact publication and its
+# reproducibility gate. If release-please created the release, artifacts would
+# either be missing or published without passing the two-runner diff.
+#
+# Why `next` and not the default branch: `next` is the release-stabilisation
+# branch in this project's dev → next → main flow. Work integrates on `dev`; when
+# a release is being prepared it is promoted to `next`, where release-please
+# proposes the version and changelog. Merging that PR, then fast-forwarding
+# next → main and tagging, is the release.
+name: release-please
+
+on:
+  push:
+    branches: [next]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit the changelog/version bump
+      pull-requests: write # open and update the release PR
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          target-branch: next
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

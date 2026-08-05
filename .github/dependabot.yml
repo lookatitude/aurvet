@@ -1,0 +1,27 @@
+# Dependabot — GitHub Actions only.
+#
+# There is no `gomod` ecosystem entry on purpose: aurvet has ZERO third-party Go
+# dependencies, and CI actively fails if one appears (see ci.yml, "no
+# unsanctioned dependencies"). Add a gomod entry when golang.org/x/sys lands at
+# P1-B — the single sanctioned dependency (decision D-3).
+#
+# NOTE on the interaction with our SHA pinning: every action in this repository
+# is pinned to a commit SHA rather than a tag, deliberately, because a tag is
+# mutable. Dependabot understands SHA pins and will propose a new SHA while
+# updating the trailing `# vX.Y.Z` comment, which is exactly the reviewable
+# behaviour we want. Do NOT "simplify" these PRs by switching back to tags.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      # Conventional Commits are a contract in this repo: release-please derives
+      # the version and changelog from them. A dependabot PR that ignored the
+      # convention would produce an unparseable changelog entry.
+      prefix: "ci"
+    labels:
+      - dependencies
+    target-branch: dev

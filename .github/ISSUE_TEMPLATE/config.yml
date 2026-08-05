@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue, including a false clean
+    url: https://github.com/lookatitude/aurvet/security/advisories/new
+    about: >
+      Do NOT open a public issue. A false clean, a verification bypass and an
+      evasion are all treated as vulnerabilities in this project — use private
+      reporting. See SECURITY.md.
+  - name: A finding on my system looks real — what do I do?
+    url: https://github.com/lookatitude/aurvet/blob/main/docs/reporting-malware.md
+    about: Operator guidance for responding to a genuine finding.

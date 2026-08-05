@@ -1,0 +1,49 @@
+name: Bug report
+description: aurvet crashed, errored, or behaved incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        **Not for security issues.** If aurvet reported *clean* on something
+        actually compromised, or a check was bypassed or evaded, that is a
+        vulnerability — use private reporting (see SECURITY.md), not this form.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      placeholder: |
+        The exact command, and the exit code you got:
+        $ aurvet scan --json
+        $ echo $?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Output of `aurvet version`
+      description: >
+        If it says "not injected", that build did not come from a release —
+        please say how you built it.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `aurvet doctor`
+      description: Shows every resolved path and where each value came from.
+      render: text
+    validations:
+      required: true

@@ -13,6 +13,7 @@ import (
 
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/aur"
+	"github.com/lookatitude/aurvet/internal/buildinfo"
 	"github.com/lookatitude/aurvet/internal/check"
 	"github.com/lookatitude/aurvet/internal/config"
 	"github.com/lookatitude/aurvet/internal/finding"
@@ -68,7 +69,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if len(operands) == 0 {
 		fmt.Fprintln(stderr, "usage: aurvet [flags] <command>")
-		fmt.Fprintln(stderr, "commands: scan, explain, doctor")
+		fmt.Fprintln(stderr, "commands: scan, explain, doctor, version")
 		return exitUsage
 	}
 
@@ -90,6 +91,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	cmd, cmdArgs := operands[0], operands[1:]
 
 	switch cmd {
+	// version resolves no config and touches no filesystem, deliberately. It
+	// is dispatched before every other command for that reason: the moment
+	// someone asks which build they are running is usually the moment the
+	// system is broken, and a `version` that needed a readable pacman DB would
+	// be unavailable exactly when it is needed to report a bug.
+	case "version":
+		if len(cmdArgs) != 0 {
+			fmt.Fprintf(stderr, "aurvet: version takes no arguments (got %q)\n", cmdArgs)
+			return exitUsage
+		}
+		fmt.Fprintln(stdout, buildinfo.String())
+		return exitClean
+
 	case "doctor":
 		cfg, err := config.Resolve(*offlineRoot, os.Geteuid())
 		if err != nil {

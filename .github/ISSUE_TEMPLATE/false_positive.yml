@@ -1,0 +1,45 @@
+name: False positive
+description: aurvet raised a finding that is actually benign
+labels: [false-positive]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thank you — false positives matter. A tool that cries wolf gets ignored,
+        and then it fails at the moment it is right.
+
+
+        Note: a finding that is *correct but unhelpful* is not a false positive.
+        aurvet reports what it can establish and states what it cannot — for
+        example "absent from the AUR" is true for a dropped-from-repo package even
+        though nothing is wrong.
+  - type: input
+    id: rule
+    attributes:
+      label: Rule ID
+      placeholder: aur-absent, aur-orphaned, aur-tombstone, aur-submitter-mismatch
+    validations:
+      required: true
+  - type: input
+    id: package
+    attributes:
+      label: Package name
+    validations:
+      required: true
+  - type: textarea
+    id: explain
+    attributes:
+      label: Output of `aurvet explain <finding-id>`
+      description: >
+        Include the whole thing, especially the "what this does NOT prove"
+        section — it often shows whether the finding is wrong or merely unwelcome.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this is benign
+      description: What is the real explanation for what aurvet saw?
+    validations:
+      required: true
