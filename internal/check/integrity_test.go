@@ -8,6 +8,7 @@ import (
 
 	"github.com/lookatitude/aurvet/internal/finding"
 	"github.com/lookatitude/aurvet/internal/fsx"
+	"github.com/lookatitude/aurvet/internal/hook"
 	"github.com/lookatitude/aurvet/internal/mtree"
 )
 
@@ -289,7 +290,7 @@ func TestDirectoryEntriesAreNotChecked(t *testing.T) {
 }
 
 func TestExemptPathIsSilentInFullAndInfoInParanoid(t *testing.T) {
-	ex := DeriveExemptions([]Hook{{
+	ex := DeriveExemptions([]hook.Hook{{
 		Name: "11-glibc-remove-ldconfig-cache.hook", When: "PreTransaction",
 		Exec: "/usr/bin/rm --force /etc/ld.so.cache",
 	}}, nil)

@@ -14,6 +14,7 @@ import (
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/finding"
 	"github.com/lookatitude/aurvet/internal/fsx"
+	"github.com/lookatitude/aurvet/internal/hook"
 	"github.com/lookatitude/aurvet/internal/mtree"
 	"github.com/lookatitude/aurvet/internal/safe"
 	"golang.org/x/sys/unix"
@@ -328,7 +329,7 @@ func TestTriageHashesWhenStatDisagreesAndMarksIt(t *testing.T) {
 func TestExemptPathIsNotOpenedBelowParanoid(t *testing.T) {
 	root, dir := tierRoot(t)
 	writeAt(t, dir, "etc/ld.so.cache", "regenerated", 0o644)
-	ex := DeriveExemptions([]Hook{{
+	ex := DeriveExemptions([]hook.Hook{{
 		Name: "11-glibc-remove-ldconfig-cache.hook", When: "PreTransaction",
 		Exec: "/usr/bin/rm --force /etc/ld.so.cache",
 	}}, nil)
@@ -493,7 +494,7 @@ func TestFPGateIntegrityIsQuietOnABenignRoot(t *testing.T) {
 		t.Fatalf("fixture parsed to %d entries, want 7 (./.PKGINFO is package metadata): %+v", len(entries), entries)
 	}
 
-	hooks, hookGaps := LoadHooks(root.FS(), DefaultHookDirs)
+	hooks, hookGaps := hook.LoadHooks(root.FS(), hook.DefaultHookDirs)
 	if len(hookGaps) != 0 {
 		t.Fatalf("hook load gaps: %+v", hookGaps)
 	}
