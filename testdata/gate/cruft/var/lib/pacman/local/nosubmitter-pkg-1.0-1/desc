@@ -1,0 +1,12 @@
+%NAME%
+nosubmitter-pkg
+
+%VERSION%
+1.0-1
+
+%BASE%
+nosubmitter-pkg
+
+%VALIDATION%
+none
+

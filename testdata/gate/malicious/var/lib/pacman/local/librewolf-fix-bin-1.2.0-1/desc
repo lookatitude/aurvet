@@ -1,0 +1,12 @@
+%NAME%
+librewolf-fix-bin
+
+%VERSION%
+1.2.0-1
+
+%BASE%
+librewolf-fix-bin
+
+%VALIDATION%
+none
+

@@ -71,6 +71,27 @@ These were measured on the reference system; the parsers are written against the
 - Consumes: nothing (first task)
 - Produces: `config.Config{Root string, DBPath string, SyncPath string, StateDir string, Network bool, MinSeverity string}`; `config.Resolve(root string, euid int) (Config, error)`; `config.Config.Doctor() []config.DoctorLine` where `DoctorLine{Key, Value, Source string}`
 
+> **StateDir correction, 2026-08-05.** The Step 3 sketch below resolves
+> `StateDir` in two branches — `/var/lib/aurvet` for `euid == 0`, and
+> `filepath.Join(root, "var/lib/aurvet")` otherwise. That second branch is
+> wrong for the default live run, and the sketch's own doc comment says so
+> ("an unprivileged user gets a per-user one"): with `root == "/"` the join
+> yields `/var/lib/aurvet` *again*, which no ordinary user can write. Shipped
+> behaviour was therefore `mkdir /var/lib/aurvet: permission denied` on every
+> unprivileged scan, so no report was ever persisted and `--since-last` could
+> never find a baseline — the headline feature of task 10, dead on the primary
+> use case this tool was scoped around ("running entirely unprivileged").
+> The two branches had collapsed three distinct cases into two. Resolution is
+> now three-case, in order: `euid == 0` → the system path unconditionally
+> (spec §11 — a privileged security tool must not follow a caller-controlled
+> `XDG_STATE_HOME`); `euid != 0 && root != "/"` → inside the inspected tree;
+> `euid != 0 && root == "/"` → `$XDG_STATE_HOME/aurvet`, else
+> `$HOME/.local/state/aurvet`, else the system path as an honest fallback.
+> `Doctor()`'s `state_dir` Source now names which case fired rather than a
+> blanket `"derived"`, so the resolution is self-explaining. **The
+> discriminator is `root`, not `euid` alone** — any `if euid != 0` branch that
+> also depends on `root` deserves this second look.
+
 - [x] **Step 0: Create `go.mod`**
 
 `go.mod` must exist *before* the first test is written, or step 2 fails with
@@ -919,7 +940,7 @@ git commit -m "feat(alpm): sync DB name oracle; foreignness independent of %VALI
 - Consumes: nothing
 - Produces: `finding.Severity` with `SevInfo`/`SevSuspicious`/`SevCritical` and `String()`; `finding.Finding{RuleID, SubjectKind, Subject, Severity, Summary, Evidence []string, Limits string}`; `finding.Gap{RuleID, Subject, Reason}`; `finding.Result{Findings []Finding, Gaps []Gap}`; `finding.Fingerprint(ruleID, subjectKind, subjectIdentity, scope string) string`; `(Result).Complete() bool`; `(Result).MaxSeverity() Severity`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/finding/finding_test.go
@@ -976,12 +997,12 @@ func TestSeverityStrings(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/finding/ -v`
 Expected: FAIL — `undefined: Fingerprint`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/finding/finding.go
@@ -1058,12 +1079,12 @@ func Fingerprint(ruleID, subjectKind, subjectIdentity, scope string) string {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/finding/ -v`
 Expected: PASS (three tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/finding
@@ -1084,7 +1105,7 @@ git commit -m "feat(finding): finding model, version-independent fingerprints, c
 - Consumes: nothing
 - Produces: `aur.Pkg{Name, PackageBase, Maintainer, Submitter string, FirstSubmitted, LastModified int64}`; `aur.Client` interface with `Info(ctx context.Context, bases []string) (map[string]Pkg, error)` and `Tombstone(ctx context.Context, base string) (bool, string, error)`; `aur.Fake{Known map[string]Pkg, Tombstones map[string]string, Err error}`; `aur.NewHTTP(baseURL string, hc *http.Client) *HTTP`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/aur/http_test.go
@@ -1180,12 +1201,12 @@ func TestTombstoneDetectsMalwareRemoval(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/aur/ -v`
 Expected: FAIL — `undefined: NewHTTP`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/aur/client.go
@@ -1365,12 +1386,12 @@ func (h *HTTP) Tombstone(ctx context.Context, base string) (bool, string, error)
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/aur/ -v`
 Expected: PASS (four tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/aur
@@ -1387,7 +1408,32 @@ git commit -m "feat(aur): batched RPC client, cgit tombstone check, fixture fake
 
 **Interfaces:**
 - Consumes: `alpm.Package`, `alpm.IsForeign`, `aur.Client`, `finding.*`
-- Produces: `check.Provenance(ctx context.Context, pkgs []alpm.Package, syncNames map[string]bool, cl aur.Client, network bool) finding.Result`
+- Produces: `check.Provenance(ctx context.Context, pkgs []alpm.Package, syncNames map[string]bool, unreadableSyncDBs []string, cl aur.Client, network bool) finding.Result`
+  — **signature corrected 2026-08-05**: this entry omitted `unreadableSyncDBs
+  []string`, added during implementation so an unreadable sync DB becomes a
+  coverage gap instead of silently making every repo package look foreign. Six
+  parameters, not five. Anyone coding against the five-param form gets a build
+  error, so this drift was harmless, but the FP-gate lane had to be told the
+  real shape.
+
+> **`aur-submitter-mismatch` severity correction, 2026-08-05.** The Step 3
+> sketch below raises this rule at `SevSuspicious`. Measured against the live
+> AUR on the reference system, it then fired on **13 of 39 foreign packages
+> (33%)** — every one a verified-benign maintainer handoff (`brave-bin`
+> toropisco→brave, `flux-bin` fluxcdbot→dxs, `android-studio`
+> TamCore→kordianbruck) — and produced **13 of the 14 total findings**, so the
+> default `suspicious` floor rendered a scan that was almost entirely noise.
+> That is plan Risk #1 (severity inflation) realised, and the `checks` lane's
+> own rationale names "cries wolf" as a failure mode co-equal with false
+> assurance. Downgraded to **`SevInfo`**: a maintainer/submitter delta with no
+> history is an identity fact, not a suspicion, and the actionable correlated
+> form (an orphan followed by a new maintainer within N days) needs the drift
+> baseline that arrives in P4. The downgrade cannot manufacture false
+> assurance — `aur-tombstone` (critical) and `aur-absent` (suspicious) are
+> untouched, INV-8 only ever constrained criticals, and the signal stays
+> reachable via `--min-severity info` and in `--json` / `explain`. The
+> `Submitter == ""` **gap** branch was deliberately left alone: an absent
+> submitter must keep reporting *unavailable* (INV-10), never a pass.
 
 - [x] **Step 1: Write the failing test**
 
@@ -2063,7 +2109,7 @@ git commit -m "feat(report): text/JSON renderers, explain, contractual exit code
 - Consumes: `finding.Result`, `report.Summary`, `config.Config`
 - Produces: `report.Save(stateDir string, r finding.Result, s Summary, stamp string) (string, error)`; `report.LoadLatest(stateDir string) (finding.Result, bool, error)`; `report.Diff(prev, cur finding.Result) (added, resolved []finding.Finding)`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/report/store_test.go
@@ -2188,12 +2234,12 @@ func TestFPGateStillCatchesMalware(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/report/ ./internal/check/ -v`
 Expected: FAIL — `undefined: Save`; the FP gate tests fail to build alongside it
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/report/store.go
@@ -2447,12 +2493,12 @@ Add the flag next to the others:
 	sinceLast := fs.Bool("since-last", false, "show only findings new or resolved since the previous scan")
 ```
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `go test ./... -v && go vet ./... && go build ./...`
 Expected: all PASS, including `TestFPGateNoCriticalsOnBenignSystems` and `TestFPGateStillCatchesMalware`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/report/store.go internal/report/store_test.go internal/check/fpgate_test.go cmd/aurvet
@@ -2463,16 +2509,32 @@ git commit -m "feat(report): persistence, --since-last diff, INV-8 false-positiv
 
 ## Definition of done for P1-A
 
-- [ ] `go test ./...` green; `go vet ./...` clean
-- [ ] `aurvet doctor` prints resolved paths with per-key provenance
-- [ ] `aurvet scan` on the reference system reports 39 foreign of 1409 total and exits `0`, `1`, or `3` — never a bare success when coverage is incomplete
-- [ ] `aurvet scan --no-network` exits `3` with a gap per foreign package, never `0`
-- [ ] `aurvet scan --json` emits `schema_version`
-- [ ] `aurvet explain <id>` prints evidence and the "what this does NOT prove" section
-- [ ] `TestFPGateNoCriticalsOnBenignSystems` passes — zero criticals on stock and cruft fixtures
-- [ ] `TestFPGateStillCatchesMalware` passes — the gate is not satisfiable by a silent scanner
-- [ ] `TestRPCFailureProducesGapNotAbsence` passes — network failure can never trigger the highest-severity rule
-- [ ] No third-party dependencies in `go.mod`
+- [x] `go test ./...` green; `go vet ./...` clean
+- [x] `aurvet doctor` prints resolved paths with per-key provenance
+- [x] `aurvet scan` on the reference system reports 39 foreign of 1409 total and exits `0`, `1`, or `3` — never a bare success when coverage is incomplete
+- [x] `aurvet scan --no-network` exits `3` with a gap per foreign package, never `0`
+- [x] `aurvet scan --json` emits `schema_version`
+- [x] `aurvet explain <id>` prints evidence and the "what this does NOT prove" section
+- [x] `TestFPGateNoCriticalsOnBenignSystems` passes — zero criticals on stock and cruft fixtures
+- [x] `TestFPGateStillCatchesMalware` passes — the gate is not satisfiable by a silent scanner
+- [x] `TestRPCFailureProducesGapNotAbsence` passes — network failure can never trigger the highest-severity rule
+- [x] No third-party dependencies in `go.mod`
+
+All ten verified 2026-08-05 against the reference system with the built binary,
+not inferred from unit tests alone. Three notes on what the measurements
+actually showed:
+
+- **39 foreign of 1410 total**, not 1409. The load-bearing number (39 foreign)
+  is unchanged; one repo package was installed between the plan's measurement
+  and verification. The criterion is met on the number that matters.
+- `scan` exits **`3`**, not `1`, on the reference system even with 14 findings
+  present. That is `ExitCode`'s documented precedence — `3` outranks `1`,
+  because an incomplete scan that also found something is still an incomplete
+  scan. Both are failure codes under systemd, so nothing is hidden.
+- One gap observed live was `python-pkg_resources (aur-tombstone): cgit lookup
+  failed: http 502` — an unplanned real network failure that became a *coverage
+  gap* rather than an "absent from the AUR" finding. Success criterion 4
+  demonstrated against a genuine upstream fault, not only against the fixture.
 
 ## Deferred to P1-B and P1-C
 

@@ -32,17 +32,30 @@ func FindingID(f finding.Finding) string {
 // coverage (spec §14), findings sorted by descending severity, and gaps — a
 // gap is never silence (INV-3/INV-10).
 func Text(w io.Writer, r finding.Result, s Summary) error {
+	return TextView(w, FullView(r), s)
+}
+
+// TextView is Text over a View. The header's finding count and coverage verdict
+// come from v.Verdict — the FULL result — while only the listed findings come
+// from v.Display. Under --since-last that is the difference between "0
+// finding(s)" (a lie: they are suppressed, not gone) and "14 finding(s), 0 new
+// since the last scan".
+func TextView(w io.Writer, v View, s Summary) error {
 	coverage := "coverage: complete"
-	if !r.Complete() {
-		coverage = fmt.Sprintf("coverage: incomplete (%d gap(s))", len(r.Gaps))
+	if !v.Verdict.Complete() {
+		coverage = fmt.Sprintf("coverage: incomplete (%d gap(s))", len(v.Verdict.Gaps))
 	}
 	if _, err := fmt.Fprintf(w, "%d foreign / %d total packages · %d finding(s) · %s\n",
-		s.Foreign, s.Total, len(r.Findings), coverage); err != nil {
+		s.Foreign, s.Total, len(v.Verdict.Findings), coverage); err != nil {
 		return err
 	}
 
-	findings := make([]finding.Finding, len(r.Findings))
-	copy(findings, r.Findings)
+	if err := writeSinceHeader(w, v); err != nil {
+		return err
+	}
+
+	findings := make([]finding.Finding, len(v.Display.Findings))
+	copy(findings, v.Display.Findings)
 	sort.SliceStable(findings, func(i, j int) bool {
 		return findings[i].Severity > findings[j].Severity
 	})
@@ -61,8 +74,39 @@ func Text(w io.Writer, r finding.Result, s Summary) error {
 		}
 	}
 
-	for _, g := range r.Gaps {
+	// Gaps come from Verdict, never from Display. A package that could not be
+	// checked yesterday is still unchecked today, so --since-last must not
+	// diff gaps away — they are what holds the exit code at 3.
+	for _, g := range v.Verdict.Gaps {
 		if _, err := fmt.Fprintf(w, "\n[gap] %s (%s): %s\n", g.Subject, g.RuleID, g.Reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeSinceHeader renders the --since-last summary line and the resolved
+// findings, which are the one thing the ordinary listing cannot show: they are
+// absent from the current result by definition.
+//
+// The suppressed count is stated explicitly. "0 new" on its own reads as "you
+// are clean" to a tired operator at 2am; "0 new (14 finding(s) still present,
+// not re-listed)" cannot.
+func writeSinceHeader(w io.Writer, v View) error {
+	if v.Since == nil {
+		return nil
+	}
+	if !v.Since.HadBaseline {
+		_, err := fmt.Fprintln(w, "since last scan: no previous report to compare against; showing all findings")
+		return err
+	}
+	suppressed := len(v.Verdict.Findings) - len(v.Since.Added)
+	if _, err := fmt.Fprintf(w, "since last scan: %d new, %d resolved (%d finding(s) still present, not re-listed)\n",
+		len(v.Since.Added), len(v.Since.Resolved), suppressed); err != nil {
+		return err
+	}
+	for _, f := range v.Since.Resolved {
+		if _, err := fmt.Fprintf(w, "  resolved: [%s] %s — %s\n", f.Severity, f.Subject, f.Summary); err != nil {
 			return err
 		}
 	}

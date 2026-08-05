@@ -399,12 +399,30 @@ func Provenance(
 				Reason: "AUR record carries no submitter; the maintainer/submitter identity comparison did not run",
 			})
 		case meta.Maintainer != "" && meta.Maintainer != meta.Submitter:
+			// Downgraded 2026-08-05 (lead decision, plan Risk #1 -- "cries
+			// wolf"). Measured on the reference system this rule fired on 13
+			// of 39 foreign packages (33%), every one a verified-benign
+			// maintainer handoff, and dominated the default `suspicious`
+			// floor with 13 of 14 total findings. A maintainer/submitter
+			// delta with no history is an identity fact, not a suspicion --
+			// the actionable, correlated form (an orphan followed by a new
+			// maintainer within N days) needs the drift baseline arriving in
+			// P4. Reporting the uncorrelated delta at the default floor buys
+			// noise now and spends the operator's attention before the
+			// signal that would justify it exists. This cannot manufacture
+			// false assurance about malware: aur-tombstone (critical) and
+			// aur-absent (suspicious) are untouched, and INV-8 only ever
+			// constrained criticals. The signal stays fully reachable via
+			// --min-severity info and is still rendered in --json / explain.
 			res.Findings = append(res.Findings, finding.Finding{
 				RuleID: "aur-submitter-mismatch", SubjectKind: "package", Subject: p.Name,
-				Severity: finding.SevSuspicious,
+				Severity: finding.SevInfo,
 				Summary:  "current maintainer differs from the original submitter",
 				Evidence: []string{"submitter=" + meta.Submitter, "maintainer=" + meta.Maintainer},
-				Limits:   "Legitimate handoffs produce this too. Reported as an identity delta, not as malice. " + limitProvenance,
+				Limits: "Legitimate handoffs produce this too. Reported as an identity delta, not as malice, and " +
+					"below the default reporting floor for that reason -- the correlated, actionable form of this " +
+					"signal (an orphan followed by a new maintainer within N days) requires a drift baseline this " +
+					"check does not yet have. " + limitProvenance,
 			})
 		}
 	}

@@ -56,18 +56,118 @@ func TestLoadLocalDBReadsPackages(t *testing.T) {
 }
 
 // ALPM_DB_VERSION and other non-package files must be skipped, not parsed.
+// E-8: ALPM_DB_VERSION is the one measured benign non-directory entry (see
+// localdb.go), so skipping it must not produce a gap -- but this test would
+// have passed even if every other non-directory entry were silently dropped
+// too, which is exactly the E-8 hole. The dedicated "unexpected plain file"
+// test below covers that.
 func TestLoadLocalDBSkipsNonPackageEntries(t *testing.T) {
 	db := t.TempDir()
 	if err := os.WriteFile(filepath.Join(db, "ALPM_DB_VERSION"), []byte("9\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeEntry(t, db, "zlib-1.3.1-2", "%NAME%\nzlib\n\n%VERSION%\n1.3.1-2\n\n", "%FILES%\nusr/lib/libz.so\n\n")
-	pkgs, _, err := LoadLocalDB(db)
+	pkgs, gaps, err := LoadLocalDB(db)
 	if err != nil {
 		t.Fatalf("LoadLocalDB: %v", err)
 	}
 	if len(pkgs) != 1 {
 		t.Fatalf("got %d packages, want 1", len(pkgs))
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want none: ALPM_DB_VERSION is the one measured allowlisted filename", gaps)
+	}
+}
+
+// E-8: os.ReadDir's DirEntry.IsDir() is an lstat, so a package directory
+// reached through a symlink reports IsDir() == false and the old
+// "!e.IsDir() { continue }" guard dropped it with no gap at all -- no
+// package, no finding, no gap, exit 0. This test reproduces that: it must
+// fail against the pre-fix code (the symlinked package silently absent from
+// pkgs, with zero gaps to explain why).
+func TestLoadLocalDBFollowsSymlinkedPackageDir(t *testing.T) {
+	db := t.TempDir()
+	real := t.TempDir()
+	realDir := filepath.Join(real, "zlib-1.3.1-2")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	desc := "%NAME%\nzlib\n\n%VERSION%\n1.3.1-2\n\n"
+	if err := os.WriteFile(filepath.Join(realDir, "desc"), []byte(desc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "files"), []byte("%FILES%\nusr/lib/libz.so\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(db, "zlib-1.3.1-2")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+
+	pkgs, gaps, err := LoadLocalDB(db)
+	if err != nil {
+		t.Fatalf("LoadLocalDB: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want none: symlinked package dir must be analysed", gaps)
+	}
+	found := false
+	for _, p := range pkgs {
+		if p.Name == "zlib" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("pkgs = %v, want zlib present via symlinked dir", pkgs)
+	}
+}
+
+// E-8: a broken symlink is a stat failure, not a directory and not the
+// allowlisted plain file -- it must be gapped by name, never silently
+// dropped, and it must not cost other packages in the same db their entries.
+func TestLoadLocalDBGapsBrokenSymlink(t *testing.T) {
+	db := t.TempDir()
+	writeEntry(t, db, "zlib-1.3.1-2", "%NAME%\nzlib\n\n%VERSION%\n1.3.1-2\n\n", "%FILES%\nusr/lib/libz.so\n\n")
+	dangling := filepath.Join(db, "ghost-1.0-1")
+	if err := os.Symlink(filepath.Join(db, "does-not-exist"), dangling); err != nil {
+		t.Fatal(err)
+	}
+
+	pkgs, gaps, err := LoadLocalDB(db)
+	if err != nil {
+		t.Fatalf("LoadLocalDB: %v", err)
+	}
+	if len(gaps) != 1 || gaps[0] != "ghost-1.0-1" {
+		t.Errorf("gaps = %v, want [ghost-1.0-1]", gaps)
+	}
+	found := false
+	for _, p := range pkgs {
+		if p.Name == "zlib" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("pkgs = %v, want zlib still present alongside the broken symlink", pkgs)
+	}
+}
+
+// E-8: a plain file that is not the one measured allowlisted name
+// (ALPM_DB_VERSION) must be gapped, not silently skipped -- an explicit
+// one-name allowlist is auditable, a pattern/prefix guess is a hiding place.
+func TestLoadLocalDBGapsUnexpectedPlainFile(t *testing.T) {
+	db := t.TempDir()
+	if err := os.WriteFile(filepath.Join(db, "README"), []byte("not a package\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgs, gaps, err := LoadLocalDB(db)
+	if err != nil {
+		t.Fatalf("LoadLocalDB: %v", err)
+	}
+	if len(pkgs) != 0 {
+		t.Errorf("pkgs = %v, want none", pkgs)
+	}
+	if len(gaps) != 1 || gaps[0] != "README" {
+		t.Errorf("gaps = %v, want [README]", gaps)
 	}
 }
 
@@ -118,8 +218,8 @@ func TestLoadLocalDBFromStockFixture(t *testing.T) {
 	if len(gaps) != 0 {
 		t.Errorf("gaps = %v, want none", gaps)
 	}
-	if len(pkgs) != 2 {
-		t.Fatalf("got %d packages, want 2", len(pkgs))
+	if len(pkgs) != 3 {
+		t.Fatalf("got %d packages, want 3", len(pkgs))
 	}
 	byName := map[string]Package{}
 	for _, p := range pkgs {
@@ -136,5 +236,13 @@ func TestLoadLocalDBFromStockFixture(t *testing.T) {
 	}
 	if _, ok := byName["foo-bin"].Backup["etc/foo.conf"]; !ok {
 		t.Errorf("foo-bin backup = %v, want etc/foo.conf present", byName["foo-bin"].Backup)
+	}
+	// The split-package fixture: %BASE% must be READ from the file, not
+	// defaulted from %NAME% via LoadLocalDB's `if p.Base == "" { p.Base =
+	// p.Name }` fallback. Every other fixture package has Base == Name, so
+	// this is the only assertion in the suite that can tell "parsed" from
+	// "defaulted" apart.
+	if byName["foo-lib"].Base != "foo-common" {
+		t.Errorf("foo-lib base = %q, want foo-common (declared %%BASE%%, not defaulted from %%NAME%%)", byName["foo-lib"].Base)
 	}
 }

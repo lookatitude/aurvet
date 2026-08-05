@@ -1,0 +1,12 @@
+%NAME%
+brave-bin-debug
+
+%VERSION%
+1.60.124-1
+
+%BASE%
+brave-bin
+
+%VALIDATION%
+none
+

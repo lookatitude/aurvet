@@ -1,0 +1,12 @@
+%NAME%
+handoff-pkg
+
+%VERSION%
+3.0-1
+
+%BASE%
+handoff-pkg
+
+%VALIDATION%
+none
+

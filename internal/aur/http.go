@@ -158,13 +158,26 @@ func (h *HTTP) Info(ctx context.Context, bases []string) (map[string]Pkg, error)
 		if end > len(bases) {
 			end = len(bases)
 		}
-		// Not deduplicated: check.Provenance already dedups names via a set
-		// before calling Info (its nameSet), so a duplicate reaching here is
-		// the caller's to avoid, not Info's to filter. A duplicate straddling
-		// a chunk boundary is simply asked about twice; that does not disturb
-		// the per-chunk resultcount check below, which compares a response's
-		// own count to its own results length, not to the request's arg[]
-		// count.
+		// Not deduplicated on the INPUT side: check.Provenance already dedups
+		// names via a set before calling Info (its nameSet), so a duplicate
+		// reaching here is the caller's to avoid, not Info's to filter.
+		//
+		// A duplicate CONFINED TO one chunk is genuinely harmless: the v5 RPC
+		// dedups its own results, so one arg[] list repeating a name many
+		// times still yields a single matching result, and that does not
+		// disturb the per-chunk resultcount check below, which compares a
+		// response's own count to its own results length, not to the
+		// request's arg[] count.
+		//
+		// A duplicate STRADDLING a chunk boundary is a different matter after
+		// E-6b: it is asked about in two SEPARATE RPC calls, each
+		// independently entitled to answer with a result for it, and the
+		// duplicate-Name guard in the keying pass below now runs once over
+		// the GLOBAL union — so it errors on exactly that, deliberately. See
+		// TestInfoRejectsDuplicateNameAcrossChunks. This is not a regression
+		// check.Provenance can hit, since it already dedups before ever
+		// calling Info; a direct caller who does not is in the same position
+		// as one who fed Info a genuinely ambiguous response.
 		chunk := bases[start:end]
 
 		q := url.Values{"v": {"5"}, "type": {"info"}}
@@ -200,13 +213,31 @@ func (h *HTTP) Info(ctx context.Context, bases []string) (map[string]Pkg, error)
 			return nil, fmt.Errorf("aur rpc: resultcount %d but %d results", r.ResultCount, len(r.Results))
 		}
 		for i, p := range r.Results {
-			// R8: a result with neither identity indexes nowhere, yet it
-			// satisfies the resultcount check — so every requested base read
-			// as absent from a response that was actually broken. Per
-			// contract rule 1 that is a gap. Checked per chunk, same reason
-			// as the three checks above.
-			if p.Name == "" && p.PackageBase == "" {
-				return nil, fmt.Errorf("aur rpc: result %d has neither Name nor PackageBase", i)
+			// E-6a: a result missing EITHER identity is unindexable for the
+			// purpose it is used for — not only one missing BOTH, which is as
+			// far as R8's original guard went. {"Name":"","PackageBase":"foo"}
+			// used to survive that guard, skip pass one below (an empty Name
+			// claims no key), and key only under out["foo"]. check.Provenance
+			// keys its own lookup by Name and rejects a hit whose
+			// meta.Name != p.Name (S6), so a DIFFERENT installed package that
+			// happens to share "foo" as its own Name would fetch this record,
+			// fail that cross-key rejection, and land in the absent branch —
+			// a malformed RPC record producing a wrong finding, not a gap.
+			// The mirror case, {"Name":"foo","PackageBase":""}, is equally
+			// unindexable for check.Provenance's declared-pkgbase comparison,
+			// which already has to gap on meta.PackageBase == "" — a
+			// downstream patch for this upstream defect. Both directions
+			// error here instead, per contract rule 1, checked per chunk for
+			// the same reason as the three checks above.
+			if p.Name == "" || p.PackageBase == "" {
+				switch {
+				case p.Name == "" && p.PackageBase == "":
+					return nil, fmt.Errorf("aur rpc: result %d has neither Name nor PackageBase, a partial identity is not usable", i)
+				case p.Name == "":
+					return nil, fmt.Errorf("aur rpc: result %d has PackageBase %q but no Name, a partial identity is not usable", i, p.PackageBase)
+				default:
+					return nil, fmt.Errorf("aur rpc: result %d has Name %q but no PackageBase, a partial identity is not usable", i, p.Name)
+				}
 			}
 		}
 		allResults = append(allResults, r.Results...)
@@ -239,13 +270,32 @@ func (h *HTTP) Info(ctx context.Context, bases []string) (map[string]Pkg, error)
 	// Invariant: a package's own Name always wins its key. Pass one claims
 	// every Name; pass two adds PackageBase keys only where nothing claimed
 	// them. Nothing is ever overwritten with a different Pkg.
+	//
+	// E-6b: the two passes are DELIBERATELY asymmetric on duplicates. Pass
+	// one errors on a duplicate Name; pass two keeps first-wins-and-skip on
+	// PackageBase. Package names are unique in the AUR, so two results
+	// claiming the same Name is an impossible state, not a fact this
+	// function may resolve by picking whichever arrived first: doing so let
+	// response ORDERING — the server's, i.e. an attacker's, if they can
+	// influence it — decide silently whether check.Provenance's
+	// Maintainer/Submitter read (and so a genuine aur-orphaned finding) came
+	// from one claimant or the other. An ambiguous answer is not an answer,
+	// so it errors instead of choosing, and this holds even for two
+	// byte-identical results: silently collapsing an exact duplicate would
+	// re-hide the same ambiguity one level down rather than remove it.
+	// PackageBase gets no such treatment because duplicate PackageBase is a
+	// NORMAL state — several distinct package Names legitimately sharing one
+	// build is exactly what a split package is — so choosing among equals is
+	// the correct behaviour, not a defect to guard against.
 	out := make(map[string]Pkg, 2*len(allResults))
 	for _, p := range allResults {
-		if p.Name != "" {
-			// Package names are unique in the AUR, so two results cannot
-			// legitimately claim the same Name key.
-			out[p.Name] = p
+		if p.Name == "" {
+			continue
 		}
+		if _, taken := out[p.Name]; taken {
+			return nil, fmt.Errorf("aur rpc: duplicate result for Name %q", p.Name)
+		}
+		out[p.Name] = p
 	}
 	for _, p := range allResults {
 		if p.PackageBase == "" {

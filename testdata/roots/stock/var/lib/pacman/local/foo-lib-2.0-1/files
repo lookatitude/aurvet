@@ -1,0 +1,7 @@
+%FILES%
+usr/lib/libfoolib.so
+etc/foo-lib.conf
+
+%BACKUP%
+etc/foo-lib.conf	d41d8cd98f00b204e9800998ecf8427e
+

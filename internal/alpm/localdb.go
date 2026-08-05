@@ -38,10 +38,36 @@ func LoadLocalDB(dbPath string) ([]Package, []string, error) {
 	var pkgs []Package
 	var gaps []string
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue // ALPM_DB_VERSION and friends
-		}
 		dir := filepath.Join(dbPath, e.Name())
+
+		// E-8: DirEntry.IsDir() is an lstat, so a package directory reached
+		// through a symlink reports IsDir() == false and a bare "!IsDir() ->
+		// skip" guard drops it with no gap at all -- no package, no finding,
+		// no gap, and the run can still exit 0. os.Stat follows symlinks, so
+		// it tells us what the entry actually is rather than what it looks
+		// like from the outside.
+		info, err := os.Stat(dir)
+		if err != nil {
+			// Broken symlink, EACCES, dangling entry -- we could not tell
+			// what this was, which is precisely a gap, not a silent skip.
+			gaps = append(gaps, e.Name())
+			continue
+		}
+		if !info.IsDir() {
+			// Measured on the reference system (/var/lib/pacman/local, this
+			// project, 2026-08-04): 1410 dirs, 0 symlinks, exactly one
+			// non-dir non-symlink entry, named ALPM_DB_VERSION. That is the
+			// entire benign non-directory population, so it is allowlisted
+			// by exact name -- an explicit one-name list is auditable, a
+			// pattern or prefix guess is a hiding place. Every other
+			// non-directory entry is unexpected and must be gapped: the
+			// measured cost of that rule is zero gaps on this system, which
+			// is why it is affordable.
+			if e.Name() != "ALPM_DB_VERSION" {
+				gaps = append(gaps, e.Name())
+			}
+			continue
+		}
 		df, err := os.Open(filepath.Join(dir, "desc"))
 		if err != nil {
 			gaps = append(gaps, e.Name())

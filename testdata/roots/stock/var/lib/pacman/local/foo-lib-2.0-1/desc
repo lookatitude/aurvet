@@ -1,0 +1,18 @@
+%NAME%
+foo-lib
+
+%VERSION%
+2.0-1
+
+%BASE%
+foo-common
+
+%VALIDATION%
+none
+
+%PACKAGER%
+Unknown Packager
+
+%INSTALLDATE%
+1770760800
+

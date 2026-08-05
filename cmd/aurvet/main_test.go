@@ -562,3 +562,277 @@ func TestScanWithFakeErrProducesGapsNeverAbsent(t *testing.T) {
 		t.Fatalf("ExitCode = %d, want %d", code, exitIncomplete)
 	}
 }
+
+// --- task 10: persistence and --since-last ---
+
+// sinceLastOpts builds a scan whose state lives in a temp dir and whose AUR
+// client is a Fake, so the whole --since-last cycle runs hermetically. It uses
+// the stateDir seam rather than --offline-root's resolved StateDir because
+// scanStateDir deliberately refuses to persist under an examined tree (INV-5).
+func sinceLastOpts(root, state string, sinceLast bool, cl aur.Client) scanOpts {
+	return scanOpts{
+		offlineRoot: root,
+		jsonOut:     false,
+		sinceLast:   sinceLast,
+		stateDir:    state,
+		cl:          cl,
+	}
+}
+
+// TestSinceLastSecondRunSuppressesButStillExitsTheSame is the end-to-end shape
+// of the whole feature, and the one regression that matters: scan twice over an
+// unchanged system, and the second run must list nothing new while returning
+// the IDENTICAL exit code. --since-last is a display filter, never a severity
+// filter -- a finding you saw yesterday is still a finding today.
+func TestSinceLastSecondRunSuppressesButStillExitsTheSame(t *testing.T) {
+	root := evilRoot(t)
+	state := t.TempDir()
+	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+
+	var first bytes.Buffer
+	code1 := runScan(sinceLastOpts(root, state, false, cl), &first, &bytes.Buffer{})
+	if code1 != exitFindings {
+		t.Fatalf("first run exit = %d, want %d\n%s", code1, exitFindings, first.String())
+	}
+	if !strings.Contains(first.String(), "evil") {
+		t.Fatalf("first run did not report the finding:\n%s", first.String())
+	}
+
+	var second bytes.Buffer
+	code2 := runScan(sinceLastOpts(root, state, true, cl), &second, &bytes.Buffer{})
+	if code2 != code1 {
+		t.Errorf("--since-last changed the exit code: %d -> %d. It is a display filter, "+
+			"never a severity filter.\n%s", code1, code2, second.String())
+	}
+	if !strings.Contains(second.String(), "0 new") {
+		t.Errorf("second run should report 0 new findings:\n%s", second.String())
+	}
+	if !strings.Contains(second.String(), "1 finding(s) still present, not re-listed") {
+		t.Errorf("second run must state what it suppressed:\n%s", second.String())
+	}
+}
+
+// TestSinceLastNeverSuppressesTheExitCodeForACritical is the same rule stated
+// against the severity that matters. A tombstoned package seen on two
+// consecutive runs must still exit non-zero on the second.
+func TestSinceLastNeverSuppressesTheExitCodeForACritical(t *testing.T) {
+	root := evilRoot(t)
+	state := t.TempDir()
+	cl := aur.Fake{Tombstones: map[string]string{"evil": "history removed due to malware"}}
+
+	var first bytes.Buffer
+	if code := runScan(sinceLastOpts(root, state, false, cl), &first, &bytes.Buffer{}); code == exitClean {
+		t.Fatalf("first run over a tombstoned package exited clean:\n%s", first.String())
+	}
+
+	var second bytes.Buffer
+	code := runScan(sinceLastOpts(root, state, true, cl), &second, &bytes.Buffer{})
+	if code == exitClean {
+		t.Fatalf("--since-last turned a critical into exit 0 by showing it twice:\n%s", second.String())
+	}
+}
+
+// TestSinceLastFirstRunHasNoBaselineAndShowsEverything: with nothing stored, a
+// --since-last run must print the full list and say why, not an empty one that
+// reads as a clean bill of health.
+func TestSinceLastFirstRunHasNoBaselineAndShowsEverything(t *testing.T) {
+	root := evilRoot(t)
+	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+
+	var out bytes.Buffer
+	runScan(sinceLastOpts(root, t.TempDir(), true, cl), &out, &bytes.Buffer{})
+	if !strings.Contains(out.String(), "no previous report") {
+		t.Errorf("a baseline-less --since-last run must say so:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "evil") {
+		t.Errorf("a baseline-less --since-last run must still show every finding:\n%s", out.String())
+	}
+}
+
+// TestScanPersistsTheFullResultNotTheFilteredView is the D1 regression at the
+// CLI level. Run three times with --since-last; if run 2 had saved only its
+// (empty) filtered view, run 3 would diff against a truncated baseline and
+// re-report the finding as new. The third run must still see 0 new.
+func TestScanPersistsTheFullResultNotTheFilteredView(t *testing.T) {
+	root := evilRoot(t)
+	state := t.TempDir()
+	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+
+	runScan(sinceLastOpts(root, state, false, cl), &bytes.Buffer{}, &bytes.Buffer{})
+	runScan(sinceLastOpts(root, state, true, cl), &bytes.Buffer{}, &bytes.Buffer{})
+
+	var third bytes.Buffer
+	runScan(sinceLastOpts(root, state, true, cl), &third, &bytes.Buffer{})
+	if !strings.Contains(third.String(), "0 new") {
+		t.Errorf("run 3 re-reported a twice-seen finding as new -- the saved baseline was "+
+			"filtered, not full:\n%s", third.String())
+	}
+}
+
+// TestEachScanWritesADistinctReport: two scans in immediate succession must not
+// collide on a stamp. At second resolution they would share a filename and the
+// atomic rename would silently drop the first, leaving --since-last diffing
+// against a baseline one run older than it believes.
+func TestEachScanWritesADistinctReport(t *testing.T) {
+	root := evilRoot(t)
+	state := t.TempDir()
+	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+
+	runScan(sinceLastOpts(root, state, false, cl), &bytes.Buffer{}, &bytes.Buffer{})
+	runScan(sinceLastOpts(root, state, false, cl), &bytes.Buffer{}, &bytes.Buffer{})
+
+	entries, err := os.ReadDir(filepath.Join(state, "reports"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected 2 stored reports, got %d: %v", len(entries), names)
+	}
+}
+
+// TestSinceLastJSONCarriesTheSuppressedCount: --json must carry the same
+// information as the text render, and in particular exit_code must come from
+// the FULL result. A JSON document reporting exit_code 0 while the process
+// exits 1 is a contradiction no machine consumer can recover from.
+func TestSinceLastJSONCarriesTheSuppressedCount(t *testing.T) {
+	root := evilRoot(t)
+	state := t.TempDir()
+	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+
+	runScan(sinceLastOpts(root, state, false, cl), &bytes.Buffer{}, &bytes.Buffer{})
+
+	opts := sinceLastOpts(root, state, true, cl)
+	opts.jsonOut = true
+	var out bytes.Buffer
+	code := runScan(opts, &out, &bytes.Buffer{})
+
+	var doc struct {
+		ExitCode  int        `json:"exit_code"`
+		Findings  []struct{} `json:"findings"`
+		SinceLast *struct {
+			HadBaseline   bool `json:"had_baseline"`
+			TotalFindings int  `json:"total_findings"`
+			New           int  `json:"new"`
+			Suppressed    int  `json:"suppressed"`
+		} `json:"since_last"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out.String())
+	}
+	if doc.ExitCode != code {
+		t.Errorf("json exit_code = %d but the process returned %d", doc.ExitCode, code)
+	}
+	if doc.SinceLast == nil {
+		t.Fatal("since_last block missing from --since-last --json output")
+	}
+	if !doc.SinceLast.HadBaseline || doc.SinceLast.New != 0 || doc.SinceLast.Suppressed != 1 {
+		t.Errorf("since_last = %+v, want had_baseline=true new=0 suppressed=1", *doc.SinceLast)
+	}
+	if doc.SinceLast.TotalFindings != 1 {
+		t.Errorf("total_findings = %d, want 1 (the FULL result)", doc.SinceLast.TotalFindings)
+	}
+	if len(doc.Findings) != 0 {
+		t.Errorf("findings should hold the suppressed display set, got %d", len(doc.Findings))
+	}
+}
+
+// TestOfflineRootDoesNotPersist pins INV-5 and spec §11's storage table:
+// nothing is written under the examined tree, and a privileged run's state
+// directory describes a DIFFERENT system -- so `sudo aurvet scan
+// --offline-root /mnt` must not file /mnt's report as this host's baseline.
+// Without this, the next privileged --since-last would diff the live system
+// against a rescue mount and suppress every real finding as "already seen".
+func TestOfflineRootDoesNotPersist(t *testing.T) {
+	root := evilRoot(t)
+	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+
+	var errBuf bytes.Buffer
+	runScan(scanOpts{offlineRoot: root, cl: cl}, &bytes.Buffer{}, &errBuf)
+
+	if !strings.Contains(errBuf.String(), "not persisted") {
+		t.Errorf("an --offline-root scan must say it is not persisting:\n%s", errBuf.String())
+	}
+	cfg, err := config.Resolve(root, os.Geteuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(filepath.Join(cfg.StateDir, "reports")); statErr == nil {
+		t.Errorf("an --offline-root scan wrote state to %s (INV-5)", cfg.StateDir)
+	}
+}
+
+// TestUnwritableStateDirDoesNotChangeTheExitCode: failing to persist is an
+// operational problem with the host, NOT an incomplete analysis. Turning it
+// into a coverage gap would flip an otherwise-clean scan to exit 3 on any
+// read-only state directory -- training operators to ignore code 3 on the one
+// tool whose value is that code 3 means something.
+func TestUnwritableStateDirDoesNotChangeTheExitCode(t *testing.T) {
+	root := evilRoot(t)
+	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+
+	// A regular file where the state directory should be: MkdirAll cannot
+	// succeed, whatever the euid.
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := runScan(sinceLastOpts(root, blocked, false, cl), &out, &errBuf)
+	if code != exitFindings {
+		t.Errorf("exit = %d, want %d: a failed report write must not change the verdict\n%s",
+			code, exitFindings, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "could not persist report") {
+		t.Errorf("a failed persist must be reported on stderr:\n%s", errBuf.String())
+	}
+	if strings.Contains(out.String(), "report-store") {
+		t.Errorf("a failed persist must not become a coverage gap:\n%s", out.String())
+	}
+}
+
+// TestSinceLastSurvivesACorruptStoredReport: the baseline is written by a
+// previous run that may have been SIGKILLed mid-upgrade. A damaged report must
+// degrade to "no baseline" -- never a crash, never a refusal to scan.
+func TestSinceLastSurvivesACorruptStoredReport(t *testing.T) {
+	root := evilRoot(t)
+	state := t.TempDir()
+	cl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+
+	reports := filepath.Join(state, "reports")
+	if err := os.MkdirAll(reports, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reports, "20260804T000000.000000000Z.json"),
+		[]byte(`{"schema_v`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	code := runScan(sinceLastOpts(root, state, true, cl), &out, &bytes.Buffer{})
+	if code != exitFindings {
+		t.Errorf("exit = %d, want %d: a corrupt baseline must not change the verdict\n%s",
+			code, exitFindings, out.String())
+	}
+	if !strings.Contains(out.String(), "evil") {
+		t.Errorf("a corrupt baseline must degrade to showing everything:\n%s", out.String())
+	}
+}
+
+// TestSinceLastFlagIsPermutationInvariant: --since-last must parse on either
+// side of the subcommand, like every other flag (the loop in run()).
+func TestSinceLastFlagIsPermutationInvariant(t *testing.T) {
+	root := writeMinimalRoot(t)
+	for _, args := range [][]string{
+		{"--offline-root", root, "--no-network", "--since-last", "scan"},
+		{"scan", "--offline-root", root, "--no-network", "--since-last"},
+	} {
+		if code := run(args, &bytes.Buffer{}, &bytes.Buffer{}); code != exitIncomplete {
+			t.Errorf("run(%v) = %d, want %d", args, code, exitIncomplete)
+		}
+	}
+}

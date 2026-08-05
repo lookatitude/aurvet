@@ -309,6 +309,57 @@ func TestInfoNameWinsOverAnotherPackagesBase(t *testing.T) {
 	}
 }
 
+// TestInfoRejectsDuplicateName pins E-6b: two results claiming the same Name
+// is an impossible state in the real AUR (names are unique), so resolving it
+// by whichever result arrived first let response ORDERING -- the server's,
+// i.e. an attacker's, if they can influence it -- decide silently whether a
+// genuine aur-orphaned finding (read off Maintainer/Submitter) is masked or
+// invented. An ambiguous answer is not an answer: this must error, not pick a
+// winner.
+func TestInfoRejectsDuplicateName(t *testing.T) {
+	c := serveBody(t, http.StatusOK, `{"type":"multiinfo","resultcount":2,"results":[
+	  {"Name":"foo","PackageBase":"foo","Maintainer":"alice","Submitter":"alice",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000},
+	  {"Name":"foo","PackageBase":"foo","Maintainer":"","Submitter":"",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`)
+	got, err := c.Info(context.Background(), []string{"foo"})
+	if err == nil {
+		t.Fatalf("two results claiming the same Name must error, got %v", got)
+	}
+	if got != nil {
+		t.Errorf("got %v alongside the error, want nil", got)
+	}
+	if !strings.Contains(err.Error(), "foo") {
+		t.Errorf("error must name the duplicated key, got %v", err)
+	}
+}
+
+// TestInfoSplitPackageSharedBaseIsNotADuplicate pins the case E-6b must NOT
+// break: several distinct package Names legitimately sharing one PackageBase
+// is what a split package IS, so pass two's first-wins-and-skip on
+// PackageBase stays correct and unerroring even though pass one now errors on
+// a duplicate Name. Duplicate Name is an impossible state; duplicate
+// PackageBase is a normal one.
+func TestInfoSplitPackageSharedBaseIsNotADuplicate(t *testing.T) {
+	c := serveBody(t, http.StatusOK, `{"type":"multiinfo","resultcount":2,"results":[
+	  {"Name":"foo","PackageBase":"foo-common","Maintainer":"alice","Submitter":"alice",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000},
+	  {"Name":"bar","PackageBase":"foo-common","Maintainer":"alice","Submitter":"alice",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`)
+	got, err := c.Info(context.Background(), []string{"foo", "bar"})
+	if err != nil {
+		t.Fatalf("a split package sharing one PackageBase must not error: %v", err)
+	}
+	for _, key := range []string{"foo", "bar", "foo-common"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("key %q missing from %v", key, got)
+		}
+	}
+	if p := got["foo-common"]; p.Name != "foo" && p.Name != "bar" {
+		t.Errorf(`got["foo-common"] = %+v, want one of the two split-package records`, p)
+	}
+}
+
 // TestInfoRejectsUnindexableResult pins R8: a result with neither Name nor
 // PackageBase indexes nowhere, yet it satisfies the resultcount check — so a
 // broken response made every requested base read as absent. Per contract rule 1
@@ -322,6 +373,67 @@ func TestInfoRejectsUnindexableResult(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("got %v alongside the error, want nil", got)
+	}
+}
+
+// TestInfoRejectsPartialIdentityMissingName pins E-6a. R8's original guard
+// only errored when BOTH Name and PackageBase were empty, so a result naming a
+// PackageBase but no Name survived it, skipped pass one (empty Name), and keyed
+// only under out[PackageBase]. check.Provenance keys its own lookup by Name and
+// rejects a hit whose meta.Name != p.Name (S6) -- so an installed package that
+// happens to share this string as its own Name would fetch the record, fail
+// that cross-key rejection, and fall straight into the absent branch. A
+// malformed RPC record produced a wrong finding, not a gap.
+func TestInfoRejectsPartialIdentityMissingName(t *testing.T) {
+	c := serveBody(t, http.StatusOK, `{"type":"multiinfo","resultcount":2,"results":[
+	  {"Name":"","PackageBase":"foo","Maintainer":"alice","Submitter":"alice",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000},
+	  {"Name":"bar","PackageBase":"bar","Maintainer":"bob","Submitter":"bob",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`)
+	got, err := c.Info(context.Background(), []string{"foo", "bar"})
+	if err == nil {
+		t.Fatalf("a result with a PackageBase but an empty Name must error, got %v", got)
+	}
+	if got != nil {
+		t.Errorf("got %v alongside the error, want nil", got)
+	}
+}
+
+// TestInfoRejectsPartialIdentityMissingPackageBase pins the mirror case of
+// E-6a: a result naming itself but carrying no PackageBase is equally
+// unindexable for check.Provenance's declared-pkgbase comparison, which
+// already has to gap on meta.PackageBase == "" -- a downstream patch for this
+// upstream defect.
+func TestInfoRejectsPartialIdentityMissingPackageBase(t *testing.T) {
+	c := serveBody(t, http.StatusOK, `{"type":"multiinfo","resultcount":1,"results":[
+	  {"Name":"foo","PackageBase":"","Maintainer":"alice","Submitter":"alice",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`)
+	got, err := c.Info(context.Background(), []string{"foo"})
+	if err == nil {
+		t.Fatalf("a result with a Name but an empty PackageBase must error, got %v", got)
+	}
+	if got != nil {
+		t.Errorf("got %v alongside the error, want nil", got)
+	}
+}
+
+// TestInfoTwoFullyValidResultsUnchanged pins that the E-6a widening from
+// "neither identity" to "either identity" does not touch the ordinary case: two
+// results each carrying both their own Name and PackageBase.
+func TestInfoTwoFullyValidResultsUnchanged(t *testing.T) {
+	c := serveBody(t, http.StatusOK, `{"type":"multiinfo","resultcount":2,"results":[
+	  {"Name":"foo","PackageBase":"foo","Maintainer":"alice","Submitter":"alice",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000},
+	  {"Name":"bar","PackageBase":"bar","Maintainer":"bob","Submitter":"bob",
+	   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`)
+	got, err := c.Info(context.Background(), []string{"foo", "bar"})
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	for _, key := range []string{"foo", "bar"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("key %q missing from %v", key, got)
+		}
 	}
 }
 
@@ -443,6 +555,33 @@ func TestInfoChunkFailureFailsWholeCall(t *testing.T) {
 	}
 }
 
+// TestInfoRejectsPartialIdentityAcrossChunkBoundary pins that E-6a's
+// either-identity guard runs per chunk, before allResults accumulates, same as
+// the three checks above it: a malformed result in the SECOND chunk must fail
+// the whole call with a nil map, not a partial map built from chunk one alone.
+func TestInfoRejectsPartialIdentityAcrossChunkBoundary(t *testing.T) {
+	n := infoChunkSize + 1
+	bases := make([]string, n)
+	for i := range bases {
+		bases[i] = fmt.Sprintf("pkg-%d", i)
+	}
+	c, _ := chunkServer(t, func(call int, args []string) (int, string) {
+		if call == 1 {
+			return http.StatusOK, `{"type":"multiinfo","resultcount":1,"results":[
+			  {"Name":"","PackageBase":"pkg-last","Maintainer":"alice","Submitter":"alice",
+			   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`
+		}
+		return http.StatusOK, `{"type":"multiinfo","resultcount":0,"results":[]}`
+	})
+	got, err := c.Info(context.Background(), bases)
+	if err == nil {
+		t.Fatalf("a malformed result in chunk 2 must fail the whole call, got %v", got)
+	}
+	if got != nil {
+		t.Errorf("got %v alongside the error, want nil (not a partial map from chunk one)", got)
+	}
+}
+
 // TestInfoCrossChunkKeyingNameWinsGlobally pins E-7 requirement 3: the R6
 // two-pass keying invariant (a package's own Name always wins its key) must
 // hold GLOBALLY across chunks, not per chunk. Chunk 1 returns a result named
@@ -481,6 +620,45 @@ func TestInfoCrossChunkKeyingNameWinsGlobally(t *testing.T) {
 	}
 }
 
+// TestInfoRejectsDuplicateNameAcrossChunks pins E-6b requirement 4: the
+// duplicate-Name check runs once over the GLOBAL union of every chunk's
+// results, same as the R6 two-pass keying it shares a loop with, precisely so
+// the invariant holds across chunk boundaries and not only within one
+// response. Two SEPARATE chunk requests each independently answering with a
+// record named "dup" must error just as if both records had arrived in one
+// response.
+func TestInfoRejectsDuplicateNameAcrossChunks(t *testing.T) {
+	bases := make([]string, infoChunkSize+1)
+	for i := range bases[:infoChunkSize-1] {
+		bases[i] = fmt.Sprintf("filler-%d", i)
+	}
+	bases[infoChunkSize-1] = "dup" // last entry of chunk 1
+	bases[infoChunkSize] = "dup2"  // sole entry of chunk 2, distinct request name
+
+	c, _ := chunkServer(t, func(call int, args []string) (int, string) {
+		switch call {
+		case 0:
+			return http.StatusOK, `{"type":"multiinfo","resultcount":1,"results":[
+			  {"Name":"dup","PackageBase":"dup","Maintainer":"alice","Submitter":"alice",
+			   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`
+		case 1:
+			// The RPC answers a DIFFERENT record under the same Name -- exactly
+			// the ambiguity E-6b exists to catch, now straddling a chunk boundary.
+			return http.StatusOK, `{"type":"multiinfo","resultcount":1,"results":[
+			  {"Name":"dup","PackageBase":"dup","Maintainer":"mallory","Submitter":"mallory",
+			   "FirstSubmitted":1700000000,"LastModified":1710000000}]}`
+		}
+		return http.StatusOK, `{"type":"multiinfo","resultcount":0,"results":[]}`
+	})
+	got, err := c.Info(context.Background(), bases)
+	if err == nil {
+		t.Fatalf("the same Name returned by two different chunks must error, got %v", got)
+	}
+	if got != nil {
+		t.Errorf("got %v alongside the error, want nil", got)
+	}
+}
+
 // TestInfoFirstChunkPreservesInputOrdering: check.Provenance sorts names
 // before calling Info, so chunk boundaries must be deterministic. Info must
 // not sort internally — that would duplicate a guarantee the caller already
@@ -504,15 +682,26 @@ func TestInfoFirstChunkPreservesInputOrdering(t *testing.T) {
 	}
 }
 
-// TestInfoDuplicateNamesAcrossChunkBoundaryDoNotBreakResultCountCheck pins
-// E-7 requirement 6. check.Provenance dedups names via a set before calling
-// Info, so Info documents the caller's obligation rather than defensively
-// deduping: a duplicate straddling a chunk boundary is simply asked about
-// twice. That must not break the per-chunk resultcount check, which compares
-// a response's own resultcount to its own results length — not to how many
-// arg[] entries the request carried.
-func TestInfoDuplicateNamesAcrossChunkBoundaryDoNotBreakResultCountCheck(t *testing.T) {
-	bases := make([]string, infoChunkSize+2)
+// TestInfoDuplicateNamesInOneChunkDoNotBreakResultCountCheck pins E-7
+// requirement 6, narrowed by E-6b. check.Provenance dedups names via a set
+// before calling Info, so Info documents the caller's obligation rather than
+// defensively deduping: asking for the same name many times WITHIN one chunk
+// is harmless, because the real v5 RPC dedups its own results too — one
+// arg[] list repeating "dup" many times still yields resultcount 1, and that
+// must not read as a mismatch against however many arg[] entries the request
+// carried.
+//
+// This is confined to a SINGLE chunk on purpose, which is a change from the
+// two-chunk version this test used to be. E-6b's duplicate-Name guard runs
+// once over the global union of every chunk's results, and a duplicate name
+// straddling a CHUNK boundary is asked about in two separate RPC calls, each
+// independently entitled to answer with a record for it — which the guard
+// now correctly refuses to resolve by ordering rather than waving through as
+// "simply asked about twice". See TestInfoRejectsDuplicateNameAcrossChunks
+// for that case, and the chunking loop's own comment for why this is not a
+// regression check.Provenance can hit: it already dedups before calling Info.
+func TestInfoDuplicateNamesInOneChunkDoNotBreakResultCountCheck(t *testing.T) {
+	bases := make([]string, infoChunkSize)
 	for i := range bases {
 		bases[i] = "dup"
 	}
@@ -525,17 +714,15 @@ func TestInfoDuplicateNamesAcrossChunkBoundaryDoNotBreakResultCountCheck(t *test
 	if err != nil {
 		t.Fatalf("Info: %v", err)
 	}
-	if len(calls()) != 2 {
-		t.Fatalf("got %d requests, want 2", len(calls()))
+	if len(calls()) != 1 {
+		t.Fatalf("got %d requests, want 1", len(calls()))
 	}
 	if p, ok := got["dup"]; !ok || p.Maintainer != "alice" {
 		t.Errorf(`got["dup"] = %+v, ok=%v`, p, ok)
 	}
-	for i, args := range calls() {
-		for _, a := range args {
-			if a != "dup" {
-				t.Errorf("request %d carried unexpected arg %q, Info is not expected to dedup", i, a)
-			}
+	for _, a := range calls()[0] {
+		if a != "dup" {
+			t.Errorf("request carried unexpected arg %q, Info is not expected to dedup", a)
 		}
 	}
 }

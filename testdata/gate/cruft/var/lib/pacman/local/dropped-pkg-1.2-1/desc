@@ -1,0 +1,12 @@
+%NAME%
+dropped-pkg
+
+%VERSION%
+1.2-1
+
+%BASE%
+dropped-pkg
+
+%VALIDATION%
+pgp
+

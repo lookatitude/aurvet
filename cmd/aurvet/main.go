@@ -41,6 +41,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	noNet := fs.Bool("no-network", false,
 		"skip every outbound request; the checks that needed the network become coverage gaps, never absence findings")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of text")
+	sinceLast := fs.Bool("since-last", false,
+		"list only findings new since the previous scan; the exit code still reflects the full result")
 	minSeverity := fs.String("min-severity", "",
 		"reporting floor: info, suspicious, critical (default from config)")
 
@@ -104,7 +106,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "aurvet: scan takes no arguments (got %q)\n", cmdArgs)
 			return exitUsage
 		}
-		return runScan(*offlineRoot, *noNet, *jsonOut, *minSeverity, stdout, stderr)
+		return runScan(scanOpts{
+			offlineRoot: *offlineRoot,
+			noNet:       *noNet,
+			jsonOut:     *jsonOut,
+			sinceLast:   *sinceLast,
+			minSeverity: *minSeverity,
+		}, stdout, stderr)
 
 	case "explain":
 		if len(cmdArgs) == 0 {
@@ -119,17 +127,92 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// runScan resolves config, runs the provenance sweep, renders the report and
-// returns report.ExitCode(res, floor) -- and nothing else -- on the success
-// path (spec §14).
-func runScan(offlineRoot string, noNet, jsonOut bool, minSeverityFlag string, stdout, stderr io.Writer) int {
-	cfg, err := config.Resolve(offlineRoot, os.Geteuid())
+// scanOpts carries scan's inputs. It is a struct rather than a parameter list
+// because the last three fields are test seams: their zero values select
+// production behaviour, so run() constructs one from flags alone and never
+// mentions them.
+type scanOpts struct {
+	offlineRoot string
+	noNet       bool
+	jsonOut     bool
+	sinceLast   bool
+	minSeverity string
+
+	// stateDir overrides where reports are persisted. "" means "decide from
+	// config", which is what run() always passes.
+	stateDir string
+	// cl is the aur.Client seam sweep already documents. nil means "build the
+	// real HTTP client".
+	cl aur.Client
+}
+
+// reportStamp names a stored report. Nanosecond precision, not the seconds the
+// plan specified: two scans inside the same second would otherwise produce the
+// same filename, and Save's atomic rename would silently overwrite the first
+// with the second. The next --since-last would then diff against a baseline
+// one run older than it believed. The layout stays fixed-width and
+// zero-padded, so lexicographic order is still chronological order -- which is
+// the assumption report.LoadPrevious sorts on.
+const reportStamp = "20060102T150405.000000000Z"
+
+// scanStateDir decides where -- and whether -- this run may persist its report.
+// An empty path means "do not persist", with the returned string explaining
+// why; that reason is printed, never converted into a coverage gap.
+//
+// The offline-root rule is INV-5, spelled out in spec §11's storage table:
+// "Offline-root mode -- all output to --report-dir; nothing written under the
+// target". Two distinct failures hide behind that one line, and both are why
+// this returns empty rather than picking some other directory:
+//
+//   - Unprivileged, config.Resolve puts StateDir INSIDE the examined tree, so
+//     persisting would write to the very filesystem we are auditing.
+//   - Privileged, §11 deliberately pins StateDir to /var/lib/aurvet OUTSIDE
+//     the target -- so a report about a rescue mount would be filed as this
+//     host's own baseline, and the next `sudo aurvet scan --since-last` would
+//     diff the live system against /mnt. Every finding on this host would look
+//     "already seen" and be suppressed.
+//
+// --report-dir does not exist in P1-A, so there is no correct destination yet
+// and the honest move is to skip and say so.
+func scanStateDir(cfg config.Config, opts scanOpts, euid int) (string, string) {
+	if opts.stateDir != "" {
+		return opts.stateDir, ""
+	}
+	if opts.offlineRoot != "" {
+		return "", "--offline-root: report not persisted (INV-5: nothing is written under the examined tree, " +
+			"and the privileged state directory describes a different system); --since-last is unavailable"
+	}
+	// spec §11's resolution order is "--flag > environment > system config >
+	// user config > compiled defaults", and its danger callout requires a
+	// euid==0 run to ignore the environment entirely for trust-bearing paths --
+	// otherwise an unprivileged local attacker chooses what a root-privileged
+	// security tool trusts. Hence: environment honoured, but never as root.
+	//
+	// INTERIM. This exists because config.Resolve currently hands an
+	// unprivileged live-system run StateDir=/var/lib/aurvet, which no ordinary
+	// user can write, making --since-last unreachable for everyone but root.
+	// spec §11's storage table says the user context is the XDG state dir; when
+	// config.Resolve implements that, this override loses its reason to exist.
+	if euid != 0 {
+		if env := os.Getenv("AURVET_STATE_DIR"); env != "" {
+			return env, ""
+		}
+	}
+	return cfg.StateDir, ""
+}
+
+// runScan resolves config, runs the provenance sweep, persists the result,
+// renders the report and returns report.ExitCode(verdict, floor) -- and nothing
+// else -- on the success path (spec §14).
+func runScan(opts scanOpts, stdout, stderr io.Writer) int {
+	euid := os.Geteuid()
+	cfg, err := config.Resolve(opts.offlineRoot, euid)
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
 		return exitUsage
 	}
 
-	floorStr := minSeverityFlag
+	floorStr := opts.minSeverity
 	if floorStr == "" {
 		floorStr = cfg.MinSeverity
 	}
@@ -139,16 +222,65 @@ func runScan(offlineRoot string, noNet, jsonOut bool, minSeverityFlag string, st
 		return exitUsage
 	}
 
-	res, summary, err := sweep(context.Background(), cfg, noNet, nil)
+	res, summary, err := sweep(context.Background(), cfg, opts.noNet, opts.cl)
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
 		return exitUsage
 	}
 
-	if jsonOut {
-		err = report.JSON(stdout, res, summary, floor)
+	// ORDERING IS LOAD-BEARING. Persist the FULL result here, before the
+	// --since-last block below derives anything from it, and never move this
+	// call below that block. Saving a filtered result would truncate the next
+	// run's baseline, so every persisting finding would re-report as new on the
+	// run after that -- turning the feature into precisely the noise it exists
+	// to remove. `res` is not mutated anywhere below; the filtered set lives in
+	// the View, which is why report.View keeps display and verdict apart.
+	stateDir, skipReason := scanStateDir(cfg, opts, euid)
+	switch {
+	case skipReason != "":
+		fmt.Fprintf(stderr, "aurvet: %s\n", skipReason)
+	default:
+		if _, serr := report.Save(stateDir, res, summary, time.Now().UTC().Format(reportStamp)); serr != nil {
+			// NOT a coverage gap, and deliberately not: a Gap means "a check
+			// could not run" (INV-3/INV-10) and forces exit 3. Failing to write
+			// a cache file is an operational problem with the host, not an
+			// incomplete analysis -- the scan examined everything it was asked
+			// to. Manufacturing a gap here would flip an otherwise-clean scan to
+			// exit 3 on any read-only or full state directory, training
+			// operators to ignore code 3 on exactly the tool whose value is that
+			// code 3 means something.
+			fmt.Fprintf(stderr, "aurvet: could not persist report to %s: %v\n", stateDir, serr)
+		}
+	}
+
+	view := report.FullView(res)
+	if opts.sinceLast {
+		var prev finding.Result
+		var ok bool
+		// stateDir is empty exactly when persistence was skipped. Passing "" to
+		// LoadPrevious would resolve to the relative path "reports" in the
+		// working directory -- an attacker-plantable baseline in any directory
+		// the operator happens to cd into. Treat it as "no baseline".
+		if stateDir == "" {
+			fmt.Fprintln(stderr, "aurvet: --since-last has no stored baseline in this mode; showing all findings")
+		} else {
+			var lerr error
+			prev, ok, lerr = report.LoadPrevious(stateDir)
+			if lerr != nil {
+				// Reading the baseline failed. Degrade to showing everything rather
+				// than failing the scan: too much output is recoverable, a
+				// suppressed critical is not.
+				fmt.Fprintf(stderr, "aurvet: could not read the previous report from %s: %v\n", stateDir, lerr)
+				ok = false
+			}
+		}
+		view = report.SinceLastView(prev, ok, res)
+	}
+
+	if opts.jsonOut {
+		err = report.JSONView(stdout, view, summary, floor)
 	} else {
-		err = report.Text(stdout, res, summary)
+		err = report.TextView(stdout, view, summary)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)

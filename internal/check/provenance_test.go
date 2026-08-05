@@ -27,6 +27,28 @@ func findingFor(r finding.Result, ruleID string) (finding.Finding, bool) {
 	return finding.Finding{}, false
 }
 
+// loadStockPackage drives the base-vs-name path through a real
+// alpm.LoadLocalDB parse of testdata/roots/stock, rather than a hand-built
+// alpm.Package literal -- the parse-and-default chain that produces p.Base is
+// exactly what a literal cannot exercise.
+func loadStockPackage(t *testing.T, name string) alpm.Package {
+	t.Helper()
+	pkgs, gaps, err := alpm.LoadLocalDB("../../testdata/roots/stock/var/lib/pacman/local")
+	if err != nil {
+		t.Fatalf("LoadLocalDB: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Fatalf("gaps = %v, want none", gaps)
+	}
+	for _, p := range pkgs {
+		if p.Name == name {
+			return p
+		}
+	}
+	t.Fatalf("package %q not found in stock fixture", name)
+	return alpm.Package{}
+}
+
 // Absent from the AUR AND carrying a malware tombstone is definitive.
 func TestTombstonedPackageIsCritical(t *testing.T) {
 	cl := aur.Fake{
@@ -85,25 +107,84 @@ func TestAbsentWithoutTombstoneIsSuspicious(t *testing.T) {
 	}
 }
 
-// Submitter != Maintainer is an observable takeover trace.
-func TestSubmitterMismatchIsSuspicious(t *testing.T) {
+// Submitter != Maintainer is an observable identity delta.
+//
+// Amended 2026-08-05 (lead decision, plan Risk #1 -- "cries wolf"). This was
+// TestSubmitterMismatchIsSuspicious asserting SevSuspicious implicitly (by
+// never checking severity at all). Measured on the reference system,
+// aur-submitter-mismatch fired on 13 of 39 foreign packages (33%), every one a
+// verified-benign maintainer handoff, and dominated the default `suspicious`
+// floor with 13 of 14 total findings. A bare delta with no history is an
+// identity fact, not a suspicion -- the actionable, correlated form (an
+// orphan followed by a new maintainer within N days) needs the drift
+// baseline arriving in P4. Downgraded to SevInfo: still emitted, still
+// visible via --min-severity info / --json / explain, but no longer spends
+// the operator's attention before the correlated signal exists. Neither
+// aur-tombstone (critical) nor aur-absent (suspicious) moved.
+func TestSubmitterMismatchIsInfo(t *testing.T) {
 	cl := aur.Fake{Known: map[string]aur.Pkg{
 		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "alice", Submitter: "bob"},
 	}}
 	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
-	if _, ok := findingFor(r, "aur-submitter-mismatch"); !ok {
+	f, ok := findingFor(r, "aur-submitter-mismatch")
+	if !ok {
 		t.Fatalf("no submitter-mismatch finding; got %+v", r.Findings)
+	}
+	if f.Severity != finding.SevInfo {
+		t.Errorf("severity = %v, want info (plan Risk #1: uncorrelated identity delta, not a suspicion)", f.Severity)
 	}
 }
 
-// Orphaned packages are a takeover precondition.
+// The default reporting floor is `suspicious` (spec), so a package whose ONLY
+// issue is a submitter mismatch must not reach that floor: MaxSeverity must
+// stay below SevSuspicious. This is the behavioural point of the downgrade --
+// not just the field on the Finding, but that it no longer drives the exit
+// code or dominates default `scan` output.
+func TestSubmitterMismatchAloneDoesNotReachDefaultFloor(t *testing.T) {
+	cl := aur.Fake{Known: map[string]aur.Pkg{
+		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "alice", Submitter: "bob"},
+	}}
+	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
+	if r.MaxSeverity() >= finding.SevSuspicious {
+		t.Errorf("MaxSeverity = %v, want below SevSuspicious for a submitter-mismatch-only package", r.MaxSeverity())
+	}
+}
+
+// Orphaned packages are a takeover precondition. Guard against a blanket
+// severity edit: aur-orphaned must stay suspicious even though its sibling
+// rule aur-submitter-mismatch moved to info.
 func TestOrphanedIsSuspicious(t *testing.T) {
 	cl := aur.Fake{Known: map[string]aur.Pkg{
 		"foo-bin": {Name: "foo-bin", PackageBase: "foo-bin", Maintainer: "", Submitter: "bob"},
 	}}
 	r := Provenance(context.Background(), []alpm.Package{pkg("foo-bin")}, map[string]bool{}, nil, cl, true)
-	if _, ok := findingFor(r, "aur-orphaned"); !ok {
+	f, ok := findingFor(r, "aur-orphaned")
+	if !ok {
 		t.Fatalf("no orphaned finding; got %+v", r.Findings)
+	}
+	if f.Severity != finding.SevSuspicious {
+		t.Errorf("severity = %v, want suspicious (must not move with aur-submitter-mismatch)", f.Severity)
+	}
+}
+
+// Guard against a blanket severity edit: aur-tombstone must stay critical and
+// aur-absent must stay suspicious even though aur-submitter-mismatch moved to
+// info. Each rule is independently pinned so a future edit to one cannot
+// silently drag the others along.
+func TestTombstoneAndAbsentSeveritiesAreUnaffectedByTheSubmitterDowngrade(t *testing.T) {
+	tombCl := aur.Fake{
+		Known:      map[string]aur.Pkg{},
+		Tombstones: map[string]string{"librewolf-fix-bin": "history removed due to malware"},
+	}
+	tr := Provenance(context.Background(), []alpm.Package{pkg("librewolf-fix-bin")}, map[string]bool{}, nil, tombCl, true)
+	if tf, ok := findingFor(tr, "aur-tombstone"); !ok || tf.Severity != finding.SevCritical {
+		t.Errorf("aur-tombstone severity = %+v, want critical", tf)
+	}
+
+	absentCl := aur.Fake{Known: map[string]aur.Pkg{}, Tombstones: map[string]string{}}
+	ar := Provenance(context.Background(), []alpm.Package{pkg("python-pkg_resources")}, map[string]bool{}, nil, absentCl, true)
+	if af, ok := findingFor(ar, "aur-absent"); !ok || af.Severity != finding.SevSuspicious {
+		t.Errorf("aur-absent severity = %+v, want suspicious", af)
 	}
 }
 
@@ -842,6 +923,176 @@ func TestProvenanceEmptyDeclaredBaseSkipsTheTombstoneCrossCheck(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no aur-tombstone gap for librewolf; got %+v", res.Gaps)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Split-package fixture (foo-lib, Base=foo-common): end to end through a real
+// alpm.LoadLocalDB parse. Every pre-existing fixture has Base == Name, so
+// these are the only tests in the suite that drive the base-vs-name axis with
+// a parsed package rather than a literal -- the axis three of the four join
+// lane's high findings turned on.
+// ---------------------------------------------------------------------------
+
+// (1) S1/S2: presence is keyed by NAME, the tombstone by declared BASE. The
+// AUR has never heard of foo-lib and the fake's tombstones are keyed on
+// foo-common, the declared pkgbase -- a relationship that is unreachable on
+// every pre-existing fixture because none of them has Base != Name.
+func TestParsedSplitPackagePresenceByNameTombstoneByBase(t *testing.T) {
+	fooLib := loadStockPackage(t, "foo-lib")
+	if fooLib.Base != "foo-common" {
+		t.Fatalf("precondition: foo-lib base = %q, want foo-common", fooLib.Base)
+	}
+
+	cl := aur.Fake{
+		Known:      map[string]aur.Pkg{},
+		Tombstones: map[string]string{"foo-common": "history removed due to malware"},
+	}
+	syncNames := map[string]bool{"zlib": true} // foo-lib absent from sync DBs -> foreign
+	r := Provenance(context.Background(), []alpm.Package{fooLib}, syncNames, nil, cl, true)
+
+	f, ok := findingFor(r, "aur-tombstone")
+	if !ok {
+		t.Fatalf("no aur-tombstone finding; got %+v", r.Findings)
+	}
+	if f.Subject != "foo-lib" {
+		t.Errorf("subject = %q, want foo-lib", f.Subject)
+	}
+	if f.Severity != finding.SevCritical {
+		t.Errorf("severity = %v, want critical", f.Severity)
+	}
+	// baseEvidence only emits pkgbase=... because Base != Name here; on every
+	// other fixture this evidence line is unreachable.
+	if !strings.Contains(strings.Join(f.Evidence, " "), "pkgbase=foo-common") {
+		t.Errorf("evidence does not name the declared pkgbase: %v", f.Evidence)
+	}
+	// tombstoneSummary/tombstoneLimits branch on p.Base != p.Name -- the
+	// base-flavoured wording, never driven by a parsed package before this.
+	if !strings.Contains(f.Summary, "pkgbase") {
+		t.Errorf("summary = %q, want the base-flavoured wording", f.Summary)
+	}
+	if !strings.Contains(f.Limits, "pkgbase") {
+		t.Errorf("limits = %q, want the base-flavoured wording", f.Limits)
+	}
+}
+
+// (2) T2/E-4b: the AUR carries a record for foo-lib itself, but that record's
+// PackageBase disagrees with foo-lib's own declared %BASE%. foo-common (the
+// declared base) carries a malware tombstone.
+func TestParsedRecordPackageBaseDisagreesWithDeclaredBase(t *testing.T) {
+	fooLib := loadStockPackage(t, "foo-lib")
+
+	t.Run("malware tombstone on the declared base: critical", func(t *testing.T) {
+		cl := aur.Fake{
+			Known: map[string]aur.Pkg{
+				"foo-lib": {Name: "foo-lib", PackageBase: "foo-rebuilt", Maintainer: "alice", Submitter: "alice"},
+			},
+			Tombstones: map[string]string{"foo-common": "history removed due to malware"},
+		}
+		syncNames := map[string]bool{"zlib": true}
+		r := Provenance(context.Background(), []alpm.Package{fooLib}, syncNames, nil, cl, true)
+
+		f, ok := findingFor(r, "aur-tombstone")
+		if !ok {
+			t.Fatalf("no aur-tombstone finding; got %+v gaps=%+v", r.Findings, r.Gaps)
+		}
+		if f.Severity != finding.SevCritical {
+			t.Errorf("severity = %v, want critical", f.Severity)
+		}
+		if !strings.Contains(f.Summary, "pkgbase") {
+			t.Errorf("summary = %q, want the declared-pkgbase wording", f.Summary)
+		}
+	})
+
+	t.Run("cgit lookup on the declared base errors: gap, no absence claim", func(t *testing.T) {
+		cl := aur.Fake{
+			Known: map[string]aur.Pkg{
+				"foo-lib": {Name: "foo-lib", PackageBase: "foo-rebuilt", Maintainer: "alice", Submitter: "alice"},
+			},
+			TombstoneErr: map[string]error{"foo-common": errors.New("cgit unreachable")},
+		}
+		syncNames := map[string]bool{"zlib": true}
+		r := Provenance(context.Background(), []alpm.Package{fooLib}, syncNames, nil, cl, true)
+
+		if _, ok := findingFor(r, "aur-absent"); ok {
+			t.Fatalf("a cgit failure produced an absence claim: %+v", r.Findings)
+		}
+		if _, ok := findingFor(r, "aur-tombstone"); ok {
+			t.Fatalf("a cgit failure produced a tombstone finding: %+v", r.Findings)
+		}
+		found := false
+		for _, g := range r.Gaps {
+			if g.RuleID == "aur-tombstone" && g.Subject == "foo-lib" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no aur-tombstone gap for foo-lib; got %+v", r.Gaps)
+		}
+	})
+
+	t.Run("AUR record's PackageBase is empty: gap, the E-4b fix must not regress", func(t *testing.T) {
+		cl := aur.Fake{
+			Known: map[string]aur.Pkg{
+				"foo-lib": {Name: "foo-lib", PackageBase: "", Maintainer: "alice", Submitter: "alice"},
+			},
+			Tombstones: map[string]string{"foo-common": "history removed due to malware"},
+		}
+		syncNames := map[string]bool{"zlib": true}
+		r := Provenance(context.Background(), []alpm.Package{fooLib}, syncNames, nil, cl, true)
+
+		if _, ok := findingFor(r, "aur-tombstone"); ok {
+			t.Fatalf("an empty record PackageBase must not produce a tombstone finding: %+v", r.Findings)
+		}
+		found := false
+		for _, g := range r.Gaps {
+			if g.RuleID == "aur-tombstone" && g.Subject == "foo-lib" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no aur-tombstone gap for foo-lib with an empty record PackageBase; got %+v", r.Gaps)
+		}
+	})
+
+	t.Run("tombstone exists but is not malware-worded: no critical", func(t *testing.T) {
+		cl := aur.Fake{
+			Known: map[string]aur.Pkg{
+				"foo-lib": {Name: "foo-lib", PackageBase: "foo-rebuilt", Maintainer: "alice", Submitter: "alice"},
+			},
+			Tombstones: map[string]string{"foo-common": "history removed due to rename"},
+		}
+		syncNames := map[string]bool{"zlib": true}
+		r := Provenance(context.Background(), []alpm.Package{fooLib}, syncNames, nil, cl, true)
+
+		if r.MaxSeverity() == finding.SevCritical {
+			t.Fatalf("a non-malware tombstone on the declared base reported critical: %+v", r.Findings)
+		}
+	})
+}
+
+// (3) A benign pkgbase disagreement with no tombstone at all must stay
+// silent: a benign upstream pkgbase rename looks exactly like an attack from
+// here, and the code deliberately says nothing.
+func TestParsedBenignBaseDisagreementIsSilent(t *testing.T) {
+	fooLib := loadStockPackage(t, "foo-lib")
+
+	cl := aur.Fake{
+		Known: map[string]aur.Pkg{
+			"foo-lib": {Name: "foo-lib", PackageBase: "foo-rebuilt", Maintainer: "alice", Submitter: "alice"},
+		},
+		Tombstones: map[string]string{},
+	}
+	syncNames := map[string]bool{"zlib": true}
+	r := Provenance(context.Background(), []alpm.Package{fooLib}, syncNames, nil, cl, true)
+
+	if _, ok := findingFor(r, "aur-tombstone"); ok {
+		t.Fatalf("a benign pkgbase disagreement with no tombstone produced a finding: %+v", r.Findings)
+	}
+	for _, g := range r.Gaps {
+		if g.RuleID == "aur-tombstone" {
+			t.Errorf("a benign pkgbase disagreement with no tombstone produced a gap: %+v", r.Gaps)
+		}
 	}
 }
 

@@ -1,0 +1,12 @@
+%NAME%
+foo-headers
+
+%VERSION%
+1.0-1
+
+%BASE%
+foo-common
+
+%VALIDATION%
+none
+
