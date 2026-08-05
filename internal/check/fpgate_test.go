@@ -15,11 +15,14 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/aur"
+	"github.com/lookatitude/aurvet/internal/correlate"
 	"github.com/lookatitude/aurvet/internal/finding"
 	"github.com/lookatitude/aurvet/internal/hook"
+	"github.com/lookatitude/aurvet/internal/own"
 	"github.com/lookatitude/aurvet/internal/report"
 )
 
@@ -1036,6 +1039,210 @@ func TestFPGateMaliciousRootStructuralFacts(t *testing.T) {
 	if !strings.Contains(string(desc), "%VALIDATION%\nnone") {
 		t.Errorf("malicious: librewolf-fix-bin must be %%VALIDATION%% none -- shared with every benign " +
 			"AUR package on the system, and therefore worth nothing on its own")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1-C: the CORRELATION half of the gate (internal/correlate over
+// testdata/roots/{stock,cruft,malicious})
+// ---------------------------------------------------------------------------
+//
+// These two tests close what TestFPGateMaliciousRootStructuralFacts named as
+// deferred to the correlation lane: the facts on disk clustering onto ONE
+// subject, that cluster reaching SevCritical while no individual finding does,
+// the temporal key (which needs mtimes and therefore a copy out of the
+// repository), and INV-6 in the Limits text.
+//
+// The pair is the gate, exactly as the Provenance pair above is: "zero criticals
+// on stock and cruft" is trivially satisfied by an engine that clusters nothing,
+// so the benign half is only meaningful next to the malicious half, and both are
+// top-level Test functions in this file so `go test ./internal/check/` fails if
+// either does.
+
+// fpgSyncNames is the repository-name oracle for the whole-root fixtures. It is
+// the input that decides which packages are FOREIGN, and therefore whether a
+// cluster can be attributed at all. cruft carries exactly one foreign package
+// (deskx) on purpose: a benign root with none would satisfy "no critical
+// cluster" for the wrong reason.
+var fpgSyncNames = map[string]map[string]bool{
+	"stock": {"foo-bin": true, "foo-lib": true, "zlib": true},
+	"cruft": {
+		"systemd": true, "kmod": true, "netbar": true, "printbaz": true,
+		"sysutil": true, "foo-daemon": true,
+	},
+	"malicious": {"systemd": true, "kmod": true},
+}
+
+// fpgCorrelateConfig opens one root and builds the correlation input over it.
+func fpgCorrelateConfig(t *testing.T, dir, name string) (*os.Root, correlate.Config) {
+	t.Helper()
+	pkgs, gaps, err := alpm.LoadLocalDB(filepath.Join(dir, "var", "lib", "pacman", "local"))
+	if err != nil {
+		t.Fatalf("LoadLocalDB(%s): %v", dir, err)
+	}
+	if len(gaps) != 0 {
+		t.Fatalf("%s: unreadable local DB entries %v", name, gaps)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	owners := own.IndexIn(root, pkgs)
+	if owners.Len() == 0 {
+		t.Fatalf("%s: empty ownership index; every 'unowned' assertion would pass vacuously", name)
+	}
+	return root, correlate.Config{Owners: owners, Pkgs: pkgs, SyncNames: fpgSyncNames[name]}
+}
+
+// fpgCopyRoot copies a fixture root into t.TempDir(), symlinks verbatim.
+//
+// It exists for one reason: git does not preserve mtimes, so the temporal
+// correlation key cannot be exercised against a checked-in tree at all. The
+// copy is written and the fixture is only ever read -- INV-5 forbids writing
+// under a scanned root, and testdata/ is not this test's to modify.
+func fpgCopyRoot(t *testing.T, name string) string {
+	t.Helper()
+	src := systemRoot(t, name)
+	dst := t.TempDir()
+	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(src, p)
+		if relErr != nil {
+			return relErr
+		}
+		out := filepath.Join(dst, rel)
+		switch {
+		case d.IsDir():
+			return os.MkdirAll(out, 0o755)
+		case d.Type()&fs.ModeSymlink != 0:
+			target, rerr := os.Readlink(p)
+			if rerr != nil {
+				return rerr
+			}
+			return os.Symlink(target, out)
+		default:
+			data, rerr := os.ReadFile(p)
+			if rerr != nil {
+				return rerr
+			}
+			return os.WriteFile(out, data, 0o644)
+		}
+	})
+	if err != nil {
+		t.Fatalf("copy fixture %s: %v", name, err)
+	}
+	return dst
+}
+
+// TestFPGateMaliciousRootYieldsCorrelatedCriticalCluster is the acceptance half:
+// the CHAOS RAT structural shape must produce one correlated critical cluster
+// attributed to librewolf-fix-bin, and every fact it is built from must stay
+// below critical on its own.
+func TestFPGateMaliciousRootYieldsCorrelatedCriticalCluster(t *testing.T) {
+	dir := fpgCopyRoot(t, "malicious")
+	// librewolf-fix-bin's %INSTALLDATE%, deliberately far from the repository
+	// packages' (see testdata/roots/malicious/README.md). The offsets model a
+	// scriptlet running inside the transaction pacman recorded that date for.
+	const installDate = 1770099000
+	for rel, off := range map[string]int64{
+		"usr/lib/systemd/inert-marker-initd":             60,
+		"usr/lib/systemd/libinert-marker-preload.so":     62,
+		"etc/systemd/system/systemd-initd-inert.service": 61,
+		"etc/pacman.d/hooks/60-depmod.hook":              63,
+	} {
+		ts := time.Unix(installDate+off, 0)
+		if err := os.Chtimes(filepath.Join(dir, filepath.FromSlash(rel)), ts, ts); err != nil {
+			t.Fatalf("chtimes %s: %v", rel, err)
+		}
+	}
+	root, cfg := fpgCorrelateConfig(t, dir, "malicious")
+
+	facts, surfaceRes := correlate.Facts(root, cfg)
+	if len(facts) < 3 {
+		t.Fatalf("only %d correlation facts on the malicious root; the fixture's three structural facts "+
+			"must all be derivable or the cluster below proves nothing: %+v", len(facts), facts)
+	}
+	for _, f := range surfaceRes.Findings {
+		if f.Severity == finding.SevCritical {
+			t.Errorf("an individual surface finding reached critical: %s\n  %s", f.RuleID, formatFinding(f))
+		}
+	}
+
+	res := correlate.Correlate(root, cfg)
+	var crit []finding.Finding
+	for _, f := range res.Findings {
+		if f.Severity == finding.SevCritical {
+			crit = append(crit, f)
+		}
+	}
+	if len(crit) != 1 {
+		t.Fatalf("%d critical findings on the malicious root, want exactly 1 (the cluster): %+v", len(crit), crit)
+	}
+	f := crit[0]
+	if f.RuleID != correlate.RuleCluster {
+		t.Errorf("the critical came from rule %q, not from a correlated cluster:\n  %s", f.RuleID, formatFinding(f))
+	}
+	if f.Subject != "librewolf-fix-bin" {
+		t.Errorf("cluster subject = %q, want librewolf-fix-bin -- the right severity on the wrong subject "+
+			"is not attribution:\n  %s", f.Subject, formatFinding(f))
+	}
+	// INV-6 in the finding text, not only in the documentation. A critical that
+	// does not say what it cannot see teaches the reader that silence means
+	// safety.
+	lim := strings.ToLower(f.Limits)
+	for _, want := range []string{"pkgdir", "silent", "sloppy", "mtree"} {
+		if !strings.Contains(lim, want) {
+			t.Errorf("cluster Limits does not state the phase's ceiling (%q missing): %q", want, f.Limits)
+		}
+	}
+	// The evidence must name the three structural facts, or the cluster is
+	// critical for reasons an operator cannot check.
+	ev := strings.Join(f.Evidence, "\n")
+	for _, want := range []string{
+		"etc/systemd/system/systemd-initd-inert.service",
+		"usr/lib/systemd/inert-marker-initd",
+		"usr/lib/systemd/libinert-marker-preload.so",
+		"temporal",
+	} {
+		if !strings.Contains(ev, want) {
+			t.Errorf("cluster evidence does not mention %q:\n%s", want, ev)
+		}
+	}
+}
+
+// TestFPGateNoCriticalClusterOnBenignSystemRoots is the false-positive half, and
+// cruft is the hard case: its hand-written unit really is enabled through a
+// *.wants link and really does run an unowned binary, so two independent
+// surfaces genuinely correlate onto one subject on a root where nothing is
+// wrong. It must stay suspicious.
+func TestFPGateNoCriticalClusterOnBenignSystemRoots(t *testing.T) {
+	for _, name := range []string{"stock", "cruft"} {
+		t.Run(name, func(t *testing.T) {
+			root, cfg := fpgCorrelateConfig(t, systemRoot(t, name), name)
+			res := correlate.Correlate(root, cfg)
+			for _, f := range res.Findings {
+				if f.Severity == finding.SevCritical {
+					t.Errorf("critical finding on benign root %q:\n  %s", name, formatFinding(f))
+				}
+			}
+			if name == "cruft" {
+				// Liveness: cruft must still CLUSTER, or "no criticals" is being
+				// satisfied by an engine that correlated nothing.
+				var clustered bool
+				for _, f := range res.Findings {
+					if f.RuleID == correlate.RuleCluster {
+						clustered = true
+					}
+				}
+				if !clustered {
+					t.Errorf("cruft produced no cluster at all; zero criticals then says nothing about "+
+						"the engine: findings=%+v", res.Findings)
+				}
+			}
+		})
 	}
 }
 
