@@ -1,0 +1,125 @@
+#  aurvet-scan.service -- the periodic local sweep.
+#
+#  NOT ENABLED BY THE PACKAGE. Arch policy is that the packager ships units and
+#  the administrator decides what runs; there is no .install that touches
+#  systemctl. Enable with:
+#
+#      systemctl enable --now aurvet-scan.timer
+#
+#  This unit deliberately does NOT reach the network. Everything that needs the
+#  network -- the AUR provenance and tombstone queries -- lives in
+#  aurvet-update.service, which is why the two are split rather than being one
+#  unit with a flag.
+
+[Unit]
+Description=aurvet local integrity and persistence-surface sweep
+Documentation=man:aurvet(1)
+Documentation=https://github.com/lookatitude/aurvet
+
+#  Exit codes 1 (findings) and 3 (coverage incomplete) are CONTRACTUAL results,
+#  and systemd renders both as `failed` -- then tells nobody, because a timer
+#  unit has no operator attached. OnFailure= is how the result reaches a human.
+#
+#  Do NOT "fix" the red unit with SuccessExitStatus=1 3. That does not make the
+#  scan succeed; it makes a scan that found malware look healthy, forever, and
+#  it is the first thing a maintainer tired of red units will reach for. It
+#  converts a finding into silence, which is INV-3 violated through packaging.
+#  The notifier tells 1 (found something) apart from 3 (could not look), because
+#  those need different responses.
+OnFailure=aurvet-failure@%n.service
+OnFailureJobMode=replace
+
+[Service]
+Type=oneshot
+
+#  --no-network is the polite form of the request; PrivateNetwork=yes below is
+#  the enforcement. Both are present because a flag constrains a cooperating
+#  process and a network namespace constrains a subverted one.
+#
+#  Consequence, stated here rather than hidden: with the network deliberately
+#  withheld, the AUR provenance dimension is NOT examined, so this unit exits 3
+#  ("coverage incomplete") rather than 0. That is the true answer and the tool
+#  refuses to round it down (INV-3). Pair this timer with aurvet-update.timer,
+#  which covers that dimension.
+ExecStart=/usr/bin/aurvet scan --no-network
+
+#  ProtectSystem=strict makes the whole hierarchy read-only, so the state
+#  directory needs an explicit exception. StateDirectory= rather than an
+#  invented path: internal/config resolves state to /var/lib/aurvet when running
+#  as root and that directory is writable, and systemd creates it with the right
+#  owner and mode before ExecStart. 0700 because reports name unowned SUID
+#  binaries and other reconnaissance an unprivileged reader should not get free.
+StateDirectory=aurvet
+StateDirectoryMode=0700
+
+#  ---- the four directives the design mandates -------------------------------
+
+#  A filesystem integrity scanner has no business reaching the network. If this
+#  process is ever subverted -- by a crafted mtree, a crafted PKGBUILD, a bug in
+#  a parser -- the empty network namespace is what stops exfiltration of the
+#  file inventory it just built.
+PrivateNetwork=yes
+
+#  The entire hierarchy read-only. aurvet reads; it does not write outside its
+#  state directory (INV-5), so this costs nothing and turns a write bug into
+#  EROFS instead of damage.
+ProtectSystem=strict
+
+#  read-only, NOT yes: the surfaces checks enumerate per-user XDG autostart
+#  paths out of the target's passwd. ProtectHome=yes would make every home
+#  unreadable and turn each one into a coverage gap -- a scan reporting exit 3
+#  for a reason that was our own packaging.
+ProtectHome=read-only
+
+#  Exactly what internal/privdrop stages at runtime: read every file, change
+#  none. The unit and the process agree on purpose. Omitting CAP_DAC_READ_SEARCH
+#  here would not harden anything -- it would make the scan unable to read
+#  root-only files and report coverage gaps for no reason.
+#
+#  Note this leaves the process WITHOUT CAP_SETPCAP, so privdrop's lockdown()
+#  finds it not in the effective set and skips the securebits/bounding-set
+#  tightening -- correctly, because systemd has already bounded the set here.
+#  no_new_privs still closes the execve route, which privdrop sets unconditionally
+#  and NoNewPrivileges= below sets again.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+
+#  ---- the rest of the sandbox ------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+
+#  DELIBERATELY ABSENT: SystemCallFilter= and MemoryDenyWriteExecute=.
+#  capset(2) is in @privileged, not @system-service, so a naive
+#  `SystemCallFilter=@system-service` kills the privilege drop and the scan
+#  never starts -- a unit that fails to start reports nothing, which is the
+#  failure mode this whole file exists to avoid. Neither directive could be
+#  exercised against a real run here, and an untested seccomp policy on a
+#  security tool is a way to make it silent. An administrator who wants them:
+#
+#      systemctl edit aurvet-scan.service
+#      [Service]
+#      SystemCallFilter=@system-service
+#      SystemCallFilter=capset
+
+#  A background sweep should never be the reason a desktop stutters. Measured
+#  cost is ~1.8 s warm / ~32 s cold on the reference system; the timeout is
+#  generous because a cold cache on slow storage is not a failure.
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+TimeoutStartSec=30min

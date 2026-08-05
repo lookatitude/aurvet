@@ -1,0 +1,58 @@
+#compdef aurvet
+#
+# zsh completion for aurvet
+#
+# The subcommand list below is asserted against cmd/aurvet's dispatch switch by
+# completions/completions_test.go. A new subcommand that is not added here fails
+# that test by name.
+
+_aurvet() {
+	local -a commands
+	# AURVET_COMMANDS_BEGIN
+	commands=(
+		'scan:sweep the system and report provenance findings'
+		'review:analyse one recipe; never builds it'
+		'install:review the dependency closure, prompt, snapshot, hand over'
+		'snapshot:capture provenance for one pkgbase'
+		'explain:explain one finding by fingerprint'
+		'doctor:print the resolved configuration and its sources'
+		'version:print build identity'
+	)
+	# AURVET_COMMANDS_END
+
+	local -a flags
+	flags=(
+		'-json[emit machine-readable JSON instead of text]'
+		'-no-network[skip every outbound request; network checks become coverage gaps]'
+		'-since-last[scan: show only findings new since the previous scan]'
+		'-show-recipe[review/install: print the recipe text in full]'
+		'-offline-root[examine a mounted filesystem instead of the running system]:root:_files -/'
+		'-min-severity[reporting floor]:severity:(info suspicious critical)'
+	)
+
+	_arguments -C \
+		$flags \
+		'1: :->command' \
+		'*:: :->argument'
+
+	case $state in
+	command)
+		_describe -t commands 'aurvet command' commands
+		;;
+	argument)
+		case $words[1] in
+		review)
+			# a recipe directory or a pkgbase; only the directory is completable
+			_files -/
+			;;
+		*)
+			# install/snapshot/explain take a pkgbase or a fingerprint. A
+			# completion must not make a network request the user did not ask for.
+			_message 'pkgbase or fingerprint'
+			;;
+		esac
+		;;
+	esac
+}
+
+_aurvet "$@"

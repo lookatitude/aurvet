@@ -127,9 +127,51 @@ story imply more assurance than it provides.
 | `SHA256SUMS` for all artifacts | **in place** | — |
 | Static-linkage assertion in CI | **in place** | — |
 | Zero-dependency enforcement in CI | **in place** | — |
+| **aurvet's own PKGBUILD passes aurvet's own indicators** | **in place** | — `ci.yml`'s `package` job runs `aurvet review` against the repository's own `PKGBUILD` and fails on any finding at or above the default floor. `internal/pkgbuild` landed in P2. |
+| `.SRCINFO` asserted in sync | **in place** | — |
+| namcap on the built package | **in place**, with three acknowledged notes | `lacks PIE`, `lacks FULL RELRO`, `is unstripped` are allow-listed *by exact text* in `ci.yml` and explained in the PKGBUILD; anything else namcap says fails the job. |
+| `staticcheck`, `govulncheck`, `go mod verify` | **in place** | — pinned by exact version, no `\|\| true`. |
+| Clean **container** build from a `git archive` tarball | **in place** | — see the caveat below: it is not a devtools chroot. |
+| Every `uses:` pinned by commit SHA | **in place**, now *enforced* | a CI step rejects any `uses:` that is not a 40-hex SHA with a `# vX.Y.Z` comment. |
+| **`gosec` fully clean** | **partial** | gosec gates, but with eight rule IDs excluded (`G101,G103,G104,G115,G302,G304,G401,G505`), each justified in `ci.yml`. They cover 53 real sites — mostly `f.Close()` after a successful read, `os.Open` of caller-named paths (which is the program), sha1 (git object names) and syscall struct conversions. The honest fix is a reviewed `//nosec` with a justification at each site; until then this control is **not** a clean bill of health. |
+| **`pkgctl build` in a real devtools chroot** | **missing** | needs `systemd-nspawn`, which a GitHub runner's container job cannot nest. Run it by hand before any AUR push (below). The container build proves the package builds with nothing from a developer machine present; it does not prove it against the exact `[core]`/`[extra]` snapshot devtools pins. |
 | **OpenPGP release signing** | **missing** | a human must generate a *second* OpenPGP identity for release artifacts. `makepkg` only understands OpenPGP (`validpgpkeys`), so ed25519 alone gives AUR users no verification path. The seam is marked in `release.yml` and deliberately not stubbed. |
-| **aurvet's own PKGBUILD passes aurvet's own indicators** | **missing** | `internal/pkgbuild`, arriving in P2. The spec requires this as an automated release gate; there is also no PKGBUILD in the repo yet. |
+| **`aurvet-bin` package** | **not written** | a decision. The source package is canonical; a `-bin` asks users to trust a build machine. If it ships it must carry `options=('!strip')` so its bytes are the bytes the release hashed. |
 | **AUR packages** (`aurvet`, `-bin`, `-git`) | **not registered** | a decision. The spec advises registering all three names early so nobody else supplies "the convenient binary build" of a security tool. |
+| **Scheduled diff of the live AUR copy against upstream** | **missing** | depends on the AUR names existing. |
+
+## The PKGBUILD, and the two placeholders a release must replace
+
+`PKGBUILD` and `.SRCINFO` live at the repository root and are the canonical
+**source** package. Two fields carry deliberate *unpublished-release sentinels*,
+and CI enforces both:
+
+| Field | Sentinel | What must replace it |
+|---|---|---|
+| `sha256sums` | 64 zeros | the sha256 of the published tarball. CI asserts: while tag `v$pkgver` does not exist the sentinel **must** still be there; once it exists the value **must** equal `git archive` of that tag piped through `gzip -n` — byte-for-byte what `make dist` uploads. |
+| `_commit` | 40 zeros | the full SHA of the tagged commit. `build()` **refuses to run** on the sentinel, because `check()` compares `aurvet version` against it and would otherwise ship a binary reporting `commit 000000000000`. |
+
+So step 5 of the release (tagging) gains a follow-up: after the release exists,
+
+```sh
+v=0.0.1
+sha256sum dist/aurvet-$v.tar.gz          # or download the published asset
+sed -i "s/^sha256sums=.*/sha256sums=('<that hash>')/" PKGBUILD
+sed -i "s/^_commit=.*/_commit='$(git rev-parse v$v^{commit})'/" PKGBUILD
+makepkg --printsrcinfo > .SRCINFO        # CI fails if you forget this
+```
+
+and then, **before any AUR push**, the chroot build CI cannot do:
+
+```sh
+pkgctl build --clean                     # devtools; needs systemd-nspawn
+namcap *.pkg.tar.zst                     # expect exactly the three static notes
+```
+
+`--skipchecksums` is used by the CI build and *only* by the CI build: it builds a
+tarball from the commit under test, which is not the published artifact and
+cannot match a published hash. The published hash is checked by its own step
+instead. Do not carry `--skipchecksums` into a real release build.
 
 ## If something goes wrong
 

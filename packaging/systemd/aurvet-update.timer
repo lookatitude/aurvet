@@ -1,0 +1,23 @@
+#  NOT ENABLED BY THE PACKAGE. `systemctl enable --now aurvet-update.timer`.
+
+[Unit]
+Description=Daily aurvet indicator bundle and AUR provenance refresh
+Documentation=man:aurvet(1)
+
+[Timer]
+Unit=aurvet-update.service
+OnCalendar=daily
+
+#  Same reason as the scan timer: a machine that is off at the scheduled hour
+#  must still refresh, or it silently runs on stale indicators.
+Persistent=true
+
+#  Wider than the scan's window and deliberately so: this one leaves the
+#  machine. Every installation hitting aur.archlinux.org at the same instant is
+#  a self-inflicted thundering herd against a volunteer-run service.
+RandomizedDelaySec=6h
+FixedRandomDelay=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

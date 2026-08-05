@@ -1,0 +1,105 @@
+#  aurvet-failure@.service -- the thing OnFailure= points at.
+#
+#  Instantiated as aurvet-failure@aurvet-scan.service (the OnFailure= lines say
+#  `aurvet-failure@%n.service`, and %n expands to the full unit name; unit names
+#  contain no `/`, so they are valid instance names unescaped).
+#
+#  WHY THIS FILE EXISTS AT ALL
+#
+#  aurvet's exit codes are contractual (spec §14):
+#
+#      0  analysis completed, nothing at or above the reporting floor
+#      1  analysis completed, findings at or above the floor
+#      2  the invocation itself was wrong
+#      3  analysis could not cover what it was asked to cover
+#
+#  systemd knows none of that. It sees any non-zero exit and renders `failed`,
+#  so 1 and 3 -- the two results a human must actually act on -- become an
+#  identical red line in `systemctl status` that nobody is watching. A daily
+#  timer that finds malware and tells nobody is worse than no timer, because it
+#  manufactures the belief that something is looking.
+#
+#  THE WRONG FIX, NAMED SO IT IS NOT REDISCOVERED
+#
+#  `SuccessExitStatus=1 3` on the scan unit makes it green. It does this by
+#  discarding the result: the scan now reports nothing, forever, and looks
+#  healthy doing it. That is INV-3 ("never report clean for what was not
+#  examined") violated through packaging rather than through code, and it is
+#  exactly what a maintainer tired of a red unit will reach for. Do not. It is
+#  asserted absent by packaging/systemd/units_test.go.
+#
+#  3 OUTRANKS 1, and they need different responses:
+#    exit 1 -> something was found. Investigate the finding.
+#    exit 3 -> the tool could not look. The run is UNVERIFIED, not clean, and
+#              a silenced 3 is how an attacker gets a green dashboard.
+#  So the message distinguishes them rather than saying "the unit failed".
+#
+#  MAKING IT REACH *YOUR* HUMAN
+#
+#  Out of the box this writes to the journal under the `aurvet` syslog
+#  identifier (so `journalctl -t aurvet -p warning` and any journal-to-mail
+#  forwarder pick it up) and to every logged-in terminal via wall(1). That is
+#  the most that can be assumed on a machine with no configured MTA. Point it
+#  somewhere real without editing this file:
+#
+#      systemctl edit aurvet-failure@.service
+#      [Service]
+#      ExecStart=
+#      ExecStart=/usr/local/bin/my-notifier %i
+#
+#  The unit is deliberately NOT PrivateNetwork=yes for that reason -- a notifier
+#  that cannot reach an SMTP server or a push endpoint is not a notifier.
+
+[Unit]
+Description=Report the result of %i to the operator
+Documentation=man:aurvet(1)
+
+#  No OnFailure= here. A notifier that notifies about its own failure is a loop.
+#  If this unit fails, that failure is itself in the journal, which is the only
+#  honest place left to put it.
+#
+#  Never let a notification storm rate-limit itself into silence.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+
+#  Literal percent signs are doubled: systemd expands %-specifiers in ExecStart
+#  before /bin/sh ever sees the string, so printf's %s must be written %%s.
+#  $0 is a label, $1 is the failed unit name.
+ExecStart=/bin/sh -c '\
+unit="$1"; \
+status="$(systemctl show -p ExecMainStatus --value "$unit" 2>/dev/null)"; \
+result="$(systemctl show -p Result --value "$unit" 2>/dev/null)"; \
+case "$result:$status" in \
+  exit-code:3) prio=err; \
+    msg="$unit: COVERAGE INCOMPLETE (exit 3). It could not examine everything it was asked to, so this run is UNVERIFIED, not clean -- 3 outranks 1. Inspect the gaps: journalctl -u $unit -n 200"; ;; \
+  exit-code:1) prio=warning; \
+    msg="$unit: FINDINGS (exit 1) at or above the reporting floor. Review them: aurvet scan --since-last, then aurvet explain <fingerprint>"; ;; \
+  exit-code:2) prio=err; \
+    msg="$unit: USAGE ERROR (exit 2). The unit invoked aurvet incorrectly -- this is a packaging or drop-in bug, not a finding about the system."; ;; \
+  *) prio=err; \
+    msg="$unit: did not complete (result=$result, exit status=$status). Nothing was verified by this run."; ;; \
+esac; \
+printf "%%s\\n" "$msg" | systemd-cat -t aurvet -p "$prio"; \
+if command -v wall >/dev/null 2>&1; then printf "aurvet: %%s\\n" "$msg" | wall -n 2>/dev/null || true; fi; \
+exit 0' aurvet-failure-notify %i
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+PrivateTmp=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TimeoutStartSec=1min

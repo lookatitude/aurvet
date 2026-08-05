@@ -53,14 +53,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/aur"
 	"github.com/lookatitude/aurvet/internal/config"
 	"github.com/lookatitude/aurvet/internal/finding"
 	"github.com/lookatitude/aurvet/internal/fsx"
 	"github.com/lookatitude/aurvet/internal/gate"
 	"github.com/lookatitude/aurvet/internal/helper"
-	"github.com/lookatitude/aurvet/internal/pkgmeta"
 	"github.com/lookatitude/aurvet/internal/report"
 	"github.com/lookatitude/aurvet/internal/snapshot"
 )
@@ -207,10 +205,7 @@ func readSnapshotTarball(pkgbase string, r io.Reader, lim fetchLimits) (map[stri
 		if err != nil {
 			return nil, fmt.Errorf("aurvet: %s: unreadable archive: %w", pkgbase, err)
 		}
-		name := hdr.Name
-		if strings.HasPrefix(name, "./") {
-			name = name[2:]
-		}
+		name := strings.TrimPrefix(hdr.Name, "./")
 		if hdr.Typeflag == tar.TypeDir {
 			if strings.TrimSuffix(name, "/") != pkgbase {
 				return nil, fmt.Errorf("aurvet: %s: archive holds directory %q", pkgbase, sanitiseText(hdr.Name, 80))
@@ -392,20 +387,24 @@ func runInstall(opts installOpts, stdout, stderr io.Writer) int {
 	res := finding.Result{}
 
 	// --- 1. fetch and resolve the closure ----------------------------------
-	nodes, closureGaps := walkClosure(ctx, closureConfig{
-		Root:     opts.pkgbase,
-		Src:      src,
-		Client:   cl,
-		Stage:    stageRoot,
-		DBPath:   cfg.DBPath,
-		SyncPath: cfg.SyncPath,
-		MaxNodes: opts.maxNodes,
+	maxNodes := opts.maxNodes
+	if maxNodes <= 0 {
+		maxNodes = defaultMaxClosureNodes
+	}
+	fetcher := newStagingSource(ctx, src, stageRoot)
+	closure := gate.ReviewClosure(ctx, stageRoot, gate.ClosureRequest{PkgBase: opts.pkgbase}, gate.ClosureConfig{
+		Source:   fetcher,
+		Repo:     repoIndex(cfg.SyncPath, &res),
+		Resolver: aurResolver{cl: cl},
+		Limits:   gate.ClosureLimits{MaxNodes: maxNodes, MaxDepth: maxClosureDepth},
 	})
-	res.Gaps = append(res.Gaps, closureGaps...)
+	res.Gaps = append(res.Gaps, fetcher.gaps()...)
+	res.Gaps = append(res.Gaps, closureGaps(closure, fetcher)...)
+	nodes := closureNodes(closure)
 
-	fmt.Fprintf(stdout, "install %s: %d recipe(s) staged in %s\n", opts.pkgbase, len(nodes), stage)
+	fmt.Fprintf(stdout, "install %s: %d recipe(s) staged in %s\n", opts.pkgbase, len(fetcher.staged), stage)
 	fmt.Fprintf(stdout, "recipes came from: %s\n", src.Describe())
-	renderTree(stdout, nodes)
+	renderTree(stdout, closure)
 
 	// --- 2. review every recipe in the closure ------------------------------
 	rv := newReviewer(storeCfg, euid)
@@ -413,8 +412,14 @@ func runInstall(opts installOpts, stdout, stderr io.Writer) int {
 	defer rv.close()
 
 	reviews := make([]recipeReview, 0, len(nodes))
-	for _, n := range nodes {
-		one := rv.review(stageRoot, target{PkgBase: n.PkgBase, Dir: n.PkgBase, Helper: "staged for review"})
+	for _, n := range closure.Nodes {
+		if n.Kind != gate.KindAUR || n.Dir == "" {
+			// An AUR member with no staged recipe is already a gap from the
+			// fetcher; reviewing a directory that does not exist would add a
+			// second, vaguer one saying the same thing.
+			continue
+		}
+		one := rv.review(stageRoot, target{PkgBase: n.PkgBase, Dir: n.Dir, Helper: "staged for review"})
 		reviews = append(reviews, one)
 		res.Findings = append(res.Findings, one.Result.Findings...)
 		res.Gaps = append(res.Gaps, one.Result.Gaps...)
@@ -650,25 +655,19 @@ func currentUser() string {
 // renderTree prints the closure. The attacker's move is a benign package pulling
 // a malicious dependency, so the shape of the closure is evidence in its own
 // right.
-func renderTree(w io.Writer, nodes []closureNode) {
-	if len(nodes) == 0 {
+//
+// The tree is gate.Closure's own rendering, not a second one: a tree drawn from
+// a different traversal than the one that decided what to review is a picture of
+// something other than what happened.
+func renderTree(w io.Writer, c gate.Closure) {
+	if len(c.Nodes) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "\ndependency closure (AUR members only; repository dependencies are pacman's business):")
-	for i, n := range nodes {
-		prefix := strings.Repeat("  ", n.Depth)
-		branch := "├── "
-		if i == len(nodes)-1 {
-			branch = "└── "
-		}
-		if n.Depth == 0 {
-			branch = ""
-		}
-		fmt.Fprintf(w, "  %s%s%s", prefix, branch, n.PkgBase)
-		if n.Via != "" && n.Via != n.PkgBase {
-			fmt.Fprintf(w, "  (as dependency %s)", sanitiseText(n.Via, 60))
-		}
-		fmt.Fprintln(w)
+	n := c.Counts()
+	fmt.Fprintf(w, "\ndependency closure of %s: %d package(s) -- %d from the AUR, %d from repositories, %d unresolved\n",
+		sanitiseText(c.Root, 64), n.Nodes, n.AUR, n.Repo+n.RepoProvided, n.Unresolved)
+	for _, line := range c.Tree() {
+		fmt.Fprintf(w, "  %s\n", sanitiseText(line, 200))
 	}
 }
 
@@ -688,165 +687,209 @@ func renderHandover(w io.Writer, stage string, reviews []recipeReview) {
 
 // --- the dependency closure -------------------------------------------------
 //
-// closureConfig and walkClosure are install's CALL SITE for the dependency
-// closure review (P2 task 9, internal/gate/closure.go), which another lane owns
-// and which was NOT in the tree when this was written. The shape here follows
-// the roadmap's description of that task -- "resolves the full AUR dep closure
-// and reviews every new PKGBUILD in it ... prints the tree" -- with the review
-// itself delegated to reviewer.review so there is exactly one implementation of
-// "what reviewing a recipe means".
+// The walk is internal/gate's ReviewClosure (P2 task 9) and nothing here
+// re-implements it. install once carried its own breadth-first walker, written
+// while closure.go was being written by another lane; two traversals of an
+// attacker-controlled dependency graph drift, and the one that drifts is the one
+// that mis-traverses -- a dependency reviewed by one path and skipped by the
+// other is exactly the bypass the closure review exists to close.
 //
-// internal/gate/closure.go landed during this lane and publishes
-// gate.ReviewClosure(ctx, root, ClosureRequest, ClosureConfig) Closure. It is
-// the right home for this walk, and replacing this function with it is a
-// FOLLOWUP rather than something done here, because the two are not the same
-// shape yet: ReviewClosure resolves recipes from a gate.RecipeSource that
-// already has them ON DISK, while install must FETCH each member before it can
-// be reviewed. The integration needs a fetch-on-demand RecipeSource (Recipe
-// (pkgbase) staging the tarball, then returning the staged dir) plus a
-// gate.NameResolver over aur.Client, and install still needs the per-recipe
-// descriptor this file retains for the handover re-verification. Doing that
-// against a file another lane was writing in the same run was not a trade worth
-// taking; the tests below pin the behaviour so the swap is verifiable.
+// ReviewClosure resolves recipes from a gate.RecipeSource that already has them
+// ON DISK, and install must fetch each member first. Three pieces bridge that,
+// and only three:
+//
+//   - stagingSource, a fetch-on-demand RecipeSource: Recipe(pkgbase) fetches the
+//     tarball, stages it, and returns the staged directory.
+//   - aurResolver, a gate.NameResolver over aur.Client.
+//   - the per-recipe review stays with reviewer.review, which RETAINS the
+//     descriptor each PKGBUILD was read from. That descriptor is what
+//     verifyUnchanged proves the handover against; ReviewClosure's own read is a
+//     traversal read and is not handed anything.
+//
+// The cost of that last point is stated rather than hidden: each staged recipe
+// is read twice, once by the walk to find its dependencies and once by the
+// reviewer that produces the verdict, the diff and the retained descriptor. The
+// second read is over a file this process staged at 0600 moments earlier, and
+// paying for it buys the TOCTOU proof.
 
-type closureConfig struct {
-	Root     string
-	Src      recipeSource
-	Client   aur.Client
-	Stage    *os.Root
-	DBPath   string
-	SyncPath string
-	MaxNodes int
+// stagingSource is the fetch-on-demand gate.RecipeSource.
+//
+// The context lives on the struct because gate.RecipeSource.Recipe takes none --
+// it was written for a source that only looks at disk. That is the whole of the
+// impedance mismatch, and it is recorded here rather than papered over by
+// widening an interface that internal/gate's own callers do not need widened.
+//
+// A member that cannot be fetched or staged is remembered, not fetched again,
+// and reported as a gap keyed on install's own rule (INV-9). It is never a
+// silent absence: gate then sees "no recipe" and refuses to call the node
+// reviewed, which is the same conclusion by a different route.
+type stagingSource struct {
+	ctx   context.Context
+	src   recipeSource
+	stage *os.Root
+
+	// staged maps pkgbase -> staged root-relative directory.
+	staged map[string]string
+
+	// failed maps pkgbase -> the reason nothing was staged, and order keeps
+	// those reasons in fetch order so the output of one (root, cfg) is stable.
+	failed map[string]string
+	order  []string
 }
 
-// walkClosure fetches and stages the root recipe and every AUR dependency
-// reachable from it, breadth-first.
+func newStagingSource(ctx context.Context, src recipeSource, stage *os.Root) *stagingSource {
+	return &stagingSource{ctx: ctx, src: src, stage: stage, staged: map[string]string{}, failed: map[string]string{}}
+}
+
+func (s *stagingSource) Recipe(pkgbase string) (string, bool) {
+	if dir, ok := s.staged[pkgbase]; ok {
+		return dir, true
+	}
+	if _, bad := s.failed[pkgbase]; bad {
+		return "", false
+	}
+	files, err := s.src.Fetch(s.ctx, pkgbase)
+	if err != nil {
+		s.fail(pkgbase, fmt.Sprintf("the recipe for this closure member could not be retrieved, so it was not "+
+			"reviewed: %v", err))
+		return "", false
+	}
+	if err := stageRecipe(s.stage, pkgbase, files); err != nil {
+		s.fail(pkgbase, fmt.Sprintf("the recipe could not be staged for review: %v", err))
+		return "", false
+	}
+	s.staged[pkgbase] = pkgbase
+	return pkgbase, true
+}
+
+func (s *stagingSource) fail(pkgbase, reason string) {
+	s.failed[pkgbase] = reason
+	s.order = append(s.order, pkgbase)
+}
+
+// gaps reports every member whose recipe never reached the staging directory.
+func (s *stagingSource) gaps() []finding.Gap {
+	out := make([]finding.Gap, 0, len(s.order))
+	for _, pkgbase := range s.order {
+		out = append(out, finding.Gap{RuleID: ruleFetchFailed, Subject: pkgbase, Reason: s.failed[pkgbase]})
+	}
+	return out
+}
+
+// aurResolver adapts aur.Client to gate.NameResolver.
 //
-// Everything that cannot be resolved is a gap, never an omission: a prompt that
-// says "nothing found" about a closure it could not resolve is the worst output
-// this tool can produce (INV-9).
-func walkClosure(ctx context.Context, cfg closureConfig) ([]closureNode, []finding.Gap) {
-	maxNodes := cfg.MaxNodes
-	if maxNodes <= 0 {
-		maxNodes = defaultMaxClosureNodes
-	}
+// The two contracts agree on the point that matters: a non-nil error is a FAILED
+// LOOKUP and never an absence, so this returns the error untouched rather than
+// an empty map, which the walk would read as "the AUR does not have these".
+type aurResolver struct{ cl aur.Client }
 
-	var gaps []finding.Gap
-	gap := func(rule, subject, reason string) {
-		gaps = append(gaps, finding.Gap{RuleID: rule, Subject: subject, Reason: reason})
+func (r aurResolver) Bases(ctx context.Context, names []string) (map[string]string, error) {
+	info, err := r.cl.Info(ctx, names)
+	if err != nil {
+		return nil, err
 	}
-
-	// The two oracles that decide whether a dependency is even the AUR's
-	// business. A failure to load either is a gap: without them every repo
-	// package looks like a missing AUR package, and vice versa.
-	syncNames, syncGaps, err := alpm.LoadSyncNames(cfg.SyncPath)
-	if err != nil || len(syncNames) == 0 {
-		gap("sync-coverage", cfg.SyncPath, fmt.Sprintf("no repository package names were loaded (%v), so this closure "+
-			"cannot tell a repository dependency from an AUR one and may fetch or skip the wrong members", err))
-	}
-	for _, g := range syncGaps {
-		gap("sync-coverage", g, "a sync database entry could not be read, so the repository name set is incomplete")
-	}
-	installed := map[string]bool{}
-	if pkgs, _, err := alpm.LoadLocalDB(cfg.DBPath); err == nil {
-		for _, p := range pkgs {
-			installed[p.Name] = true
+	out := make(map[string]string, len(info))
+	for name, p := range info {
+		// Keyed on the BASE, not the name: one recipe builds several packages,
+		// and reviewing the same base once per package name would review it
+		// twice and prompt twice.
+		base := p.PackageBase
+		if base == "" {
+			base = p.Name
 		}
-	} else {
-		gap("local-db", cfg.DBPath, fmt.Sprintf("the local package database could not be read (%v), so already-installed "+
-			"dependencies cannot be told from missing ones and the closure may be larger than it needs to be", err))
+		out[name] = base
 	}
+	return out, nil
+}
 
-	type queued struct {
-		pkgbase string
-		via     string
-		depth   int
+// repoIndex loads the binary-repository index and records its shortfalls.
+//
+// An empty index is a gap even when nothing errored: with no repository names
+// every repo dependency looks like a missing AUR package and vice versa, so the
+// closure that follows may fetch or skip the wrong members.
+func repoIndex(syncPath string, res *finding.Result) gate.RepoSet {
+	repo, gaps := gate.SyncIndex(syncPath)
+	for _, g := range gaps {
+		res.Gaps = append(res.Gaps, finding.Gap{RuleID: "sync-coverage", Subject: g.Subject, Reason: g.Reason})
 	}
-	queue := []queued{{pkgbase: cfg.Root}}
-	seen := map[string]bool{cfg.Root: true}
-	var nodes []closureNode
+	if len(repo.Names) == 0 {
+		res.Gaps = append(res.Gaps, finding.Gap{
+			RuleID:  "sync-coverage",
+			Subject: syncPath,
+			Reason: "no repository package names were loaded, so this closure cannot tell a repository dependency " +
+				"from an AUR one and may fetch or skip the wrong members",
+		})
+	}
+	return repo
+}
 
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
+// closureRuleNames maps the walk's rule identifiers onto install's own, so this
+// command reports one vocabulary whatever resolves its closure. Both names are
+// carried: the mapped id leads, and the walk's own id stays in the reason so a
+// gap here and the same gap under `review` can still be tied together.
+var closureRuleNames = map[string]string{
+	gate.RuleDepUnresolved:    ruleDepUnresolved,
+	gate.RuleLookupFailed:     ruleDepUnresolved,
+	gate.RuleNoResolver:       ruleDepUnresolved,
+	gate.RuleTruncated:        ruleClosureBounded,
+	gate.RuleFanOut:           ruleClosureBounded,
+	gate.RuleDepthBound:       ruleClosureBounded,
+	gate.RuleRecipeUnreadable: ruleFetchFailed,
+	gate.RuleDepsUnreadable:   ruleSrcinfoMissing,
+}
 
-		files, err := cfg.Src.Fetch(ctx, cur.pkgbase)
-		if err != nil {
-			gap(ruleFetchFailed, cur.pkgbase, fmt.Sprintf("the recipe for this closure member could not be "+
-				"retrieved, so it was not reviewed: %v", err))
-			continue
-		}
-		if err := stageRecipe(cfg.Stage, cur.pkgbase, files); err != nil {
-			gap(ruleFetchFailed, cur.pkgbase, fmt.Sprintf("the recipe could not be staged for review: %v", err))
-			continue
-		}
-		node := closureNode{PkgBase: cur.pkgbase, Depth: cur.depth, Via: cur.via}
-
-		// Dependencies come from the .SRCINFO the AUR ships beside the recipe,
-		// which is makepkg's own declaration and needs no bash evaluation.
-		si, err := pkgmeta.ParseSRCINFO(strings.NewReader(string(files[".SRCINFO"])), pkgmeta.Limits{})
-		if err != nil {
-			gap(ruleSrcinfoMissing, cur.pkgbase, fmt.Sprintf("the .SRCINFO could not be read (%v), so this member's "+
-				"dependencies are unknown and the closure below it was not walked", err))
-			nodes = append(nodes, node)
-			continue
-		}
-
-		var wanted []string
-		for _, d := range si.Deps(pkgmeta.DepRun, pkgmeta.DepMake, pkgmeta.DepCheck) {
-			if d.Name == "" || syncNames[d.Name] || installed[d.Name] {
+// closureGaps translates the walk's coverage gaps into install's vocabulary.
+//
+// gate.RuleRecipeUnavailable for a member the fetcher already failed on is
+// DROPPED, and only then: the fetcher's gap names the same node with the actual
+// transport error, and two gaps for one fact inflate the count the prompt puts
+// in front of the operator.
+func closureGaps(c gate.Closure, s *stagingSource) []finding.Gap {
+	var out []finding.Gap
+	for _, g := range c.Gaps {
+		if g.RuleID == gate.RuleRecipeUnavailable {
+			if _, failed := s.failed[g.Subject]; failed {
 				continue
 			}
-			if !containsString(wanted, d.Name) {
-				wanted = append(wanted, d.Name)
-			}
 		}
-		sort.Strings(wanted)
-
-		if len(wanted) > 0 {
-			info, err := cfg.Client.Info(ctx, wanted)
-			if err != nil {
-				gap(ruleDepUnresolved, cur.pkgbase, fmt.Sprintf("the AUR index could not be queried for %d "+
-					"unsatisfied dependency name(s) (%v), so it is unknown whether they are AUR packages needing "+
-					"review: %s", len(wanted), err, strings.Join(wanted, " ")))
-				wanted = nil
-			}
-			for _, name := range wanted {
-				p, ok := info[name]
-				if !ok {
-					gap(ruleDepUnresolved, name, fmt.Sprintf("dependency of %s: neither an installed package, nor a "+
-						"repository package, nor an AUR package this tool could find (it may be a virtual provide, "+
-						"which this closure does not resolve); nothing about it was reviewed", cur.pkgbase))
-					continue
-				}
-				// Keyed on the BASE, not the name: one recipe builds several
-				// packages, and reviewing the same base once per package name
-				// would review it twice and prompt twice.
-				base := p.PackageBase
-				if base == "" {
-					base = p.Name
-				}
-				node.Children = append(node.Children, base)
-				if seen[base] {
-					continue
-				}
-				if len(seen) >= maxNodes {
-					gap(ruleClosureBounded, cur.pkgbase, fmt.Sprintf("the closure exceeds the %d-member review "+
-						"bound at dependency %q; the remainder was not fetched or reviewed", maxNodes, base))
-					continue
-				}
-				if cur.depth+1 > maxClosureDepth {
-					gap(ruleClosureBounded, cur.pkgbase, fmt.Sprintf("the closure is deeper than %d levels at "+
-						"dependency %q; the remainder was not fetched or reviewed", maxClosureDepth, base))
-					continue
-				}
-				seen[base] = true
-				queue = append(queue, queued{pkgbase: base, via: name, depth: cur.depth + 1})
-			}
+		if mapped, ok := closureRuleNames[g.RuleID]; ok {
+			g = finding.Gap{RuleID: mapped, Subject: g.Subject, Reason: g.Reason + " [" + g.RuleID + "]"}
 		}
-		nodes = append(nodes, node)
+		out = append(out, g)
 	}
-	return nodes, gaps
+	// Per-node gaps from the walk's own read are NOT merged: every staged
+	// recipe is reviewed again below by reviewer.review, which raises the same
+	// shortfalls against the same files. Merging both would double-count them.
+	return out
+}
+
+// closureNodes projects the closure's AUR members into the JSON shape this
+// command publishes. Only AUR members appear: a repository dependency is
+// pacman's business and was neither fetched nor reviewed.
+func closureNodes(c gate.Closure) []closureNode {
+	var out []closureNode
+	for _, n := range c.Nodes {
+		if n.Kind != gate.KindAUR {
+			continue
+		}
+		node := closureNode{PkgBase: n.PkgBase, Depth: n.Depth}
+		for _, name := range n.Names {
+			if name != n.PkgBase {
+				node.Via = name
+				break
+			}
+		}
+		for _, e := range n.Deps {
+			if e.To == "" {
+				continue
+			}
+			if to, ok := c.Node(e.To); ok && to.Kind == gate.KindAUR && !containsString(node.Children, to.Key) {
+				node.Children = append(node.Children, to.Key)
+			}
+		}
+		out = append(out, node)
+	}
+	return out
 }
 
 // stageRecipe writes one recipe's files into the staging root.

@@ -1,0 +1,28 @@
+#  NOT ENABLED BY THE PACKAGE. `systemctl enable --now aurvet-scan.timer`.
+
+[Unit]
+Description=Daily aurvet local sweep
+Documentation=man:aurvet(1)
+
+[Timer]
+Unit=aurvet-scan.service
+OnCalendar=daily
+
+#  A laptop is asleep at 03:00 most nights. Without Persistent= the scan simply
+#  never runs on the machines that most need it, and the timer looks healthy the
+#  whole time. With it, a missed run fires shortly after the next boot.
+Persistent=true
+
+#  Spread the load so a suspend-resume storm of machines does not all start
+#  hashing at once. FixedRandomDelay= makes each machine's offset stable
+#  (derived from the machine ID) instead of jittering every day, so an operator
+#  can still tell "it did not run" from "it has not run yet".
+RandomizedDelaySec=1h
+FixedRandomDelay=true
+
+#  The exact minute is irrelevant for a daily sweep and a loose accuracy lets
+#  systemd coalesce the wakeup with others.
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

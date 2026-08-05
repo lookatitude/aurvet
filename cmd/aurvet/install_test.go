@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,6 +266,167 @@ func TestInstallReviewsTheWholeDependencyClosure(t *testing.T) {
 	}
 	if strings.Contains(out, "recipe glibc") {
 		t.Errorf("a repository dependency was fetched from the AUR:\n%s", out)
+	}
+}
+
+// TestCommandNeverImportsExec mirrors internal/gate's guard, one level up.
+//
+// install ends by handing a directory to something that will run makepkg over
+// it, and the ratified decision is that aurvet is not that something: it reviews
+// and hands over (INV-2). The moment this package can exec, "install never
+// builds" is a sentence in a comment rather than a property of the binary.
+// Test files are exempt -- build_test.go runs `go build` on purpose.
+func TestCommandNeverImportsExec(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parse package: %v", err)
+	}
+	seen := 0
+	for _, pkg := range pkgs {
+		for name, file := range pkg.Files {
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			seen++
+			for _, imp := range file.Imports {
+				if p := strings.Trim(imp.Path.Value, `"`); p == "os/exec" || p == "syscall/js" {
+					t.Errorf("%s imports %q; install hands a directory over, it does not run anything", name, p)
+				}
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("parsed no non-test files; this assertion would pass vacuously")
+	}
+}
+
+// TestInstallClosureCutsACycleAndSaysSo pins the shared walk (internal/gate's
+// ReviewClosure) rather than a second implementation of it. install's own
+// walker terminated on a cycle by way of its seen-set and said NOTHING about
+// it, so a dependency edge that was never followed looked identical to one that
+// did not exist -- which is the difference between a closure that was reviewed
+// and one that merely finished.
+func TestInstallClosureCutsACycleAndSaysSo(t *testing.T) {
+	src := &fakeSource{recipes: map[string]map[string][]byte{
+		"foo": recipe("foo", "bar"),
+		"bar": recipe("bar", "foo"),
+	}}
+	opts, _, _ := installFixture(t, src, "no")
+	opts.cl = aur.Fake{Known: map[string]aur.Pkg{
+		"foo": {Name: "foo", PackageBase: "foo"},
+		"bar": {Name: "bar", PackageBase: "bar"},
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := runInstall(opts, &stdout, &stderr)
+	out := stdout.String()
+	if !strings.Contains(out, "closure-cycle-cut") {
+		t.Errorf("the cycle was cut silently; a walk that stopped must say where:\n%s", out)
+	}
+	if code == exitClean {
+		t.Errorf("run = 0 with a cut cycle in the closure")
+	}
+	// Each recipe is still fetched exactly once: a cycle must terminate, not
+	// re-review.
+	if len(src.fetched) != 2 {
+		t.Errorf("fetched = %v, want foo and bar exactly once each", src.fetched)
+	}
+}
+
+// TestInstallReviewsAnAURDependencyThatIsAlreadyInstalled: an AUR package being
+// present in the local database is not evidence about the recipe that is about
+// to be BUILT. install's own walker skipped every dependency name it found in
+// /var/lib/pacman/local, so a stale installed AUR dependency -- which the helper
+// will rebuild from a recipe fetched today -- was never read. The shared walk
+// dismisses a name only when a SIGNED repository carries it.
+func TestInstallReviewsAnAURDependencyThatIsAlreadyInstalled(t *testing.T) {
+	src := &fakeSource{recipes: map[string]map[string][]byte{
+		"foo": recipe("foo", "bar"),
+		"bar": recipe("bar"),
+	}}
+	opts, root, _ := installFixture(t, src, "no")
+	writeInstalledPackage(t, root, "bar", "1.0-1")
+	opts.cl = aur.Fake{Known: map[string]aur.Pkg{"bar": {Name: "bar", PackageBase: "bar"}}}
+
+	var stdout, stderr bytes.Buffer
+	runInstall(opts, &stdout, &stderr)
+	if !containsString(src.fetched, "bar") {
+		t.Errorf("an installed AUR dependency was never fetched or reviewed: fetched = %v", src.fetched)
+	}
+	if !strings.Contains(stdout.String(), "pkgbase bar") {
+		t.Errorf("the installed AUR dependency was not reviewed:\n%s", stdout.String())
+	}
+}
+
+// TestInstallEscalatesOnACleanRootWithAMaliciousDependency is the attack this
+// whole command exists for, asserted end to end: the package the operator typed
+// is unremarkable, and the payload is one level down in a makedepend. A gate
+// that reports the root's verdict has reported nothing.
+func TestInstallEscalatesOnACleanRootWithAMaliciousDependency(t *testing.T) {
+	clean := map[string][]byte{
+		"PKGBUILD": []byte("pkgbase=foo\npkgname=foo\npkgver=1.0\npkgrel=1\narch=('x86_64')\n" +
+			"source=()\nsha256sums=()\npackage() {\n  install -dm755 \"$pkgdir/usr/share/foo\"\n}\n"),
+		".SRCINFO": []byte("pkgbase = foo\n\tpkgver = 1.0\n\tmakedepends = evil\n\npkgname = foo\n"),
+	}
+	src := &fakeSource{recipes: map[string]map[string][]byte{"foo": clean, "evil": recipe("evil")}}
+	opts, _, _ := installFixture(t, src, "no")
+	opts.cl = aur.Fake{Known: map[string]aur.Pkg{"evil": {Name: "evil", PackageBase: "evil"}}}
+
+	var stdout, stderr bytes.Buffer
+	code := runInstall(opts, &stdout, &stderr)
+	out := stdout.String()
+	if !strings.Contains(out, "pkgbase evil") {
+		t.Fatalf("the malicious makedepend was never reviewed:\n%s", out)
+	}
+	if !strings.Contains(out, "[critical]") {
+		t.Errorf("a critical in a dependency did not reach the output:\n%s", out)
+	}
+	if code == exitClean {
+		t.Errorf("run = 0 with a critical rule hit in the closure")
+	}
+}
+
+// TestInstallUnfetchableDependencyIsOneGapWithTheRealReason: the AUR knows the
+// dependency and the recipe could not be retrieved. That is a gap (INV-9), it
+// must carry the transport error rather than "no recipe on this system", and it
+// must be reported ONCE -- the fetcher and the walk both notice the same absent
+// recipe, and two lines for one fact inflate the count the prompt shows.
+func TestInstallUnfetchableDependencyIsOneGapWithTheRealReason(t *testing.T) {
+	src := &fakeSource{recipes: map[string]map[string][]byte{"foo": recipe("foo", "gone")}}
+	opts, _, _ := installFixture(t, src, "no")
+	opts.cl = aur.Fake{Known: map[string]aur.Pkg{"gone": {Name: "gone", PackageBase: "gone"}}}
+
+	var stdout, stderr bytes.Buffer
+	code := runInstall(opts, &stdout, &stderr)
+	out := stdout.String()
+	if code != exitIncomplete {
+		t.Errorf("run = %d, want %d for a closure member that was never read", code, exitIncomplete)
+	}
+	if n := strings.Count(out, ruleFetchFailed); n != 1 {
+		t.Errorf("%s appears %d time(s), want exactly 1:\n%s", ruleFetchFailed, n, out)
+	}
+	if !strings.Contains(out, errNoSuchRecipe.Error()) {
+		t.Errorf("the gap does not carry the reason the recipe was not retrieved:\n%s", out)
+	}
+	if strings.Contains(out, "closure-recipe-unavailable") {
+		t.Errorf("the same absent recipe was reported twice:\n%s", out)
+	}
+}
+
+// writeInstalledPackage adds one entry to a fixture local package database.
+func writeInstalledPackage(t *testing.T, root, name, version string) {
+	t.Helper()
+	dir := filepath.Join(root, "var/lib/pacman/local", name+"-"+version)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "desc"),
+		[]byte("%NAME%\n"+name+"\n\n%VERSION%\n"+version+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "files"), []byte("%FILES%\nusr/bin/"+name+"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

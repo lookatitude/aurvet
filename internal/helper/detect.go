@@ -425,9 +425,7 @@ func (d *Detection) detectOne(root *os.Root, fsys fs.FS, cacheDir string, l Layo
 				"remaining clones were not examined", l.Name, lim.MaxClones),
 		})
 	}
-	for _, s := range skipped {
-		d.Gaps = append(d.Gaps, s)
-	}
+	d.Gaps = append(d.Gaps, skipped...)
 	if len(clones) == 0 {
 		d.Gaps = append(d.Gaps, finding.Gap{
 			RuleID:  RuleCacheEmpty,

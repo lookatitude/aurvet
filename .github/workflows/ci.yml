@@ -81,6 +81,45 @@ jobs:
           fi
           echo "toolchain matches the pin: $got"
 
+      # The pinning rule at the top of this file, enforced instead of asserted in
+      # a comment. Every `uses:` in every workflow must name a 40-hex commit,
+      # never a tag or a branch: a supply-chain tool that consumed mutable refs
+      # would be called out for it, correctly. The trailing `# vX.Y.Z` comment is
+      # also required, because a bare SHA is unreviewable.
+      #
+      # This is a real gate: it was proven to fail by rewriting one pin to
+      # `actions/checkout@v7` in a scratch copy.
+      - name: every action is pinned by commit SHA
+        run: |
+          set -euo pipefail
+          bad=0
+          # The grep is ANCHORED to real `uses:` KEYS. An unanchored one also
+          # matched the sed patterns inside this very script, and the gate
+          # reported four phantom violations against itself -- measured.
+          while IFS= read -r line; do
+            file="${line%%:*}"
+            ref="$(printf '%s\n' "$line" | sed -n 's/.*uses:[[:space:]]*[^@]*@\([^[:space:]]*\).*/\1/p')"
+            comment="$(printf '%s\n' "$line" | sed -n 's/.*#[[:space:]]*\(v[0-9][^[:space:]]*\).*/\1/p')"
+            case "$ref" in
+              [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+              *)
+                echo "NOT A COMMIT SHA in $file: $ref"
+                bad=1
+                continue
+                ;;
+            esac
+            if [ -z "$comment" ]; then
+              echo "PIN WITHOUT A VERSION COMMENT in $file: $ref"
+              bad=1
+              continue
+            fi
+            echo "  ok $file  $ref  ($comment)"
+          done <<< "$(grep -rnE '^[[:space:]]*(- )?uses:[[:space:]]' .github/workflows/)"
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::every 'uses:' must be pinned to a 40-hex commit SHA with a '# vX.Y.Z' comment"
+            exit 1
+          fi
+
       - name: build
         run: make build
 
@@ -181,3 +220,389 @@ jobs:
 
       - name: version identity of this build
         run: make version
+
+      # `go mod verify` checks that every module in the module cache still
+      # hashes to what go.sum records. With a vendor/ directory the compiler
+      # never consults the cache, so this is not the load-bearing check here --
+      # `go mod vendor` reproducibility and the vendor/go.mod cross-check above
+      # are -- but spec §16 names it and it costs nothing.
+      - name: go mod verify
+        run: |
+          set -euo pipefail
+          go mod verify
+
+      # The static analysers. Each is pinned to an EXACT version and installed
+      # with `go install pkg@version`, which is module-agnostic: measured, it
+      # leaves go.mod and go.sum untouched, so the zero-dependency policy above
+      # is unaffected by the tooling. GOBIN is explicit so the steps below do
+      # not depend on where the runner puts $GOPATH/bin.
+      #
+      # A tool that fails FAILS THE JOB. None of these run with `|| true`: a
+      # scanner whose output nobody has to act on is decoration, and this
+      # project's whole subject is controls that report success while checking
+      # nothing.
+      # GOTOOLCHAIN=local is load-bearing, not tidiness. Each analyser's own
+      # go.mod carries a `toolchain` directive, and without this Go honours it and
+      # builds the tool with THAT toolchain -- staticcheck v0.7.0 builds itself
+      # with go1.25.4 even on a go1.26.5 host. A type-checker built with an older
+      # Go cannot parse the newer standard library it is pointed at, and reports
+      # it as a compile error against a file nobody here wrote:
+      #
+      #   -: /usr/lib/go/src/vendor/.../fips140only_go1.26.go:7:9:
+      #      file requires newer Go version go1.26 (application built with go1.25)
+      #
+      # That is a non-zero exit, so the job fails for a reason unrelated to this
+      # repository, and the obvious "fix" is to append `|| true` and lose the
+      # gate. Building each analyser with the toolchain pinned in go.mod keeps the
+      # analyser and the code under analysis on the same Go.
+      - name: install pinned analysers
+        run: |
+          set -euo pipefail
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+          # Fail loudly if a tool came out on a different Go than the one the
+          # module pins, rather than discovering it as a phantom stdlib error.
+          want="$(go env GOVERSION)"
+          for t in staticcheck govulncheck gosec; do
+            got="$(go version "${{ github.workspace }}/.citools/$t" | awk '{print $2}')"
+            printf '%-14s built with %s\n' "$t" "$got"
+            case "$got" in
+              "$want"*) ;;
+              *) echo "::error::$t was built with $got but the module pins $want; a type-checker older than the stdlib it parses reports phantom compile errors"; exit 1 ;;
+            esac
+          done
+        env:
+          GOBIN: ${{ github.workspace }}/.citools
+          GOTOOLCHAIN: local
+
+      - name: staticcheck
+        run: ${{ github.workspace }}/.citools/staticcheck ./...
+
+      - name: govulncheck
+        run: ${{ github.workspace }}/.citools/govulncheck ./...
+
+      # gosec, with an EXPLICIT exclusion list rather than a severity floor.
+      #
+      # Read this before adding a rule to it. Each ID below is excluded because
+      # the pattern it names is structural to what aurvet is, and every one of
+      # them is currently reported somewhere in this tree:
+      #
+      #   G104  unhandled error -- almost all of it is `f.Close()` on a
+      #         read-only descriptor after the read succeeded.
+      #   G304  file inclusion via variable -- opening caller-named paths IS the
+      #         program. Every such open goes through internal/fsx.OpenConfined
+      #         (os.Root-confined, O_NOFOLLOW, fstat-after-open), which is a
+      #         stronger control than gosec can see.
+      #   G115  integer conversion overflow -- syscall struct fields in
+      #         internal/privdrop and git object headers in internal/vcs.
+      #   G103  use of unsafe -- capset/prctl marshalling in internal/privdrop.
+      #   G401/G505  sha1 -- git object names ARE sha1. Not a security choice.
+      #   G302  file permissions -- report and snapshot stores are 0644 by
+      #         design; they are evidence to be read, not secrets.
+      #   G101  "hardcoded credentials" -- a false positive on the rule ID
+      #         constant `ruleCredential` in internal/check/pkgbuild.go.
+      #
+      # Everything else gates, including the rules that matter most to this
+      # project's own invariants: G204 (subprocess launched with a variable) is
+      # INV-2 expressed as a lint, and it is NOT excluded.
+      #
+      # This exclusion list is a KNOWN GAP, not a clean bill of health: the
+      # honest fix is a reviewed `//nosec` with a justification at each of the
+      # 53 sites, which is tracked in docs/RELEASING.md rather than implied to
+      # be done.
+      - name: gosec
+        run: |
+          set -euo pipefail
+          ${{ github.workspace }}/.citools/gosec -quiet \
+            -exclude=G101,G103,G104,G115,G302,G304,G401,G505 ./...
+
+  # ---------------------------------------------------------------------------
+  # The packaging gate: aurvet's own PKGBUILD, judged by aurvet's own rules,
+  # then actually built in a clean Arch container and inspected by namcap.
+  # ---------------------------------------------------------------------------
+  #
+  # Why a container rather than devtools' makechrootpkg: a GitHub runner's
+  # container job cannot nest systemd-nspawn without privileges the runner does
+  # not grant. A freshly pulled archlinux:base-devel with only the declared
+  # makedepends installed provides the property the acceptance criterion is
+  # after -- that the package builds with nothing from a developer's machine
+  # present. Where it is weaker is stated rather than papered over: it is not a
+  # devtools chroot, so it does not prove the build works against the exact
+  # [core]/[extra] snapshot devtools would pin. `pkgctl build` before an AUR push
+  # remains in docs/RELEASING.md as the maintainer's step.
+  #
+  # The image tag is deliberately NOT pinned by digest, which is a departure
+  # from this file's action-pinning rule and needs its reason on the record: a
+  # rolling-release image pinned by digest drifts out of sync with its own
+  # package repositories, and `pacman -Syu` against a months-old snapshot is a
+  # partial upgrade -- the one operation Arch documents as unsupported and
+  # breaking. What replaces the pin is pacman's own signature verification of
+  # every package it installs. The residual exposure is the base image itself,
+  # and it is real. Digest at the time of writing, for reference:
+  # sha256:c1829f370be8434135f43fb3acaef1256780804ac3b2d2eec90dfb1232e1ffdf
+  package:
+    name: self-gate · .SRCINFO · namcap · clean-container build
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # Before checkout: base-devel carries no git, and without it
+      # actions/checkout silently falls back to a tarball download, leaving no
+      # repository for `git archive` (which is how the release tarball is made --
+      # never GitHub's auto-generated archive, spec §16) and no tags for the
+      # checksum assertion below.
+      - name: install the toolchain this job needs
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed git go scdoc namcap jq
+          go version
+
+      # fetch-depth 0 so tags are present: the sha256sums assertion below is a
+      # different assertion depending on whether this version's tag exists, and
+      # a shallow clone would make it depend on the fetch depth instead of on
+      # reality.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: trust the workspace and read the recipe's version
+        id: recipe
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # Parsed, never sourced. Nothing in CI executes a PKGBUILD (INV-2),
+          # and that includes this project's own.
+          pkgver="$(sed -n "s/^pkgver=//p" PKGBUILD)"
+          test -n "$pkgver"
+          echo "pkgver=$pkgver" >> "$GITHUB_OUTPUT"
+          echo "recipe version: $pkgver"
+
+      # -----------------------------------------------------------------------
+      # THE SELF-GATE (roadmap P3 task 4)
+      # -----------------------------------------------------------------------
+      # aurvet's own PKGBUILD must pass aurvet's own rules. This is not a joke
+      # at the project's expense: the property being tested is that vendor/ is
+      # complete. Drop vendoring and build() must run `go mod download`, which
+      # trips aurvet's own CRITICAL `pkgbuild-build-network-fetch` on aurvet's
+      # own recipe. Verified by construction: a curl added to build() produced
+      # exactly that finding and exit 1, and removing it restored exit 0.
+      #
+      # EXIT-CODE POLICY, chosen deliberately -- "no findings at or above the
+      # default floor; coverage gaps are allowed and printed":
+      #
+      #   `review` exits 3 for incomplete coverage and 3 OUTRANKS 1
+      #   (report.ExitCode returns 3 whenever the result is incomplete, before
+      #   it ever looks at severities). So a gate written as `exit != 0` fails
+      #   on ordinary, unavoidable gaps -- an eval in the recipe, an unreadable
+      #   helper cache -- and a gate written as `exit == 1` MISSES a critical
+      #   finding that arrives alongside any gap. Neither is usable.
+      #
+      # Therefore the verdict is read from the JSON: any finding at suspicious
+      # or critical fails the job; gaps are printed in full and do not. Demanding
+      # exit 0 was considered and rejected -- it makes the gate hostage to
+      # coverage shortfalls that are honest reporting rather than defects, and
+      # the first such gap would turn the gate permanently red, i.e. off.
+      - name: self-gate — aurvet reviews its own PKGBUILD
+        run: |
+          set -euo pipefail
+          set +e
+          GOTOOLCHAIN=local CGO_ENABLED=0 GOFLAGS="" \
+            go run -mod=vendor ./cmd/aurvet -json review . > selfgate.json
+          code=$?
+          set -e
+          echo "review exit code: $code"
+          case "$code" in
+            0 | 1 | 3) ;;
+            *)
+              echo "::error::aurvet review exited $code (usage/config error), so the self-gate did not run"
+              cat selfgate.json || true
+              exit 1
+              ;;
+          esac
+
+          jq '{findings: .findings, gaps: .gaps}' selfgate.json
+
+          blocking="$(jq '[.findings[]? | select(.severity == "suspicious" or .severity == "critical")] | length' selfgate.json)"
+          gaps="$(jq '[.gaps[]?] | length' selfgate.json)"
+          echo "findings at or above the default floor: $blocking"
+          echo "coverage gaps (reported, not fatal): $gaps"
+          if [ "$blocking" -ne 0 ]; then
+            echo "::error::aurvet's own PKGBUILD trips aurvet's own rules at or above the default floor"
+            jq -r '.findings[] | select(.severity == "suspicious" or .severity == "critical") | "[\(.severity)] \(.rule_id): \(.summary)"' selfgate.json
+            exit 1
+          fi
+          echo "self-gate: aurvet's own recipe passes aurvet's own rules"
+          rm -f selfgate.json
+
+      # -----------------------------------------------------------------------
+      # .SRCINFO sync
+      # -----------------------------------------------------------------------
+      # The AUR reads .SRCINFO, not the PKGBUILD, so a stale .SRCINFO means the
+      # AUR shows and resolves something other than what the recipe builds --
+      # different sources, different sums, different dependencies.
+      #
+      # makepkg --printsrcinfo DOES source the PKGBUILD. That is not an INV-2
+      # violation: INV-2 is about never executing an UNTRUSTED recipe, and this
+      # is the repository's own file, already reviewed above. No untrusted
+      # PKGBUILD is executed anywhere in CI.
+      - name: .SRCINFO is in sync with PKGBUILD
+        run: |
+          set -euo pipefail
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          sudo -u builder makepkg --printsrcinfo | tee /tmp/srcinfo.generated >/dev/null
+          if ! diff -u .SRCINFO /tmp/srcinfo.generated; then
+            echo "::error::.SRCINFO is stale — regenerate with 'makepkg --printsrcinfo > .SRCINFO'"
+            exit 1
+          fi
+          echo ".SRCINFO: in sync"
+
+      # -----------------------------------------------------------------------
+      # sha256sums must never be SKIP, and must be the real hash once tagged
+      # -----------------------------------------------------------------------
+      # SKIP on a fixed URL means the build accepts whatever the host serves --
+      # aurvet reports that at the default floor as `pkgbuild-skip-fixed-url`,
+      # so its own recipe must not do it, and the self-gate above would catch it.
+      # This step covers what the self-gate cannot see: whether the recorded
+      # hash is the RIGHT one.
+      #
+      # Before the tag exists the recipe carries an all-zero SENTINEL, which is
+      # not a hash and which makepkg rejects loudly; build() refuses outright.
+      # Once the tag exists the hash must equal the sha256 of that tag's `git
+      # archive` tarball, byte-for-byte what `make dist` uploads as the release
+      # asset. Both directions fail the job, so the sentinel cannot survive a
+      # release and a hand-edited hash cannot pass unchecked.
+      - name: source checksum matches the tagged tarball
+        env:
+          PKGVER: ${{ steps.recipe.outputs.pkgver }}
+        run: |
+          set -euo pipefail
+          sentinel="$(printf '0%.0s' $(seq 64))"
+          have="$(sed -n "s/^sha256sums=('\\(.*\\)')\$/\\1/p" PKGBUILD)"
+          if [ -z "$have" ]; then
+            echo "::error::could not read sha256sums from PKGBUILD"; exit 1
+          fi
+          case "$have" in
+            SKIP)
+              echo "::error::sha256sums=SKIP on a fixed URL — aurvet rates that suspicious on other people's recipes"
+              exit 1
+              ;;
+          esac
+
+          if git rev-parse -q --verify "refs/tags/v$PKGVER" >/dev/null; then
+            commit="$(git rev-parse "refs/tags/v$PKGVER^{commit}")"
+            # Reproduces `make dist` exactly: git archive + gzip -n.
+            want="$(git archive --format=tar --prefix="aurvet-$PKGVER/" "$commit" | gzip -n | sha256sum | cut -d' ' -f1)"
+            if [ "$have" != "$want" ]; then
+              echo "::error::sha256sums does not match the v$PKGVER release tarball"
+              echo "  PKGBUILD records: $have"
+              echo "  git archive of v$PKGVER: $want"
+              exit 1
+            fi
+            echo "sha256sums matches the v$PKGVER tarball: $want"
+          else
+            if [ "$have" != "$sentinel" ]; then
+              echo "::error::tag v$PKGVER does not exist, so sha256sums must still be the all-zero sentinel"
+              echo "  found: $have"
+              exit 1
+            fi
+            echo "v$PKGVER is unreleased; sha256sums correctly carries the unpublished sentinel"
+          fi
+
+      - name: namcap on the recipe
+        run: |
+          set -euo pipefail
+          out="$(sudo -u builder namcap PKGBUILD)"
+          printf '%s\n' "$out"
+          if [ -n "$out" ]; then
+            echo "::error::namcap reported issues in PKGBUILD"
+            exit 1
+          fi
+          echo "namcap PKGBUILD: clean"
+
+      # -----------------------------------------------------------------------
+      # Build the package from a `git archive` tarball of the commit under test
+      # -----------------------------------------------------------------------
+      # Two substitutions are made in a COPY of the recipe, and both are stated
+      # in the log:
+      #
+      #   _commit  the recipe refuses to build with the sentinel (it would ship
+      #            a binary reporting commit 000000000000). CI substitutes the
+      #            commit actually under test, which is what a release does with
+      #            the tagged commit.
+      #   --skipchecksums  the tarball is built here from this commit, so it is
+      #            not the published artifact and cannot match a published hash.
+      #            The published hash is asserted by the step above instead --
+      #            this is not a checksum check being skipped quietly.
+      - name: clean-container build from a git-archive tarball
+        env:
+          PKGVER: ${{ steps.recipe.outputs.pkgver }}
+        run: |
+          set -euo pipefail
+          work=/tmp/build
+          mkdir -p "$work"
+          cp PKGBUILD .SRCINFO "$work/"
+          git archive --format=tar --prefix="aurvet-$PKGVER/" HEAD | gzip -n > "$work/aurvet-$PKGVER.tar.gz"
+          sha256sum "$work/aurvet-$PKGVER.tar.gz"
+
+          commit="$(git rev-parse HEAD)"
+          sed -i "s|^_commit='0\\{40\\}'|_commit='$commit'|" "$work/PKGBUILD"
+          grep '^_commit=' "$work/PKGBUILD"
+
+          chown -R builder:builder "$work"
+          cd "$work"
+          # check() runs: it asserts the injected version identity and runs the
+          # full test suite, which includes TestBinaryIsStaticallyLinked. A
+          # package build that skips its own linkage assertion is the one place
+          # that assertion matters most.
+          sudo -u builder makepkg -f --noconfirm --skipchecksums
+          ls -l "$work"/*.pkg.tar.*
+
+      # -----------------------------------------------------------------------
+      # namcap on the built package, with an EXPLICIT allow-list
+      # -----------------------------------------------------------------------
+      # Spec §16: namcap warnings about the static build are "suppressed
+      # explicitly, never silenced". These three are the direct, measured
+      # consequence of CGO_ENABLED=0 + options=('!strip') and each is documented
+      # in the PKGBUILD header:
+      #
+      #   lacks FULL RELRO / lacks PIE   no dynamic linker, so no RELRO and no
+      #                                  PIE. The reason is in the PKGBUILD: a
+      #                                  dynamically-linked aurvet can be
+      #                                  subverted by ld.so.preload before it
+      #                                  can report on ld.so.preload.
+      #   is unstripped                  decision D-2. Stripping would change
+      #                                  the bytes the release hashed.
+      #
+      # Anything else namcap says fails the job. Nothing is filtered by
+      # severity, and there is no `|| true`.
+      - name: namcap on the built package
+        run: |
+          set -euo pipefail
+          out="$(sudo -u builder namcap /tmp/build/*.pkg.tar.*)"
+          printf '%s\n' "$out"
+          unexpected="$(printf '%s\n' "$out" \
+            | grep -v -e 'lacks FULL RELRO' -e 'is unstripped' -e 'lacks PIE' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::namcap reported something that is not on the acknowledged allow-list"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          echo "namcap: only the three acknowledged static-linkage notes"
+
+      # The packaged binary is the one that was built ('!strip'), so its linkage
+      # is assertable here and not only in the Go test. A dynamic section or a
+      # PT_INTERP would mean the PKGBUILD's central comment has become false.
+      - name: the packaged binary is still static
+        run: |
+          set -euo pipefail
+          bin=/tmp/build/pkg/aurvet/usr/bin/aurvet
+          test -x "$bin"
+          if readelf -l "$bin" | grep -q INTERP; then
+            echo "::error::the packaged binary has a PT_INTERP"; exit 1
+          fi
+          if readelf -d "$bin" 2>/dev/null | grep -q NEEDED; then
+            echo "::error::the packaged binary has DT_NEEDED entries"; exit 1
+          fi
+          echo "no PT_INTERP, no DT_NEEDED"
+          "$bin" version

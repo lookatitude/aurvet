@@ -54,6 +54,11 @@ func TestRunContainsPanicAndNamesTheSubject(t *testing.T) {
 // and panic(nil) is a *runtime.PanicNilError since Go 1.21. Neither may escape.
 func TestRunContainsRuntimePanics(t *testing.T) {
 	cases := map[string]func() error{
+		// The nil-map write is the point of the case, not a mistake: it is one of
+		// the runtime panics a parser can raise on hostile input, and this test
+		// exists to prove Run contains it. staticcheck's SA5000 is correct that
+		// the write always panics -- that is what is being tested.
+		//lint:ignore SA5000 the guaranteed panic is the subject under test
 		"nil-map-write":  func() error { var m map[string]int; m["x"] = 1; return nil },
 		"index-range":    func() error { s := []byte{}; _ = s[3]; return nil },
 		"nil-deref":      func() error { var p *int; _ = *p; return nil },

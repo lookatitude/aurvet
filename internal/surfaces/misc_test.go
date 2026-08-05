@@ -101,14 +101,6 @@ func miscSubjects(fs []finding.Finding) []string {
 	return out
 }
 
-func miscGapSubjects(res finding.Result) []string {
-	out := make([]string, 0, len(res.Gaps))
-	for _, g := range res.Gaps {
-		out = append(out, g.Subject)
-	}
-	return out
-}
-
 func miscDescribe(res finding.Result) string {
 	var b strings.Builder
 	for _, f := range res.Findings {

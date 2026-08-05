@@ -1,0 +1,85 @@
+#  aurvet-update.service -- the network half, and only the network half.
+#
+#  NOT ENABLED BY THE PACKAGE (Arch policy; no .install touches systemctl):
+#
+#      systemctl enable --now aurvet-update.timer
+#
+#  The split from aurvet-scan.service is the point. The scan runs in an empty
+#  network namespace so a subverted parser cannot exfiltrate; therefore anything
+#  needing the network has to live somewhere else, and this is it. The
+#  complementary restriction applies here: this unit needs the network and
+#  almost nothing else, so it gets no capabilities at all and cannot read homes.
+
+[Unit]
+Description=aurvet indicator bundle and AUR provenance refresh
+Documentation=man:aurvet(1)
+Documentation=https://github.com/lookatitude/aurvet
+
+#  Same reasoning as the scan unit: 1 and 3 are contractual results that systemd
+#  shows as `failed` and reports to nobody. SuccessExitStatus= would silence
+#  them; OnFailure= delivers them. See aurvet-failure@.service.
+OnFailure=aurvet-failure@%n.service
+OnFailureJobMode=replace
+
+[Service]
+Type=oneshot
+
+#  The `update` subcommand ships in P5 (indicator bundle, root key set,
+#  delegation). Until then this unit is INERT BY CONSTRUCTION rather than
+#  broken: ExecCondition= asks the installed binary which subcommands it has,
+#  and a condition that exits non-zero marks the unit `skipped`, not `failed` --
+#  so no notification fires and nothing claims an update happened. When a
+#  release ships `update`, the same condition starts passing with no edit here.
+#
+#  `aurvet` with no operands prints its subcommand list on stderr and exits 2.
+#  Parsing that is cheap and, unlike a version comparison, cannot go stale.
+ExecCondition=/bin/sh -c '/usr/bin/aurvet 2>&1 | grep -qw update'
+
+#  Never automatic beyond this: the timer is opt-in, and `update` refuses to
+#  install anything it cannot verify against the embedded root key set.
+ExecStart=/usr/bin/aurvet update
+
+#  The bundle cache and the anti-rollback version floor live in root-only state.
+StateDirectory=aurvet
+StateDirectoryMode=0700
+
+#  ---- network-only ----------------------------------------------------------
+
+#  PrivateNetwork is deliberately NOT set here, and its absence is asserted by
+#  units_test.go so nobody "harmonises" the two units and silently disables
+#  updates. This is the one unit allowed out.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+#  It fetches bytes and verifies signatures. That needs no capability
+#  whatsoever, so it gets none -- an empty bounding set, not a smaller one.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+#  Nothing to read outside its own state: no homes at all (contrast the scan
+#  unit, which needs read-only homes for XDG autostart), and no /proc of others.
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateUsers=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+
+#  A refusal to fetch is not a reason to hang a boot or hammer a mirror.
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=10min
