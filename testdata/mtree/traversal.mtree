@@ -1,0 +1,4 @@
+#mtree
+/set type=file mode=644
+./usr/bin/ok time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./usr/../../etc/shadow time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51

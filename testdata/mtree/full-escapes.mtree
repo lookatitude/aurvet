@@ -1,0 +1,22 @@
+#mtree
+# Every vis(3) escape form this parser accepts, in the position pacman puts
+# them: the path field and the link= value. The octal forms are the only ones
+# pacman actually writes (measured: 669 backslashes across 1409 installed
+# mtrees, all octal). The rest are here because unvis(3) defines them and an
+# AUR package's mtree was generated on the machine that built it.
+#
+# The NUL forms (\0, \^@) are absent on purpose: they decode correctly but no
+# path can contain NUL, so ValidatePath refuses the record. Their decoding is
+# covered in unvis_test.go, where it is not also a path.
+/set type=file uid=0 gid=0 mode=644
+./octal/Librem\0405.conf time=1781523786.0 size=700 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./octal/\043hash time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./octal/\133bracket time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./octal/back\134slash time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./octal/utf8-\303\236 time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./octal/short-\40-and-\377 time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./named/\a\b\E\f\n\r\s\t\v time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./ctrl/\^A\^D\^_\^? time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./meta/\M-A\M^A\M^? time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./end/marker\$ time=1.0 size=1 sha256digest=5326b590a6f015c7fccde8a1e14c1a02b0b62c67e2e0f7f19a17a4e6ba0c7d51
+./link/escaped time=1.0 type=link link=../../NXP/iMX8/Librem\0405\040Devkit.conf

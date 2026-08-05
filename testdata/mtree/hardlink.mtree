@@ -1,0 +1,5 @@
+#mtree
+/set type=file mode=755
+./usr/bin/tool time=1.0 size=4096 sha256digest=6d42b31c0dd39983d06d143ff28fa278c4b52c3513fa030d5076adef6d5f0f12
+./usr/bin/tool-alias time=1.0 size=4096 sha256digest=6d42b31c0dd39983d06d143ff28fa278c4b52c3513fa030d5076adef6d5f0f12
+./usr/bin/tool-symlink time=1.0 mode=777 type=link link=tool

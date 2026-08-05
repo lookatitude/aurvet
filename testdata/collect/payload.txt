@@ -1,0 +1,2 @@
+aurvet testdata/collect payload
+Inert bytes with a stable digest. Not code, not configuration.

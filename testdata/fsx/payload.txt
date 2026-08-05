@@ -1,0 +1,2 @@
+aurvet fsx fixture payload
+this file is inert plain text; its only job is to have a stable sha256

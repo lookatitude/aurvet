@@ -2,7 +2,7 @@ module github.com/lookatitude/aurvet
 
 // Floor is 1.24 for os.Root, the traversal-resistant file API used by the
 // P1-B collector. Arch currently ships 1.26.x.
-go 1.24
+go 1.24.0
 
 // Reproducibility is a security property here, not a nicety: spec §16 makes
 // reproducible builds the answer to "why should anyone trust a security tool
@@ -46,3 +46,5 @@ go 1.24
 // toolchain identity it used and reproduction requires a STOCK toolchain. See
 // docs/RELEASING.md.
 toolchain go1.26.5
+
+require golang.org/x/sys v0.41.0
