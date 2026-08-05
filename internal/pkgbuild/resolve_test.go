@@ -478,3 +478,49 @@ func TestLiveCorpusResolve(t *testing.T) {
 		t.Logf("unresolvable because %-40s %d", k, n)
 	}
 }
+
+// TestSourceEntrySplitMatchesMakepkg pins parseSourceEntry's "::" handling to
+// makepkg's, because the agreement is the requirement and the obvious "fix"
+// breaks it.
+//
+// makepkg's get_filename (/usr/share/makepkg/util/source.sh) is:
+//
+//	if [[ $netfile = *::* ]]; then printf "%s\n" "${netfile%%::*}"
+//
+// i.e. cut at the FIRST "::". The IPv6 case below is the one that tempts someone
+// into making this parser more correct than makepkg. Doing so would mean an
+// entry this package reads as host A while makepkg fetches host B -- trading an
+// admitted coverage gap for a confidently wrong verdict, which is the worse
+// direction for a scanner. The expectations here are makepkg's actual output,
+// verified against the installed copy, not what RFC 3986 would prefer.
+func TestSourceEntrySplitMatchesMakepkg(t *testing.T) {
+	// makepkgFilename reimplements the two branches of get_filename that matter
+	// here: the explicit "name::" separator, and -- when there is none -- the
+	// plain-URL fallback `filename="${netfile##*/}"` for a non-VCS protocol.
+	// The VCS branch strips fragments and ".git" and is not modelled; entries
+	// exercising it are marked below.
+	makepkgFilename := func(netfile string) string {
+		if i := strings.Index(netfile, "::"); i >= 0 {
+			return netfile[:i]
+		}
+		if i := strings.LastIndexByte(netfile, '/'); i >= 0 {
+			return netfile[i+1:]
+		}
+		return netfile
+	}
+
+	for _, entry := range []string{
+		"renamed.tar.gz::https://example.invalid/v1.tar.gz",
+		"http://[2001:db8::1]/x.tar.gz", // the tempting one: cut lands inside the authority
+		"foo::git+https://example.invalid/foo.git#tag=v1",
+		"https://example.invalid/plain.tar.gz", // no "::" at all
+		"a::b::c",                              // first wins, not last
+	} {
+		var s Source
+		parseSourceEntry(&s, entry)
+		if want := makepkgFilename(entry); s.Name != want {
+			t.Errorf("%q: Name = %q, makepkg's get_filename gives %q -- this parser must agree with the tool that fetches",
+				entry, s.Name, want)
+		}
+	}
+}

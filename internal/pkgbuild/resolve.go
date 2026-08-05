@@ -768,6 +768,35 @@ func arrayFor(f File, e *env, base, arch string) []Value {
 var vcsPrefixes = []string{"git", "hg", "svn", "bzr", "fossil"}
 
 // parseSourceEntry splits `name::proto+url#fragment` without fetching anything.
+//
+// The "::" cut is on the FIRST occurrence, deliberately, and it must stay that
+// way even though it mis-splits a URL carrying an IPv6 literal:
+// "http://[2001:db8::1]/x.tar.gz" yields the name "http://[2001:db8" and the
+// remainder "1]/x.tar.gz". That looks like a bug worth fixing. It is not.
+//
+// makepkg's own get_filename (/usr/share/makepkg/util/source.sh) is:
+//
+//	if [[ $netfile = *::* ]]; then printf "%s\n" "${netfile%%::*}"
+//
+// which is the same first-occurrence cut and produces the same two halves --
+// verified against the installed makepkg. Two consequences follow, and the
+// second is the one that matters:
+//
+//   - such a source cannot be fetched by makepkg either, so it is not an
+//     evasion route; the recipe simply would not build.
+//   - the analysis must describe what will ACTUALLY happen when makepkg runs
+//     this recipe. A parser that is more correct than makepkg about URL syntax
+//     disagrees with the tool that does the fetching, and that divergence is
+//     exploitable in the worse direction: an attacker could craft an entry this
+//     package reads as host A while makepkg downloads from host B, which is a
+//     confidently wrong verdict rather than an admitted gap.
+//
+// So agreeing with makepkg outranks agreeing with RFC 3986 here. The
+// consequence is handled honestly rather than papered over: such an entry ends
+// up with no scheme and no host, and internal/check emits a coverage gap
+// (INV-9) rather than a finding, because a bare-IP source is exactly what the
+// paste-host rule exists to catch and "I could not parse this" must not read as
+// "there is nothing here".
 func parseSourceEntry(s *Source, text string) {
 	rest := text
 	if name, after, ok := strings.Cut(rest, "::"); ok {

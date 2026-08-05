@@ -69,7 +69,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if len(operands) == 0 {
 		fmt.Fprintln(stderr, "usage: aurvet [flags] <command>")
-		fmt.Fprintln(stderr, "commands: scan, explain, doctor, version")
+		fmt.Fprintln(stderr, "commands: scan, snapshot, explain, doctor, version")
 		return exitUsage
 	}
 
@@ -134,6 +134,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 			sinceLast:   *sinceLast,
 			minSeverity: *minSeverity,
 		}, stdout, stderr)
+
+	// snapshot captures provenance for ONE pkgbase. Not a package name, and not
+	// a list: one subject keeps the exit code unambiguous about whose evidence
+	// was incomplete.
+	case "snapshot":
+		if len(cmdArgs) != 1 {
+			fmt.Fprintln(stderr, "usage: aurvet snapshot <pkgbase>")
+			fmt.Fprintln(stderr, "  the subject is a pkgbase, not a package name: one recipe can build several packages")
+			return exitUsage
+		}
+		return runSnapshot(*offlineRoot, *jsonOut, cmdArgs[0], stdout, stderr)
 
 	case "explain":
 		if len(cmdArgs) == 0 {
