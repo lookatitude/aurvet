@@ -22,13 +22,18 @@ go 1.24
 // version the local install does not have is silently disregarded, not an
 // error. So this line does NOT pin anything on its own.
 //
-// It binds in CI via actions/setup-go, which prefers the `toolchain` directive
-// over the `go` directive and installs exactly this version; GOTOOLCHAIN=local
-// then forces that installed toolchain to be the one used. Locally, the same
-// GOTOOLCHAIN=local prevents a surprise toolchain DOWNLOAD -- with the default
-// GOTOOLCHAIN=auto, Go would try to fetch this version over the network, which
-// is not something a security tool's build should do behind the maintainer's
-// back.
+// It binds in CI, but NOT the way the documentation suggests. Measured against
+// a real run: actions/setup-go with `go-version-file: go.mod` resolved "version
+// spec 1.24" and installed go1.24.13 -- it read the `go` directive and ignored
+// this one, so the pin bound to NOTHING. The workflows therefore parse this
+// line out of go.mod themselves, pass it to setup-go as an explicit
+// `go-version`, and then assert `go env GOVERSION` matches. A reproducibility
+// guarantee that is not enforced is not a guarantee.
+//
+// Locally, GOTOOLCHAIN=local prevents a surprise toolchain DOWNLOAD -- with the
+// default GOTOOLCHAIN=auto, Go would try to fetch this version over the
+// network, which is not something a security tool's build should do behind the
+// maintainer's back.
 //
 // Consequence worth knowing: a contributor on Go 1.24 builds fine and gets a
 // binary that will NOT match a release hash. That is expected; release

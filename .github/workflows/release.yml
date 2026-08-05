@@ -65,17 +65,40 @@ jobs:
         with:
           fetch-depth: 0 # git archive and the commit-date epoch need real history
 
+      # The toolchain version is extracted from go.mod and passed explicitly.
+      # MEASURED 2026-08-05: `go-version-file: go.mod` makes setup-go resolve the
+      # `go` directive (1.24) and IGNORE `toolchain go1.26.5`, so it installed
+      # go1.24.13 -- and GOTOOLCHAIN=local ignores the directive too. The pin
+      # bound to nothing. For a release job this is the difference between a
+      # reproducibility guarantee and a claim.
+      - name: resolve pinned toolchain from go.mod
+        id: toolchain
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^toolchain go\([0-9.]*\)$/\1/p' go.mod)"
+          if [ -z "$version" ]; then
+            echo "::error::no toolchain directive in go.mod; refusing to build a release"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          # Reads the `toolchain` directive from go.mod (setup-go prefers it
-          # over the `go` directive), which is what actually pins the release
-          # compiler — GOTOOLCHAIN=local alone would ignore that directive.
-          go-version-file: go.mod
+          go-version: ${{ steps.toolchain.outputs.version }}
           check-latest: false
 
-      - name: record toolchain identity
+      - name: verify toolchain and record identity
         run: |
+          set -euo pipefail
           go version | tee toolchain.txt
+          want="go${{ steps.toolchain.outputs.version }}"
+          got="$(go env GOVERSION)"
+          # Both runners must use the SAME pinned toolchain, or the two-runner
+          # diff would compare apples to oranges and a mismatch would be
+          # meaningless rather than informative.
+          if [ "$got" != "$want" ]; then
+            echo "::error::toolchain mismatch: go.mod pins $want, running $got -- refusing to build a release"
+            exit 1
+          fi
           # A GOEXPERIMENT-patched toolchain emits different bytes from a stock
           # release of the same version, and go.mod cannot pin a GOEXPERIMENT.
           # Fail loudly rather than publish an artifact nobody can reproduce.
@@ -83,6 +106,7 @@ jobs:
             echo "::error::toolchain carries a GOEXPERIMENT; release builds require a stock toolchain"
             exit 1
           fi
+          echo "toolchain verified: $got"
 
       - name: build release artifacts
         run: make dist VERSION="${GITHUB_REF_NAME#v}"

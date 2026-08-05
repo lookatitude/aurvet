@@ -87,11 +87,21 @@ make verify-reproducible
 a different toolchain, so `verify-reproducible` prints the toolchain identity it
 used before it prints any verdict. Two things pin a build:
 
-- `go.mod`'s `toolchain` directive — the Go **version** that stamps releases. CI
-  installs exactly this via `actions/setup-go`, which prefers the `toolchain`
-  directive over the `go` directive.
+- `go.mod`'s `toolchain` directive — the Go **version** that stamps releases.
 - `GOTOOLCHAIN=local` — prevents Go from silently downloading a *different*
   toolchain mid-build.
+
+**How that pin is actually enforced, because the intuitive way silently fails.**
+Handing `go-version-file: go.mod` to `actions/setup-go` does *not* honour the
+`toolchain` directive — measured on a real run, it resolved the `go` directive
+(1.24) and installed go1.24.13. `GOTOOLCHAIN=local` ignores the directive too. So
+the workflows parse the `toolchain` line out of `go.mod` themselves, pass it to
+`setup-go` explicitly, and then assert that `go env GOVERSION` matches, failing
+the job if it does not. The release job refuses to build on a mismatch.
+
+If you edit either workflow, keep that assertion. Without it the pipeline can
+drift back to whatever toolchain `setup-go` happens to pick, and the
+reproducibility story becomes a claim rather than a guarantee.
 
 What they **cannot** pin is a `GOEXPERIMENT`. A toolchain built with a
 non-default experiment — for example `go1.26.5-X:nodwarf5` — emits different bytes

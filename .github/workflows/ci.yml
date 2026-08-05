@@ -40,14 +40,46 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # MEASURED 2026-08-05, and the obvious approach is wrong: passing
+      # `go-version-file: go.mod` made setup-go resolve "version spec 1.24" and
+      # install go1.24.13 -- it used the `go` directive and IGNORED
+      # `toolchain go1.26.5`, despite documentation claiming toolchain takes
+      # precedence. Combined with GOTOOLCHAIN=local (which also ignores the
+      # directive) the pin bound to nothing at all.
+      #
+      # So the toolchain version is extracted from go.mod explicitly and passed
+      # to setup-go. go.mod stays the single source of truth, and the assertion
+      # below makes a silent regression impossible.
+      - name: resolve pinned toolchain from go.mod
+        id: toolchain
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^toolchain go\([0-9.]*\)$/\1/p' go.mod)"
+          if [ -z "$version" ]; then
+            echo "::error::no 'toolchain goX.Y.Z' directive in go.mod"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "pinned toolchain: $version"
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          # Read the version from go.mod so the pin lives in exactly one place.
-          go-version-file: go.mod
+          go-version: ${{ steps.toolchain.outputs.version }}
           check-latest: false
 
-      - name: go version in use
-        run: go version
+      # Assert we actually got the pinned toolchain. Without this the pipeline
+      # can drift back to whatever setup-go felt like installing, and a
+      # reproducibility guarantee that is not enforced is not a guarantee.
+      - name: verify toolchain matches the pin
+        run: |
+          set -euo pipefail
+          go version
+          want="go${{ steps.toolchain.outputs.version }}"
+          got="$(go env GOVERSION)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::toolchain mismatch: go.mod pins $want, running $got"
+            exit 1
+          fi
+          echo "toolchain matches the pin: $got"
 
       - name: build
         run: make build
