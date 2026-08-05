@@ -95,21 +95,71 @@ jobs:
       # build() performs a network fetch and aurvet's own PKGBUILD would trip
       # aurvet's own critical rule.
       #
-      # WHEN P1-B LANDS: golang.org/x/sys becomes the single sanctioned
-      # dependency (decision D-3, for capset/prctl). To allow it, add it to the
-      # allowlist below rather than deleting this gate.
+      # P1-B HAS LANDED: golang.org/x/sys is the single sanctioned dependency
+      # (decision D-3, for capset/prctl -- hand-rolling syscall structs in the
+      # code that enforces the privilege boundary is the wrong place to save a
+      # dependency). The gate was EXTENDED, not deleted: any other module still
+      # fails the build, and that was re-proven by injecting a fake require.
+      #
+      # PINNED TO v0.41.0 DELIBERATELY, and not upgradable without a decision:
+      # v0.42.0+ declare `go 1.25.0`, which would force this module's `go`
+      # directive up from 1.24 and raise the floor for every consumer. `go get
+      # golang.org/x/sys` (unpinned) silently rewrote `go 1.24` -> `go 1.25.0`
+      # when it was first added. v0.41.0 is the newest release still declaring
+      # `go 1.24.0`. Dependabot is configured to leave it alone; a bump here is
+      # a floor change, not a patch.
+      # THIS GATE FAILS CLOSED. It previously did not, and the bug is worth
+      # keeping described because it is the exact failure mode this project
+      # exists to warn about: a control that reports success while checking
+      # nothing.
+      #
+      # The old body ran `go list -m all | tail -n +2 || true`. The moment a
+      # vendor/ directory appeared, that command started failing outright
+      # ("go: can't compute 'all' using the vendor directory"), `|| true`
+      # swallowed the failure, `deps` came back empty, and the gate printed
+      # "no third-party modules — policy satisfied" and exited 0 — with an
+      # unreviewed dependency sitting in go.mod. Measured, not theorised.
+      #
+      # So: no `|| true` anywhere, `vendor/modules.txt` is the source of truth
+      # when vendoring (it is what actually gets compiled), and a gate that
+      # cannot determine its own input EXITS 1 rather than assuming the best.
       - name: no unsanctioned dependencies
         run: |
           set -euo pipefail
-          allowed=""   # P1-B: set to "golang.org/x/sys"
-          deps="$(go list -m all | tail -n +2 || true)"
+          allowed="golang.org/x/sys"
+
+          if [ -f vendor/modules.txt ]; then
+            source="vendor/modules.txt"
+            deps="$(awk '/^# /{print $2}' vendor/modules.txt | sort -u)"
+            # go.mod must not require anything vendor/ does not carry: a
+            # dependency added to go.mod but never vendored would otherwise be
+            # invisible to the enumeration above while still being downloaded
+            # by a non-vendoring build.
+            required="$(go mod edit -json | grep -oP '"Path":\s*"\K[^"]+' | tail -n +2 | sort -u || true)"
+            if [ "$required" != "$deps" ]; then
+              echo "::error::go.mod and vendor/modules.txt disagree — run 'go mod vendor'"
+              echo "go.mod requires:"; echo "$required"
+              echo "vendor carries:";  echo "$deps"
+              exit 1
+            fi
+          else
+            source="go list -m all"
+            deps="$(go list -m all | tail -n +2 | awk '{print $1}' | sort -u)"
+          fi
+          echo "dependency source: $source"
+
           if [ -z "$deps" ]; then
+            # Genuinely zero dependencies is legitimate (it was true through
+            # P1-A), but it must be distinguishable from a broken enumeration.
+            # By this point both branches above have exited non-zero on any
+            # command failure, so an empty list here really is empty.
             echo "no third-party modules — policy satisfied"
             exit 0
           fi
+
           echo "third-party modules present:"; echo "$deps"
           bad=0
-          while read -r mod _; do
+          while read -r mod; do
             [ -z "$mod" ] && continue
             case " $allowed " in
               *" $mod "*) echo "  allowed: $mod" ;;

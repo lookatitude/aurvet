@@ -1,9 +1,20 @@
 # Dependabot — GitHub Actions only.
 #
-# There is no `gomod` ecosystem entry on purpose: aurvet has ZERO third-party Go
-# dependencies, and CI actively fails if one appears (see ci.yml, "no
-# unsanctioned dependencies"). Add a gomod entry when golang.org/x/sys lands at
-# P1-B — the single sanctioned dependency (decision D-3).
+# There is still no `gomod` ecosystem entry, and now that a dependency exists
+# that absence is a stronger decision rather than a leftover.
+#
+# aurvet has exactly ONE third-party Go dependency: golang.org/x/sys, sanctioned
+# by decision D-3 for capset/prctl. CI fails on any other (see ci.yml, "no
+# unsanctioned dependencies"). That single dependency is pinned to v0.41.0 for a
+# reason automation cannot see: v0.42.0+ declare `go 1.25.0`, so upgrading would
+# force this module's `go` directive up and raise the minimum Go for every
+# consumer. An unpinned `go get golang.org/x/sys` did exactly that on the first
+# attempt, silently rewriting `go 1.24` to `go 1.25.0`.
+#
+# A gomod entry would therefore generate a weekly PR whose only effect is to
+# raise the floor, and "bump the patch version" is the one review posture most
+# likely to wave that through. Bumping x/sys is a floor decision, taken by a
+# human, with the `go` directive checked in the same diff.
 #
 # NOTE on the interaction with our SHA pinning: every action in this repository
 # is pinned to a commit SHA rather than a tag, deliberately, because a tag is
