@@ -158,7 +158,7 @@ func runBaseline(opts baselineOpts, stdout, stderr io.Writer) int {
 }
 
 func baselineUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: aurvet baseline <init|status|verify|pushed|diff> [flags]")
+	fmt.Fprintln(w, "usage: aurvet baseline <init|append|status|verify|pushed|diff> [flags]")
 	fmt.Fprintln(w, "  init    run a scan and, if nothing refuses, sign the first baseline")
 	fmt.Fprintln(w, "  append  the same, for a later entry: it refuses on the same conditions, and")
 	fmt.Fprintln(w, "          additionally refuses while db.lck exists (a scan of a database")

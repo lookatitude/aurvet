@@ -22,6 +22,7 @@ _aurvet() {
 	# AURVET_COMMANDS_END
 
 	local -a flags
+	# AURVET_FLAGS_BEGIN
 	flags=(
 		'-json[emit machine-readable JSON instead of text]'
 		'-no-network[skip every outbound request; network checks become coverage gaps]'
@@ -33,7 +34,9 @@ _aurvet() {
 		'-signer[baseline: fingerprint of an ssh-agent key to sign with]:fingerprint:'
 		'-remote[baseline pushed: the remote the chain was pushed to]:remote:'
 		'-protected-remote[baseline pushed: assert the remote denies force-push]'
+		'-tier[verification tier: how much of each file is examined]:tier:(meta triage full paranoid)'
 	)
+	# AURVET_FLAGS_END
 
 	_arguments -C \
 		$flags \

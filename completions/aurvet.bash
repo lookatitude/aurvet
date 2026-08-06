@@ -9,6 +9,7 @@
 _aurvet_commands=(scan baseline review install snapshot explain doctor version)
 # AURVET_COMMANDS_END
 
+# AURVET_FLAGS_BEGIN
 _aurvet_flags=(
 	-json
 	-key
@@ -20,7 +21,9 @@ _aurvet_flags=(
 	-offline-root
 	-show-recipe
 	-since-last
+	-tier
 )
+# AURVET_FLAGS_END
 
 _aurvet() {
 	local cur prev i cmd=""
@@ -37,6 +40,7 @@ _aurvet() {
 		# Skip the value of a flag that takes one.
 		case ${COMP_WORDS[i - 1]} in
 		-min-severity | --min-severity | -offline-root | --offline-root) continue ;;
+		-tier | --tier | -key | --key | -signer | --signer | -remote | --remote) continue ;;
 		esac
 		local c
 		for c in "${_aurvet_commands[@]}"; do
@@ -51,6 +55,12 @@ _aurvet() {
 	case $prev in
 	-min-severity | --min-severity)
 		mapfile -t COMPREPLY < <(compgen -W "info suspicious critical" -- "$cur")
+		return
+		;;
+	-tier | --tier)
+		# Values only; the tier a run REPORTS is derived from the work it did,
+		# so there is nothing here that asserts coverage.
+		mapfile -t COMPREPLY < <(compgen -W "meta triage full paranoid" -- "$cur")
 		return
 		;;
 	-offline-root | --offline-root)

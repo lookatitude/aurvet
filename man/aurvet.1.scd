@@ -113,6 +113,12 @@ spellings are accepted, as is _-flag=value_.
 	document is written to stdout; prompts, warnings and progress go to
 	stderr.
 
+*-key* _file_
+	*baseline* only: an OpenSSH ed25519 private key file to sign the baseline
+	with. aurvet generates no keys; the key is yours to create and to protect.
+	An encrypted key file is not supported -- load it into *ssh-agent* and use
+	*-signer*. If both are given, *-key* is used.
+
 *-min-severity* _info_|_suspicious_|_critical_
 	Reporting floor. Defaults to the configured value. An unrecognised value
 	is a usage error, never a silent fallback. See *SEVERITY FLOOR* below
@@ -129,15 +135,81 @@ spellings are accepted, as is _-flag=value_.
 	_path_ (INV-5): the report is not persisted and *-since-last* is
 	therefore unavailable in this mode.
 
+*-protected-remote*
+	*baseline pushed* only: assert that the remote named by *-remote* denies
+	force-push and protects the branch. aurvet cannot check this itself -- it
+	runs no *git* -- so the flag records your assertion, and the assertion is
+	what makes the anchor mean anything. Without it the anchor is recorded as
+	unprotected and truncation of the chain remains possible from the very
+	machine being watched.
+
+*-remote* _url_
+	*baseline pushed* only: the remote the chain was pushed to, e.g.
+	_git@host:repo.git#refs/heads/main_. Recording a push is what makes
+	truncation detectable; aurvet performs no push and holds no credentials.
+
 *-show-recipe*
 	*review*/*install* only: print the recipe text in full in addition to the
 	rule hits and the diff. Off by default because a gate that prints a
 	400-line PKGBUILD every time teaches its operator to scroll past it.
 
+*-signer* _fingerprint_
+	*baseline* only: the fingerprint of a key held by *ssh-agent* to sign
+	with. This is also the FIDO2 route: a token-held _sk-ssh-ed25519_ key
+	appears in the agent like any other, so the signing key can be one that
+	cannot be copied off the machine. Requires _SSH_AUTH_SOCK_.
+
 *-since-last*
 	*scan* only: list only findings that are new since the previous stored
 	scan. The exit code still reflects the full result, not the filtered
 	view.
+
+*-tier* _meta_|_triage_|_full_|_paranoid_
+	How much of each file a verification pass examines. Defaults to *full*.
+	An unrecognised value is a usage error on every subcommand, never a
+	silent fallback: a typo in a systemd unit or a cron line must not quietly
+	downgrade verification.
+
+	*meta*
+		Reads no file contents at all. Every recorded path is still opened
+		once, confined, and stat'd from that descriptor -- so a missing
+		file, a swapped symlink and a fifo are all still established --
+		but nothing is hashed. Every observation is therefore
+		metadata-assisted by construction.
+	*triage*
+		Hashes two populations: everything whose stat disagrees with the
+		record, and -- unconditionally, whatever stat says -- the
+		security-relevant subset, which is every symlink and everything
+		executable, setuid, setgid or sticky in the record's own mode.
+		Those are the files whose contents decide what runs on the
+		machine, so they are never delegated to mtime, which an attacker
+		who can write the file can also set. Configuration under _/etc_ is
+		deliberately *not* in the subset: it is the noisiest population on
+		a real system and would spend the whole budget on the files whose
+		difference says the least.
+	*full*
+		The default. Hashes every path with a recorded digest, skipping
+		only the derived exemptions -- files pacman itself rewrites, where
+		a read buys a known-useless answer at real I/O cost.
+	*paranoid*
+		*full*, and additionally hashes the exempt paths, so the exemption
+		set can be audited rather than trusted.
+
+	*The tier a run reports is derived from the work it actually did; the
+	flag never asserts it.* The flag selects the bargain; the report states
+	what was examined. Anything a weaker tier did not look at is reported as
+	a coverage gap, not as silence (INV-3), and any verdict that rested on
+	metadata is marked as such so it is never presented as being as strong as
+	a digest. That is the whole difference between an operator-chosen tier
+	and a silently sampled scan. Concretely: a run that asked for *full* and
+	verified no file contents prints the tier it actually reached and records
+	the shortfall as a coverage gap -- it does not relabel the request as the
+	result.
+
+	*baseline* *init* and *append* refuse a scan shallower than *full*: a
+	baseline is the reference point every later run is judged against, so
+	signing one over unexamined files makes the unexamined state the
+	definition of correct.
 
 # EXIT STATUS
 

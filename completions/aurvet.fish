@@ -16,6 +16,7 @@ complete -c aurvet -n __fish_use_subcommand -a explain -d 'explain one finding b
 complete -c aurvet -n __fish_use_subcommand -a doctor -d 'print the resolved configuration and its sources'
 complete -c aurvet -n __fish_use_subcommand -a version -d 'print build identity'
 
+# AURVET_FLAGS_BEGIN
 # flags
 complete -c aurvet -l json -o json -d 'emit machine-readable JSON instead of text'
 complete -c aurvet -l no-network -o no-network -d 'skip every outbound request; network checks become coverage gaps'
@@ -23,11 +24,13 @@ complete -c aurvet -l since-last -o since-last -d 'scan: show only findings new 
 complete -c aurvet -l show-recipe -o show-recipe -d 'review/install: print the recipe text in full'
 complete -c aurvet -l offline-root -o offline-root -r -F -d 'examine a mounted filesystem instead of the running system'
 complete -c aurvet -l min-severity -o min-severity -x -a 'info suspicious critical' -d 'reporting floor'
+complete -c aurvet -l tier -o tier -x -a 'meta triage full paranoid' -d 'verification tier: how much of each file is examined'
 
 complete -c aurvet -l key -o key -r -F -d 'baseline: an OpenSSH ed25519 private key file to sign with'
 complete -c aurvet -l signer -o signer -x -d 'baseline: fingerprint of an ssh-agent key to sign with'
 complete -c aurvet -l remote -o remote -x -d 'baseline pushed: the remote the chain was pushed to'
 complete -c aurvet -l protected-remote -o protected-remote -d 'baseline pushed: assert the remote denies force-push'
+# AURVET_FLAGS_END
 
 # baseline subcommands
 complete -c aurvet -n '__fish_seen_subcommand_from baseline' -a 'init append status verify pushed diff'

@@ -230,3 +230,117 @@ func TestManPageDocumentsEverySubcommand(t *testing.T) {
 		}
 	}
 }
+
+// baselineGo is the second dispatch switch in the tool. `baseline` is the only
+// subcommand with subcommands of its own, so it has a second hand-written usage
+// line -- and that one had no test behind it.
+const baselineGo = "../cmd/aurvet/baseline.go"
+
+// baselineSubcommands derives `baseline`'s own subcommand list from its dispatch
+// switch, the same way dispatchedCommands does for the top level. The switch tag
+// is `opts.args[0]` rather than a bare identifier, which is the only structural
+// difference.
+func baselineSubcommands(t *testing.T) []string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, baselineGo, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", baselineGo, err)
+	}
+
+	var cmds []string
+	var found bool
+	ast.Inspect(file, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok {
+			return true
+		}
+		ix, ok := sw.Tag.(*ast.IndexExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := ix.X.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "args" {
+			return true
+		}
+		found = true
+		for _, stmt := range sw.Body.List {
+			cc, ok := stmt.(*ast.CaseClause)
+			if !ok || cc.List == nil { // nil List == default:
+				continue
+			}
+			for _, e := range cc.List {
+				lit, ok := e.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					t.Fatalf("%s: non-literal case in the baseline switch: %T", baselineGo, e)
+				}
+				s, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatalf("%s: unquote %s: %v", baselineGo, lit.Value, err)
+				}
+				cmds = append(cmds, s)
+			}
+		}
+		return false
+	})
+
+	if !found {
+		t.Fatalf("%s: could not find the `switch opts.args[0]` dispatch; this test can no "+
+			"longer derive baseline's subcommand list and must be updated rather than deleted",
+			baselineGo)
+	}
+	sort.Strings(cmds)
+	return cmds
+}
+
+// TestBaselineUsageListsEverySubcommand exists because the omission it catches
+// had actually happened: baselineUsage's synopsis read
+// `<init|status|verify|pushed|diff>` while the very next line described `append`,
+// so the one subcommand that extends an existing chain was missing from the line
+// an operator reads after getting the invocation wrong.
+//
+// The top-level `commands:` line has had a test since P1-A. This one did not,
+// which is the whole reason it drifted -- a hand-written string with no test
+// behind it is a hand-written string that is wrong.
+func TestBaselineUsageListsEverySubcommand(t *testing.T) {
+	want := baselineSubcommands(t)
+	src := read(t, baselineGo)
+	i := strings.Index(src, "usage: aurvet baseline <")
+	if i < 0 {
+		t.Fatalf("%s: no `usage: aurvet baseline <...>` synopsis to check", baselineGo)
+	}
+	line := src[i:]
+	if j := strings.IndexByte(line, '\n'); j >= 0 {
+		line = line[:j]
+	}
+	open := strings.IndexByte(line, '<')
+	close := strings.IndexByte(line, '>')
+	if open < 0 || close < open {
+		t.Fatalf("%s: malformed synopsis: %s", baselineGo, line)
+	}
+	listed := make(map[string]bool)
+	for _, f := range strings.Split(line[open+1:close], "|") {
+		listed[strings.TrimSpace(f)] = true
+	}
+	for _, c := range want {
+		if !listed[c] {
+			t.Errorf("%s: baseline usage synopsis omits subcommand %q: %s\n"+
+				"an operator who gets the invocation wrong reads this line and nothing else",
+				baselineGo, c, line)
+		}
+	}
+	for f := range listed {
+		var known bool
+		for _, c := range want {
+			if c == f {
+				known = true
+				break
+			}
+		}
+		if !known {
+			t.Errorf("%s: baseline usage synopsis offers %q, which the dispatch switch does "+
+				"not accept; an operator who types it gets exit 2", baselineGo, f)
+		}
+	}
+}
