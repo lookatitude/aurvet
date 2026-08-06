@@ -1,0 +1,1 @@
+{"issued_at":"2026-07-01T00:00:00Z","root_generation":1,"root_set_retired":false,"serial":7,"signing_keys":[{"not_after":"2026-09-01T00:00:00Z","not_before":"2026-07-01T00:00:00Z","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFycbfJhycuEBHV3aq782US0BTKPqyj5s6le9ASQ096E online-1"}],"spec_version":1,"upgrade_message":"","valid_until":"2026-10-01T00:00:00Z"}
