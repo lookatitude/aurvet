@@ -1,0 +1,23 @@
+pkgbase = aurvet-git
+	pkgdesc = Provenance, integrity and persistence auditing for AUR-installed packages (latest released code)
+	pkgver = 0.0.1.r0.g0000000
+	pkgrel = 1
+	url = https://github.com/lookatitude/aurvet
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = git
+	makedepends = go
+	makedepends = scdoc
+	depends = sh
+	optdepends = paru: helper handover for aurvet install
+	optdepends = yay: helper handover for aurvet install
+	provides = aurvet
+	conflicts = aurvet
+	options = !strip
+	options = !debug
+	options = !lto
+	source = aurvet-git::git+https://github.com/lookatitude/aurvet.git#branch=main
+	sha256sums = SKIP
+
+pkgname = aurvet-git

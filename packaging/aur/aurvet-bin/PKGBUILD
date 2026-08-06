@@ -1,0 +1,207 @@
+# Maintainer: lookatitude <miguel.pinto@lookatitude.com>
+#
+# aurvet-bin — the prebuilt binary package.
+#
+# # Read this before touching anything below
+#
+# A -bin package asks users to trust a build machine instead of building
+# themselves. For most software that is a convenience. For a tool whose entire
+# thesis is "why should anyone trust a security tool that arrives as an unvetted
+# AUR package?", shipping one is a claim that has to be earned rather than
+# assumed, and spec §16 is explicit that the SOURCE package is canonical.
+#
+# It is published for one reason: NAME DEFENCE. `aurvet-bin` is precisely the
+# name someone else would take in order to supply "the convenient binary build"
+# of a security auditing tool, and it is the worst of the three names to lose.
+# Holding it ourselves, pointed at artefacts a two-runner reproducibility diff
+# already proved byte-identical, is strictly better than leaving it open.
+#
+# # What makes the claim checkable rather than rhetorical
+#
+# Every byte installed here is covered by a sha256 recorded below AND by the
+# published SHA256SUMS, which is itself downloaded and verified. Anyone who
+# doubts the build machine can reproduce the binary from source and compare:
+#
+#     git clone https://github.com/lookatitude/aurvet && cd aurvet
+#     git checkout v$pkgver
+#     make verify-reproducible VERSION=$pkgver
+#
+# That is the whole verification story for this package, and it is stated in the
+# pkgdesc so a user meets it before installing rather than after.
+#
+# # options=('!strip') is LOAD-BEARING here, more than in any other recipe
+#
+# makepkg strips by default, AFTER the files are staged. A stripped binary is not
+# the binary the release hashed, so the published SHA256SUMS would no longer
+# verify what the user actually installed -- which destroys the only verification
+# path a -bin package has. '!strip' is not a preference here; without it this
+# package is dishonest.
+pkgname=aurvet-bin
+pkgver=0.0.1
+pkgrel=1
+pkgdesc='Provenance, integrity and persistence auditing for AUR-installed packages (prebuilt; verify with `make verify-reproducible`)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/lookatitude/aurvet'
+license=('MIT')
+# 'sh' for the shipped POSIX hook wrapper. The binary is static: no DT_NEEDED and
+# no PT_INTERP, asserted by TestBinaryIsStaticallyLinked in the source tree.
+depends=('sh')
+# scdoc only: the release tarball is a `git archive`, so man pages arrive as
+# scdoc SOURCE and are rendered in package(). No 'go' -- that is the whole point
+# of a -bin package. binutils supplies the readelf that check() uses to confirm
+# the download really is the static build the release publishes.
+makedepends=('scdoc' 'binutils')
+optdepends=(
+  'paru: helper handover for aurvet install'
+  'yay: helper handover for aurvet install'
+)
+provides=("aurvet=$pkgver")
+conflicts=('aurvet' 'aurvet-git')
+# See the header: '!strip' is what keeps the installed bytes equal to the hashed
+# bytes. '!debug' would strip. '!lto' because nothing here compiles C.
+options=('!strip' '!debug' '!lto')
+
+# The release assets. Three sources, and the third is the point: SHA256SUMS is
+# downloaded and verified too, so `sha256sum -c` below checks the binary against
+# the project's own published manifest rather than only against this recipe.
+#
+# The all-zero values are UNPUBLISHED-RELEASE SENTINELS, the same convention the
+# canonical PKGBUILD uses: they are not hashes, cannot be mistaken for hashes,
+# and makepkg fails loudly on them. Replace all three when v$pkgver is published.
+#
+# Never SKIP on these: they are fixed URLs, and SKIP on a fixed URL means the
+# build accepts whatever the host serves -- which is exactly what a repointed
+# mirror needs. aurvet's own `pkgbuild-skip-fixed-url` rule reports it at the
+# default floor, so aurvet's own recipes must not do it.
+source_x86_64=("aurvet-$pkgver-x86_64::$url/releases/download/v$pkgver/aurvet-$pkgver-x86_64")
+source_aarch64=("aurvet-$pkgver-aarch64::$url/releases/download/v$pkgver/aurvet-$pkgver-aarch64")
+source=(
+  "aurvet-$pkgver.tar.gz::$url/releases/download/v$pkgver/aurvet-$pkgver.tar.gz"
+  "SHA256SUMS-$pkgver::$url/releases/download/v$pkgver/SHA256SUMS"
+)
+sha256sums_x86_64=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums_aarch64=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=(
+  '0000000000000000000000000000000000000000000000000000000000000000'
+  '0000000000000000000000000000000000000000000000000000000000000000'
+)
+
+# _commit is the FULL SHA of the tagged commit these artefacts were built from.
+# check() asserts the downloaded binary reports exactly it, which is what keeps
+# this recipe from shipping a binary that misreports its own provenance --
+# `aurvet version` ends up quoted in incident reports, and a confidently wrong
+# identity there is worse than an absent one.
+_commit='0000000000000000000000000000000000000000'
+
+_sentinel64='0000000000000000000000000000000000000000000000000000000000000000'
+
+prepare() {
+  # Refuse on the sentinels, before anything is verified or installed. Without
+  # this the recipe would proceed to compare a downloaded binary against
+  # `commit 000000000000` and could be made to pass by an artefact that reports
+  # the sentinel back.
+  if [[ ! $_commit =~ ^[0-9a-f]{40}$ ]] || [[ $_commit == "${_sentinel64:0:40}" ]]; then
+    printf '%s\n' \
+      "this PKGBUILD carries the unpublished-release sentinel for _commit," \
+      "so v$pkgver has not been released yet and this recipe is not installable." \
+      "Release first; the sentinels are replaced with the tagged commit and the" \
+      "real sha256 of each published artefact at that point." >&2
+    return 1
+  fi
+}
+
+check() {
+  # 1. The binary matches the project's OWN published manifest, not just this
+  #    recipe's sha256sums. Two independent statements have to agree: a tampered
+  #    artefact would need both this recipe and the published SHA256SUMS altered.
+  #
+  # SHA256SUMS lists every artefact of the release, including the architecture
+  # this build is not for, so it is filtered to the one file present here rather
+  # than run whole -- `sha256sum -c` fails on a missing file, and a check that
+  # cannot succeed teaches the packager to delete it.
+  local bin="aurvet-$pkgver-$CARCH"
+  grep -F " $bin" "SHA256SUMS-$pkgver" | sha256sum -c -
+
+  # 2. The binary reports the identity this recipe claims. FIRST LINE only:
+  #    `version` also prints the indicator-bundle trust state, and comparing
+  #    whole output against a one-line identity is a gate that breaks the moment
+  #    that block changes.
+  chmod +x "$bin"
+  local want got
+  want="aurvet $pkgver (commit ${_commit:0:12})"
+  got="$("./$bin" version | head -n 1)"
+  if [[ "$got" != "$want" ]]; then
+    printf 'version identity mismatch (first line of `aurvet version`):\n  want: %s\n  got:  %s\n' \
+      "$want" "$got" >&2
+    return 1
+  fi
+
+  # 3. Static, as the release contract requires: no PT_INTERP and no DT_NEEDED.
+  #    Asserted on the DOWNLOADED artefact rather than trusted from the source
+  #    tree's test, because this package installs the download.
+  if readelf -l "$bin" | grep -q INTERP; then
+    printf 'the downloaded binary has a PT_INTERP: it is not the static build the release publishes\n' >&2
+    return 1
+  fi
+  if readelf -d "$bin" 2>/dev/null | grep -q NEEDED; then
+    printf 'the downloaded binary has DT_NEEDED entries: it is not the static build the release publishes\n' >&2
+    return 1
+  fi
+}
+
+package() {
+  install -Dm755 "aurvet-$pkgver-$CARCH" "$pkgdir/usr/bin/aurvet"
+
+  # Everything else comes from the source tarball, which is also downloaded and
+  # hash-verified above. Man pages arrive as scdoc source and are rendered here,
+  # so this package does not need scdoc at build time on the user's machine --
+  # it needs it as a makedepend only if the release stops shipping rendered
+  # pages, which it does not.
+  cd "aurvet-$pkgver"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/aurvet/README.md"
+  install -Dm644 SECURITY.md "$pkgdir/usr/share/doc/aurvet/SECURITY.md"
+  install -Dm644 docs/reporting-malware.md "$pkgdir/usr/share/doc/aurvet/reporting-malware.md"
+
+  local page section out
+  for page in man/*.scd; do
+    out="${page##*/}"
+    out="${out%.scd}"
+    section="${out##*.}"
+    scdoc <"$page" >"$out"
+    install -Dm644 "$out" "$pkgdir/usr/share/man/man$section/$out"
+  done
+
+  local comp
+  for comp in completions/*; do
+    case "$comp" in
+      *.bash) install -Dm644 "$comp" "$pkgdir/usr/share/bash-completion/completions/aurvet" ;;
+      *.zsh | */_aurvet) install -Dm644 "$comp" "$pkgdir/usr/share/zsh/site-functions/_aurvet" ;;
+      *.fish) install -Dm644 "$comp" "$pkgdir/usr/share/fish/vendor_completions.d/aurvet.fish" ;;
+      *_test.go) ;; # the anti-rot test is source, not a completion
+      *)
+        printf 'unrecognised file in completions/: %s\n' "$comp" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  # Shipped, never enabled: shipping a unit is not consent to run it. No install=
+  # scriptlet either, so nothing of this package runs as root at install time.
+  local unit
+  for unit in packaging/systemd/*.service packaging/systemd/*.timer; do
+    install -Dm644 "$unit" "$pkgdir/usr/lib/systemd/system/${unit##*/}"
+  done
+
+  local tf
+  for tf in packaging/tmpfiles.d/*.conf; do
+    install -Dm644 "$tf" "$pkgdir/usr/lib/tmpfiles.d/${tf##*/}"
+  done
+
+  install -Dm755 packaging/hooks/aurvet-hook "$pkgdir/usr/share/aurvet/aurvet-hook"
+  local hook
+  for hook in packaging/hooks/*.hook; do
+    install -Dm644 "$hook" "$pkgdir/usr/share/libalpm/hooks/${hook##*/}"
+  done
+}

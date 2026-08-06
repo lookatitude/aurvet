@@ -1,0 +1,182 @@
+# Maintainer: lookatitude <miguel.pinto@lookatitude.com>
+#
+# aurvet-git — the VCS package, built from the latest RELEASED code.
+#
+# # Why this recipe can exist before a release and the other two cannot
+#
+# The canonical `aurvet` recipe sources a release asset, so its sha256 is
+# unknowable until that release exists and its sentinels refuse to build until
+# then (spec §16, corrected 2026-08-06: AUR names are claimed WITH the first
+# release, not before it -- the AUR has no reservation step, so a name is claimed
+# by pushing a package that builds). A VCS source has nothing stable to hash, so
+# this recipe is complete today and is therefore the one name that can be claimed
+# first.
+#
+# # It tracks `main`, deliberately, and not `dev`
+#
+# `main` only ever advances by fast-forward to a released state, so `-git` here
+# means "the latest released code, built locally from source" rather than
+# "whatever was pushed an hour ago". Pointing a -git package at an integration
+# branch makes its version meaningless and ships half-finished work to whoever
+# installs it -- which for a security auditing tool is worse than being behind.
+#
+# # sha256sums=('SKIP') is correct here and only here
+#
+# aurvet's own `pkgbuild-skip-fixed-url` rule reports SKIP on a FIXED URL at the
+# default floor, because it means the build accepts whatever the host serves.
+# On a VCS source SKIP is MANDATORY -- there is no stable artefact to hash, and
+# the ref itself is the identity -- and aurvet's own checks encode that
+# distinction rather than flagging both. See internal/check/pkgbuild.go.
+#
+# # The build contract is copied, not simplified
+#
+# Every flag in build() below is load-bearing and is the same set spec §16 fixes
+# for the release build. In particular: ONE merged -ldflags (two would silently
+# drop an -X), GOFLAGS cleared (an inherited -ldflags REPLACES ours and would
+# flip the link mode), no injected build date, and no -s -w (they strip at link
+# time and would defeat '!strip'). A -git package that built differently from the
+# release would produce a binary reporting an identity nobody can verify.
+pkgname=aurvet-git
+pkgver=0.0.1.r0.g0000000
+pkgrel=1
+pkgdesc='Provenance, integrity and persistence auditing for AUR-installed packages (latest released code)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/lookatitude/aurvet'
+license=('MIT')
+# 'sh' for the shipped POSIX hook wrapper; the binary itself is static and has no
+# DT_NEEDED at all. See the canonical PKGBUILD for the full reasoning.
+depends=('sh')
+# 'git' beyond the canonical recipe's makedepends, for the VCS source.
+makedepends=('git' 'go' 'scdoc')
+optdepends=(
+  'paru: helper handover for aurvet install'
+  'yay: helper handover for aurvet install'
+)
+provides=('aurvet')
+conflicts=('aurvet')
+# '!strip' is the one that matters: reproducibility is defined over the binary
+# itself (D-2), and stripping runs after the build. '!debug' would strip. '!lto'
+# because LTOFLAGS are C compiler flags and CGO_ENABLED=0 consumes none.
+options=('!strip' '!debug' '!lto')
+
+source=("$pkgname::git+$url.git#branch=main")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  # Tag-derived, so the version is anchored to a release rather than to a commit
+  # count alone. The `r<count>.g<sha>` suffix is the Arch VCS convention and
+  # sorts correctly against the tagged version it extends.
+  git describe --long --tags --abbrev=7 2>/dev/null |
+    sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
+    printf '0.0.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd "$pkgname"
+
+  # See the header. Every one of these earns its place; the canonical PKGBUILD
+  # documents each in full.
+  export CGO_ENABLED=0
+  export GOTOOLCHAIN=local
+  export GOFLAGS=
+  export GOPATH="$srcdir/gopath"
+  export GOMODCACHE="$srcdir/gopath/pkg/mod"
+  export GOCACHE="$srcdir/gocache"
+
+  # The commit is READ FROM GIT here rather than recorded in the recipe: unlike
+  # the release tarball (a `git archive`, which carries no VCS metadata and so
+  # must record _commit by hand), this source IS a clone and can be asked.
+  local _commit _version _bi
+  _commit="$(git rev-parse HEAD)"
+  _version="$(pkgver)"
+  _bi='github.com/lookatitude/aurvet/internal/buildinfo'
+
+  go build -trimpath -buildvcs=false -mod=vendor \
+    -ldflags "-X $_bi.Version=$_version -X $_bi.Commit=$_commit" \
+    -o aurvet ./cmd/aurvet
+
+  local page out
+  for page in man/*.scd; do
+    out="${page##*/}"
+    scdoc <"$page" >"${out%.scd}"
+  done
+}
+
+check() {
+  cd "$pkgname"
+
+  # The same identity assertion the canonical recipe makes, against the commit
+  # git just reported. FIRST LINE only: `version` also prints the
+  # indicator-bundle trust state, and comparing whole output against a one-line
+  # identity is a gate that breaks the moment that block changes.
+  local want got
+  want="aurvet $(pkgver) (commit $(git rev-parse HEAD | cut -c1-12))"
+  got="$(./aurvet version | head -n 1)"
+  if [[ "$got" != "$want" ]]; then
+    printf 'version identity mismatch (first line of `aurvet version`):\n  want: %s\n  got:  %s\n' \
+      "$want" "$got" >&2
+    return 1
+  fi
+
+  # -count=1: a cached PASS would prove nothing about this build. The suite
+  # includes TestBinaryIsStaticallyLinked, which is the assertion '!strip' and
+  # the missing DT_NEEDED rest on.
+  go test -mod=vendor -count=1 ./...
+}
+
+package() {
+  cd "$pkgname"
+
+  install -Dm755 aurvet "$pkgdir/usr/bin/aurvet"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/aurvet-git/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/aurvet/README.md"
+  install -Dm644 SECURITY.md "$pkgdir/usr/share/doc/aurvet/SECURITY.md"
+  install -Dm644 docs/reporting-malware.md "$pkgdir/usr/share/doc/aurvet/reporting-malware.md"
+
+  local page section
+  for page in *.[0-9]; do
+    section="${page##*.}"
+    install -Dm644 "$page" "$pkgdir/usr/share/man/man$section/$page"
+  done
+
+  # An unrecognised file in completions/ is a hard error, not a silent skip: a
+  # completion that was not installed looks exactly like "no match" to the user.
+  local comp
+  for comp in completions/*; do
+    case "$comp" in
+      *.bash) install -Dm644 "$comp" "$pkgdir/usr/share/bash-completion/completions/aurvet" ;;
+      *.zsh | */_aurvet) install -Dm644 "$comp" "$pkgdir/usr/share/zsh/site-functions/_aurvet" ;;
+      *.fish) install -Dm644 "$comp" "$pkgdir/usr/share/fish/vendor_completions.d/aurvet.fish" ;;
+      *_test.go) ;; # the anti-rot test is source, not a completion
+      *)
+        printf 'unrecognised file in completions/: %s\n' "$comp" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  # Units are shipped, never enabled: shipping a unit is not consent to run it,
+  # and enabling one is the administrator's decision (Arch policy). There is
+  # deliberately no install= scriptlet, so nothing of this package runs as root
+  # at install time.
+  local unit
+  for unit in packaging/systemd/*.service packaging/systemd/*.timer; do
+    install -Dm644 "$unit" "$pkgdir/usr/lib/systemd/system/${unit##*/}"
+  done
+
+  local tf
+  for tf in packaging/tmpfiles.d/*.conf; do
+    install -Dm644 "$tf" "$pkgdir/usr/lib/tmpfiles.d/${tf##*/}"
+  done
+
+  # Both hooks route through this one wrapper and test for it before executing,
+  # so removing the package cannot brick pacman: with the wrapper gone the test
+  # fails and the hook exits 0. A hook whose Exec names a missing binary fails
+  # EVERY later transaction, including the one that would repair it.
+  install -Dm755 packaging/hooks/aurvet-hook "$pkgdir/usr/share/aurvet/aurvet-hook"
+  local hook
+  for hook in packaging/hooks/*.hook; do
+    install -Dm644 "$hook" "$pkgdir/usr/share/libalpm/hooks/${hook##*/}"
+  done
+}

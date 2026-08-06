@@ -1,0 +1,29 @@
+pkgbase = aurvet-bin
+	pkgdesc = Provenance, integrity and persistence auditing for AUR-installed packages (prebuilt; verify with `make verify-reproducible`)
+	pkgver = 0.0.1
+	pkgrel = 1
+	url = https://github.com/lookatitude/aurvet
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = scdoc
+	makedepends = binutils
+	depends = sh
+	optdepends = paru: helper handover for aurvet install
+	optdepends = yay: helper handover for aurvet install
+	provides = aurvet=0.0.1
+	conflicts = aurvet
+	conflicts = aurvet-git
+	options = !strip
+	options = !debug
+	options = !lto
+	source = aurvet-0.0.1.tar.gz::https://github.com/lookatitude/aurvet/releases/download/v0.0.1/aurvet-0.0.1.tar.gz
+	source = SHA256SUMS-0.0.1::https://github.com/lookatitude/aurvet/releases/download/v0.0.1/SHA256SUMS
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	source_x86_64 = aurvet-0.0.1-x86_64::https://github.com/lookatitude/aurvet/releases/download/v0.0.1/aurvet-0.0.1-x86_64
+	sha256sums_x86_64 = 0000000000000000000000000000000000000000000000000000000000000000
+	source_aarch64 = aurvet-0.0.1-aarch64::https://github.com/lookatitude/aurvet/releases/download/v0.0.1/aurvet-0.0.1-aarch64
+	sha256sums_aarch64 = 0000000000000000000000000000000000000000000000000000000000000000
+
+pkgname = aurvet-bin
