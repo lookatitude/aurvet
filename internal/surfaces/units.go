@@ -333,19 +333,23 @@ func dropDirective(execs []Exec, key string) []Exec {
 	return out
 }
 
-// execPrefixChars are systemd's Exec value prefixes. They change how a command
+// ExecPrefixChars are systemd's Exec value prefixes. They change how a command
 // is run, never which file runs, so they are stripped from Bin and kept as
 // evidence.
-const execPrefixChars = "-@+!:"
+//
+// Exported alongside SystemdTokens because internal/repro has to split an Exec
+// value exactly as this package does; see SystemdTokens for why a second
+// tokeniser would be a correctness bug rather than a duplication.
+const ExecPrefixChars = "-@+!:"
 
 func parseExec(directive, section, origin, val string) Exec {
 	e := Exec{Directive: directive, Section: section, Origin: origin}
 	i := 0
-	for i < len(val) && strings.IndexByte(execPrefixChars, val[i]) >= 0 {
+	for i < len(val) && strings.IndexByte(ExecPrefixChars, val[i]) >= 0 {
 		i++
 	}
 	e.Prefixes, e.Raw = val[:i], strings.TrimSpace(val[i:])
-	e.Args = systemdTokens(e.Raw)
+	e.Args = SystemdTokens(e.Raw)
 	if len(e.Args) > 0 {
 		e.Bin = e.Args[0]
 	}
@@ -427,8 +431,15 @@ func logicalLines(origin string, data []byte) (lines, unparsed []string, err err
 	return out, unparsed, nil
 }
 
-// systemdTokens splits one command line the way systemd does: on unquoted
+// SystemdTokens splits one command line the way systemd does: on unquoted
 // whitespace, honouring single quotes, double quotes and backslash escapes.
+//
+// It is exported because internal/repro reduces an Exec value to its program
+// when building a bundle, and it must arrive at the SAME first token this
+// package resolves. A private copy there would be a correctness bug waiting to
+// happen: the two tokenisers would drift, the bundle would name a different
+// program than the check attributes, and the finding would stop reproducing --
+// silently, since both halves would look right on their own.
 //
 // It is a tokeniser and only a tokeniser (INV-2). systemd performs no globbing,
 // no command substitution and no word splitting of variable values, so this must
@@ -438,7 +449,7 @@ func logicalLines(origin string, data []byte) (lines, unparsed []string, err err
 //
 // C-style escapes (\xNN, \NNN, \uXXXX) are NOT decoded; the caller notes their
 // presence rather than half-decoding a path.
-func systemdTokens(s string) []string {
+func SystemdTokens(s string) []string {
 	var (
 		out  []string
 		cur  strings.Builder

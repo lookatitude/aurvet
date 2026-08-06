@@ -6,7 +6,7 @@
 # completion is indistinguishable from "no match".
 
 # AURVET_COMMANDS_BEGIN
-_aurvet_commands=(scan diff baseline adjudicate update review install snapshot explain doctor version)
+_aurvet_commands=(scan diff baseline triage adjudicate bundle update review install snapshot explain doctor version)
 # AURVET_COMMANDS_END
 
 # AURVET_FLAGS_BEGIN
@@ -131,6 +131,15 @@ _aurvet() {
 	adjudicate)
 		# list and revoke, plus a finding fingerprint nothing local can enumerate.
 		mapfile -t COMPREPLY < <(compgen -W "list revoke" -- "$cur")
+		;;
+	triage)
+		# the three weights plus list and drop; the fingerprint that follows comes
+		# from the report and nothing local can enumerate it.
+		mapfile -t COMPREPLY < <(compgen -W "ack snooze note list drop" -- "$cur")
+		;;
+	bundle)
+		# a finding fingerprint, then an output directory.
+		mapfile -t COMPREPLY < <(compgen -d -- "$cur")
 		;;
 	update)
 		# takes no arguments: an update is the whole command. --check is a flag and

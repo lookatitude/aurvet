@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lookatitude/aurvet/internal/adjudicate"
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/aur"
 	"github.com/lookatitude/aurvet/internal/baseline"
@@ -35,6 +36,7 @@ import (
 	"github.com/lookatitude/aurvet/internal/report"
 	"github.com/lookatitude/aurvet/internal/safe"
 	"github.com/lookatitude/aurvet/internal/surfaces"
+	"github.com/lookatitude/aurvet/internal/triage"
 )
 
 // Exit codes are contractual (spec §14). They are the machine-readable result
@@ -99,13 +101,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// adjudicate. A judgement is recorded, signed and dated, so every input it
 	// needs is explicit: there is no flag here that means "ignore this".
 	reason := fs.String("reason", "",
-		"adjudicate: why this finding is acceptable — mandatory, and stored inside the signed record")
+		"adjudicate: why this finding is acceptable — mandatory, and stored inside the signed "+
+			"record. triage: the note, required by `triage note` and optional for ack and snooze")
 	scope := fs.String("scope", "",
-		"adjudicate: pin (this evidence only, the default), subject (this rule for this subject), "+
-			"rule (THIS CHECK OFF EVERYWHERE)")
+		"adjudicate/triage: pin (this evidence only, the default), subject (this rule for this "+
+			"subject), rule (THIS CHECK OFF EVERYWHERE — adjudicate only)")
 	expiryDays := fs.Int("expiry-days", 0,
-		"adjudicate: how many days the judgement lasts (default 180, maximum 365; there is no "+
-			"non-expiring suppression)")
+		"adjudicate: how many days the judgement lasts (default 180, maximum 365). triage: default "+
+			"30/max 90 for ack and note, 7/30 for snooze. There is no non-expiring suppression")
 	forceRuleScope := fs.Bool("force-rule-scope", false,
 		"adjudicate: the explicit force -scope rule requires, because turning a check off "+
 			"everywhere is a standing property of the host")
@@ -163,7 +166,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// One source line, deliberately: completions_test.go reads this literal to
 		// check that every dispatched subcommand is discoverable, and a wrapped
 		// string would hide half of them from the check.
-		fmt.Fprintln(stderr, "commands: scan, diff, baseline, adjudicate, update, review, install, snapshot, explain, doctor, version")
+		fmt.Fprintln(stderr, "commands: scan, diff, baseline, triage, adjudicate, bundle, update, review, install, snapshot, explain, doctor, version")
 		return exitUsage
 	}
 
@@ -226,6 +229,45 @@ func run(args []string, stdout, stderr io.Writer) int {
 			baseURL:     *bundleURL,
 			check:       *checkOnly,
 		}, stdout, stderr)
+
+	// triage is spec §12's MIDDLE weight: local, unsigned, keyless, expiring. It
+	// is dispatched next to adjudicate because the two are constantly confused,
+	// and separated by everything else: a different store, a different package,
+	// and no path from either to the other. Nothing it writes can unblock
+	// `baseline init`; see cmd/aurvet/triage.go and internal/triage.
+	case "triage":
+		return runTriage(triageOpts{
+			baselineOpts: baselineOpts{
+				offlineRoot: *offlineRoot,
+				noNet:       *noNet,
+				jsonOut:     *jsonOut,
+				tier:        *tier,
+				args:        cmdArgs,
+			},
+			note:       *reason,
+			scope:      *scope,
+			expiryDays: *expiryDays,
+		}, stdout, stderr)
+
+	// bundle emits the redacted reproducer (spec §12). It writes a directory the
+	// operator names, reaches no verdict about the system, and never copies a
+	// file's own bytes.
+	case "bundle":
+		if len(cmdArgs) == 0 || len(cmdArgs) > 2 {
+			bundleUsage(stderr)
+			return exitUsage
+		}
+		bo := bundleOpts{
+			offlineRoot: *offlineRoot,
+			noNet:       *noNet,
+			jsonOut:     *jsonOut,
+			tier:        *tier,
+			fingerprint: cmdArgs[0],
+		}
+		if len(cmdArgs) == 2 {
+			bo.dir = cmdArgs[1]
+		}
+		return runBundle(bo, stdout, stderr)
 
 	// adjudicate is what `baseline init`'s refusal tells the operator to run. It
 	// signs, so like baseline it needs a key the operator supplies, and it never
@@ -647,6 +689,24 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 		view = report.SinceLastView(prev, ok, res)
 	}
 
+	// Triage, applied to the DISPLAY and never to the verdict.
+	//
+	// spec §12 says an `ack` or a `snooze` "suppresses from the default view", and
+	// the default view is this listing. It is deliberately NOT allowed to reach
+	// the exit code, the coverage verdict or the persisted report -- report.View
+	// exists to keep those apart, and a local unsigned record that could turn a
+	// critical into exit 0 would be the blindfold the whole lifecycle is arranged
+	// to prevent. What it hides, it hides from the eye only.
+	//
+	// The one thing it CAN change is coverage: an unreadable triage store is a
+	// coverage gap (INV-9), so a store nobody can parse pushes the run to exit 3
+	// rather than being quietly treated as empty.
+	if stateDir != "" {
+		var tout triage.Outcome
+		res, view, tout = applyTriage(stateDir, res, view, time.Now())
+		writeTriageBanner(stampOut, tout)
+	}
+
 	if opts.jsonOut {
 		err = report.JSONView(stdout, view, summary, floor)
 	} else {
@@ -667,6 +727,62 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 	}
 
 	return report.ExitCode(res, floor)
+}
+
+// applyTriage narrows what a scan LISTS by the local triage records, and returns
+// the verdict result, the narrowed view and the outcome.
+//
+// The verdict result is returned rather than mutated in place because it gains
+// the coverage gaps an unusable store raises: those are a real statement about
+// what this run could not establish, and they must reach the exit code. Nothing
+// else about the verdict changes -- the finding list it is computed from is the
+// full one.
+func applyTriage(stateDir string, res finding.Result, view report.View, now time.Time) (finding.Result, report.View, triage.Outcome) {
+	set := triage.Load(stateDir)
+	if len(set.Records) == 0 && len(set.Faults) == 0 {
+		return res, view, triage.Outcome{}
+	}
+	out := triage.ApplyWith(adjudicate.BuiltIn(), set, res, now)
+
+	hidden := make(map[string]bool, len(out.Suppressed))
+	for _, s := range out.Suppressed {
+		hidden[report.FindingID(s.Finding)] = true
+	}
+	kept := make([]finding.Finding, 0, len(view.Display.Findings))
+	for _, f := range view.Display.Findings {
+		if hidden[report.FindingID(f)] {
+			continue
+		}
+		kept = append(kept, f)
+	}
+
+	// The fault gaps join the verdict AND the display: a gap is never diffed away
+	// and never triaged away.
+	res.Gaps = out.Kept.Gaps
+	view.Verdict = res
+	view.Display = finding.Result{Findings: kept, Gaps: res.Gaps}
+	return res, view, out
+}
+
+// writeTriageBanner states what the listing is not showing. INV-6: a report that
+// silently omits suppressed findings lies by omission, and a local unsigned
+// record is the cheapest suppression in the tool -- so its effect is announced
+// above the findings rather than left to `aurvet triage list`.
+func writeTriageBanner(w io.Writer, out triage.Outcome) {
+	if len(out.Suppressed) == 0 && len(out.Annotated) == 0 && len(out.NeedsAttention()) == 0 {
+		return
+	}
+	if n := len(out.Suppressed); n > 0 {
+		fmt.Fprintf(w, "triage: %d finding(s) are NOT listed below, hidden by local UNSIGNED triage "+
+			"records; the exit code and the coverage verdict still count them\n", n)
+	}
+	if n := len(out.Annotated); n > 0 {
+		fmt.Fprintf(w, "triage: %d finding(s) carry a note and are still listed in full\n", n)
+	}
+	if n := len(out.NeedsAttention()); n > 0 {
+		fmt.Fprintf(w, "triage: %d record(s) suppress nothing (stale, expired, spent or dead); "+
+			"`aurvet triage list` says which\n", n)
+	}
 }
 
 // runExplain re-runs the same sweep as scan, then renders the rationale for

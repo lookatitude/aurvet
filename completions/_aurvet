@@ -24,7 +24,9 @@ _aurvet() {
 		'scan:sweep the system and report provenance findings'
 		'diff:classify drift against the signed baseline (= baseline diff)'
 		'baseline:the signed baseline and its trust chain'
+		'triage:ack, snooze or note a finding -- local, unsigned, expiring'
 		'adjudicate:record, list or revoke a signed judgement about a finding'
+		'bundle:emit a redacted fixture root reproducing one finding'
 		'update:fetch and verify the indicator bundle (never automatic)'
 		'review:analyse one recipe; never builds it'
 		'install:review the dependency closure, prompt, snapshot, hand over'
@@ -83,6 +85,14 @@ _aurvet() {
 			# list and revoke; the third form takes a finding fingerprint, which
 			# nothing local can enumerate without running a scan.
 			_values 'adjudicate subcommand' list revoke
+			;;
+		triage)
+			# the three weights of §12's middle layer, plus list and drop.
+			_values 'triage verb' ack snooze note list drop
+			;;
+		bundle)
+			# a finding fingerprint, then the destination directory.
+			_files -/
 			;;
 		update)
 			_message 'update takes no arguments (--check is a flag)'

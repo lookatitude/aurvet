@@ -10,7 +10,9 @@ tampered with
 *aurvet* [_flags_] *scan* [*-pkg* _name_]... [*-allow-degraded*]++
 *aurvet* [_flags_] *diff*++
 *aurvet* [_flags_] *baseline* *init*|*append*|*status*|*show*|*verify*|*pushed*|*diff*++
+*aurvet* [_flags_] *triage* *ack*|*snooze*|*note* _fingerprint_|*list*|*drop* _fingerprint_++
 *aurvet* [_flags_] *adjudicate* _fingerprint_|*list*|*revoke* _fingerprint_++
+*aurvet* [_flags_] *bundle* _fingerprint_ [_directory_]++
 *aurvet* [_flags_] *update* [*-check*]++
 *aurvet* [_flags_] *review* _dir_|_pkgbase_++
 *aurvet* [_flags_] *install* _pkgbase_++
@@ -90,6 +92,56 @@ spellings are accepted, as is _-flag=value_.
 	necessarily live on the monitored machine, so the host being watched can
 	write to the record of what happened on it.
 
+*triage* *ack*|*snooze*|*note* _fingerprint_|*list*|*drop* _fingerprint_
+	The *lightweight* layer: local, *unsigned*, keyless, expiring. Spec §12 asks
+	for three weights and not two, because a design whose only suppression is a
+	signed judgement is a design whose users over-suppress or ignore the output.
+
+	*It cannot unblock* *baseline* *init*. That refusal is decided from the signed
+	adjudication store and nothing else, and no code path joins the two stores.
+	A keyless record that could satisfy the strongest gate in the tool would make
+	the middle weight a bypass of the top one.
+
+	*ack* -- seen and expected. Hidden from the default *scan* listing until it
+	expires; 30 days by default, 90 at most.
+
+	*snooze* -- not now. The same, for a *shorter* window: 7 days by default, 30
+	at most, and every rendering of it says when it comes back.
+
+	*note* -- annotation only. *It suppresses nothing*: the finding is still
+	listed in full, with the note beside it. *-reason* is required, because the
+	note is the whole point of the verb. This is the one an investigation reaches
+	for, and one that quietly hid something would be the worst of the three.
+
+	What a record hides, it hides *from the listing only*. The exit code, the
+	coverage verdict and the persisted report all still count a triaged finding,
+	and *scan* prints how many it is not showing above the findings. A local
+	unsigned file must not be able to turn a critical into exit *0*.
+
+	Two scopes: *pin* (this exact evidence, the default; spent by any change to
+	it) and *subject* (this rule for this one package or path). *Rule scope is
+	not offered here* -- turning a check off everywhere is a standing property of
+	the host, is echoed in every later run header, and an unsigned record with no
+	author cannot answer the question that header provokes. Use *adjudicate*
+	*-scope* *rule* *-force-rule-scope*, which is signed and attributable.
+
+	A record whose rule's matching semantics move reads *stale*, is preserved
+	verbatim and suppresses nothing, exactly as an adjudication does. A rule that
+	declares no fingerprint epoch *can* still be triaged -- unlike an
+	adjudication -- and the record then says, in words, that it cannot be told
+	stale; the cost of being wrong is bounded by the expiry.
+
+	A coverage *gap* can never be triaged (INV-3): a gap says something was not
+	examined, and no acknowledgement turns unexamined into examined.
+
+	*list* shows every record and what it is currently doing, including what it
+	is hiding and which records will never do anything again. It exits *1* when
+	any record needs attention (stale, expired, spent or dead) and *3* when a
+	record could not be read at all. *drop* removes a record by fingerprint.
+
+	The four writing verbs refuse under *-offline-root* (INV-5). *list* reads and
+	is allowed.
+
 *adjudicate* _fingerprint_|*list*|*revoke* _fingerprint_
 	Record, list or withdraw a signed judgement about one finding: "I looked at
 	this, here is why it is acceptable, and here is when that has to be decided
@@ -122,6 +174,68 @@ spellings are accepted, as is _-flag=value_.
 	A coverage *gap* can never be adjudicated (INV-3): adjudicating "I could not
 	examine this" would turn unexamined into clean. Signing needs a key you
 	supply, the same as *baseline*.
+
+*bundle* _fingerprint_ [_directory_]
+	Emit a redacted, self-contained fixture root reproducing one finding, so that
+	a false-positive report can be a test case instead of a description. The
+	directory defaults to *./aurvet-bundle-*_fingerprint_ and must be empty.
+
+	*What a bundle contains, exactly.* *No file's own bytes are copied.* Every
+	regular file in it is either a zero-byte placeholder -- real path, real mode,
+	real mtime, contents never read -- or a file *rebuilt* from the handful of
+	directives aurvet's compiled checks parse: *ExecStart=* and its siblings,
+	*Exec=*, *TryExec=*, *When=*, *Type=*, the enablement keys, and the path list
+	of _ld.so.preload_. Comments, *Environment=*, *EnvironmentFile=*, *User=*,
+	*Description=* and every other directive are dropped unread, because the
+	filter is an allowlist: a directive nobody thought of is withheld by default.
+
+	Within a kept command, *only the program is written and the arguments are
+	withheld*: *ExecStart=/usr/local/bin/backup --token* _<secret>_ is emitted as
+	*ExecStart=/usr/local/bin/backup*. The allowlist alone was not enough here --
+	the directive is kept for a good reason and a secret in its arguments rode
+	along inside it. Nothing is lost: aurvet attributes ownership from the first
+	token and reads nothing past it, so the finding still reproduces with the same
+	fingerprint. An argument is uninspected free text from the reporting machine,
+	and it is treated the same way *Environment=* is. Each rebuilt file's entry in
+	_MANIFEST.json_ and in the README table counts the arguments it withheld.
+
+	Package database entries are *synthesised* from parsed fields -- *%NAME%*,
+	*%VERSION%*, *%BASE%*, *%VALIDATION%*, *%INSTALLDATE%*, and a *%FILES%* list
+	narrowed to the paths the bundle carries. *%PACKAGER%* -- your own name and
+	address on anything you built locally -- is never written. Only packages that
+	own a path in the bundle are included: a bundle is not your installed-software
+	inventory.
+
+	_etc/passwd_ and _etc/pacman.conf_, where present, are *invented* from the
+	bundle's own contents: the users whose home directories it already carries,
+	and the *HookDir* lines its own hooks need. Neither is a copy of yours.
+
+	*Home paths.* Absolute paths under _/home_ inside file contents are rewritten
+	to _/home/redacted/redacted_. A home path that the finding *is about* -- an
+	emitted file, or a program an emitted entry point resolves to -- keeps its own
+	spelling, because without it the bundle reproduces nothing; every such path is
+	printed before you send it and listed in the bundle's own *README.md*. Where
+	the redacted path is the *program* an *Exec* directive names, the bundle says
+	the finding does not reproduce rather than shipping a fixture that produces
+	something else, and the path is printed to your terminal and nowhere in the
+	bundle.
+
+	*What does not reproduce.* Integrity findings need a file's contents and its
+	package's mtree; AUR provenance findings need a network response; drift needs
+	a signed baseline; correlation depends on when the bundle is opened. Those
+	classes are *labelled in the bundle* rather than emitted as a fixture that
+	quietly finds nothing, and a rule this build has not classified is reported as
+	not reproducing rather than assumed to work.
+
+	*README.md* states all of the above per file, and *MANIFEST.json* carries the
+	same for a machine. Exit *0* when the bundle was written and this class of
+	finding reproduces from it, *2* for no such finding id or an unusable
+	destination, *3* when it was written but the class cannot be reproduced or
+	something it meant to include could not be read. It never exits *1*: it
+	reaches no verdict about the system.
+
+	Under *-offline-root* the destination must lie *outside* the examined tree
+	(INV-5).
 
 *update*
 	Fetch and verify the indicator bundle. *Never automatic* -- nothing else in
@@ -226,8 +340,13 @@ spellings are accepted, as is _-flag=value_.
 	the two writes and nothing else.
 
 *-expiry-days* _n_
-	*adjudicate* only: how many days the judgement lasts. Default 180, maximum
-	365. There is no value meaning never.
+	*adjudicate* and *triage*: how many days the record lasts. There is no value
+	meaning never, in either weight.
+
+	*adjudicate*: default 180, maximum 365. *triage*: default 30 and maximum 90
+	for *ack* and *note*, default 7 and maximum 30 for *snooze* -- every triage
+	window is shorter than an adjudication's default, because the lighter weight
+	must not outlive the heavier one.
 
 *-force-rule-scope*
 	*adjudicate* only: the explicit force *-scope rule* requires. A rule-scope
@@ -287,9 +406,15 @@ spellings are accepted, as is _-flag=value_.
 	machine being watched.
 
 *-reason* _text_
-	*adjudicate* only: why the finding is acceptable. Mandatory, and recorded
-	inside the signed document rather than printed and forgotten. Whitespace and
-	tokens too short to re-evaluate ("ok", "n/a") are refused.
+	*adjudicate*: why the finding is acceptable. Mandatory, and recorded inside
+	the signed document rather than printed and forgotten. Whitespace and tokens
+	too short to re-evaluate ("ok", "n/a") are refused.
+
+	*triage*: the note. Required by *triage* *note*, which exists to carry it, and
+	optional for *ack* and *snooze* -- demanding twelve considered characters
+	before an operator may dismiss an *info* finding about their own unit would
+	rebuild the friction the middle weight exists to remove. The bound on being
+	wrong there is the expiry, not the prose.
 
 *-remote* _url_
 	*baseline pushed* only: the remote the chain was pushed to, e.g.
@@ -297,8 +422,10 @@ spellings are accepted, as is _-flag=value_.
 	truncation detectable; aurvet performs no push and holds no credentials.
 
 *-scope* _pin_|_subject_|_rule_
-	*adjudicate* only: the blast radius of the judgement. Defaults to *pin*, the
-	narrowest. See *adjudicate* above.
+	*adjudicate* and *triage*: the blast radius of the record. Defaults to *pin*,
+	the narrowest, in both. *rule* is *adjudicate* only and additionally needs
+	*-force-rule-scope*; see *triage* above for why an unsigned record may not
+	have it.
 
 *-show-recipe*
 	*review*/*install* only: print the recipe text in full in addition to the

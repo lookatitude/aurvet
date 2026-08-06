@@ -19,7 +19,9 @@ end
 complete -c aurvet -n __fish_use_subcommand -a scan -d 'sweep the system and report provenance findings'
 complete -c aurvet -n __fish_use_subcommand -a diff -d 'classify drift against the signed baseline (= baseline diff)'
 complete -c aurvet -n __fish_use_subcommand -a baseline -d 'the signed baseline and its trust chain'
+complete -c aurvet -n __fish_use_subcommand -a triage -d 'ack, snooze or note a finding -- local, unsigned, expiring'
 complete -c aurvet -n __fish_use_subcommand -a adjudicate -d 'record, list or revoke a signed judgement about a finding'
+complete -c aurvet -n __fish_use_subcommand -a bundle -d 'emit a redacted fixture root reproducing one finding'
 complete -c aurvet -n __fish_use_subcommand -a update -d 'fetch and verify the indicator bundle (never automatic)'
 complete -c aurvet -n __fish_use_subcommand -a review -d 'analyse one recipe; never builds it'
 complete -c aurvet -n __fish_use_subcommand -a install -d 'review the dependency closure, prompt, snapshot, hand over'
@@ -60,6 +62,12 @@ complete -c aurvet -n '__fish_seen_subcommand_from baseline' -a 'init append sta
 # adjudicate subcommands; the third form takes a finding fingerprint, which
 # nothing local can enumerate without running a scan
 complete -c aurvet -n '__fish_seen_subcommand_from adjudicate' -a 'list revoke'
+
+# triage verbs: §12's middle weight, plus list and drop
+complete -c aurvet -n '__fish_seen_subcommand_from triage' -a 'ack snooze note list drop'
+
+# bundle takes a fingerprint and then a destination directory
+complete -c aurvet -n '__fish_seen_subcommand_from bundle' -F
 
 # review takes a directory or a pkgbase; only the directory is completable
 complete -c aurvet -n '__fish_seen_subcommand_from review' -F
