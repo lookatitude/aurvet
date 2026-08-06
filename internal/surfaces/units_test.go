@@ -3,6 +3,7 @@ package surfaces
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -361,24 +362,48 @@ func ownersFor(t *testing.T, name string) (*os.Root, *own.Owners) {
 	return root, owners
 }
 
-// TestUnitFindingsOnFixtureRoots is the INV-8 gate for this rule. stock must be
-// silent while still having examined something; cruft's one hand-written unit is
-// suspicious and never critical (it is a backup script, and the tool cannot tell
-// that from malware); malicious names its inert marker.
+// TestUnitFindingsOnFixtureRoots is the INV-8 gate for this surface. stock must
+// be silent while still having examined something; cruft's one hand-written unit
+// is suspicious and never critical (it is a backup script, and the tool cannot
+// tell that from malware); malicious names its inert marker.
+//
+// Rule and severity are asserted alongside the subject, not just the subject.
+// Two rules now share this surface and they carry different weight: an unowned
+// file that EXISTS is suspicious, while an unclaimed bare name in a directory
+// only its owner can write is info. Collapsing them into a subject list would
+// let either quietly become the other.
+//
+// stock's `ExecStartPre=-fooplymouth` and cruft's `ExecStop=sysutil_ioctl ...`
+// are the two shapes measured on the reference system, where 8 unit-coverage
+// gaps decomposed into 6 of the first and 2 of the second. Neither may produce a
+// gap here: no expected-gap entry exists because the expected count is zero.
 func TestUnitFindingsOnFixtureRoots(t *testing.T) {
+	type want struct {
+		rule    string
+		subject string
+		sev     finding.Severity
+	}
 	cases := []struct {
 		root      string
 		wantUnits int
-		subjects  []string
+		findings  []want
 	}{
+		// One unit, one `-`-prefixed bare command that resolves to nothing, and
+		// nothing to say about it.
 		{"stock", 1, nil},
-		{"cruft", 20, []string{"etc/systemd/system/local-backup.service"}},
-		{"malicious", 2, []string{"etc/systemd/system/systemd-initd-inert.service"}},
+		{"cruft", 20, []want{
+			// The packaged unit with the unclaimed bare ExecStop. Every
+			// search-path directory in this root is mode 0755, so planting the
+			// name already needs the owner's privileges: info.
+			{RuleUnitExecHijackable, "usr/lib/systemd/system/sysutil-modules.service", finding.SevInfo},
+			// The hand-written admin unit running an unowned binary that is
+			// really there.
+			{RuleUnitExecUnowned, "etc/systemd/system/local-backup.service", finding.SevSuspicious},
+		}},
+		{"malicious", 2, []want{
+			{RuleUnitExecUnowned, "etc/systemd/system/systemd-initd-inert.service", finding.SevSuspicious},
+		}},
 	}
-	// Both fixture subjects name a file that EXISTS in its root, so both must be
-	// suspicious rather than info. Asserting the exact severity is what keeps the
-	// presence split from quietly demoting a real hit.
-	const wantSev = finding.SevSuspicious
 	for _, c := range cases {
 		t.Run(c.root, func(t *testing.T) {
 			root, owners := ownersFor(t, c.root)
@@ -392,21 +417,24 @@ func TestUnitFindingsOnFixtureRoots(t *testing.T) {
 			}
 			findings, fgaps := UnitFindings(root, units, owners)
 			if len(fgaps) != 0 {
-				t.Errorf("%s: unexpected ownership gaps %+v", c.root, fgaps)
+				t.Errorf("%s: unexpected ownership gaps %+v; the `-` prefix and an unfound bare command "+
+					"are both determinate answers, not gaps", c.root, fgaps)
 			}
-			var got []string
+			var got, wantLines []string
 			for _, f := range findings {
-				got = append(got, f.Subject)
-				if f.Severity != wantSev {
-					t.Errorf("%s: %s is %v, want %v; correlation is what earns critical, and an existing "+
-						"unowned file is more than info", c.root, f.Subject, f.Severity, wantSev)
+				got = append(got, fmt.Sprintf("%s %s %v", f.RuleID, f.Subject, f.Severity))
+				if f.Severity == finding.SevCritical {
+					t.Errorf("%s: %s is critical; only a cluster may reach critical", c.root, f.Subject)
 				}
 				if f.Limits == "" {
 					t.Errorf("%s: finding %s carries no Limits (INV-6)", c.root, f.Subject)
 				}
 			}
-			if strings.Join(got, ",") != strings.Join(c.subjects, ",") {
-				t.Errorf("%s: subjects = %v, want %v", c.root, got, c.subjects)
+			for _, w := range c.findings {
+				wantLines = append(wantLines, fmt.Sprintf("%s %s %v", w.rule, w.subject, w.sev))
+			}
+			if strings.Join(got, "\n") != strings.Join(wantLines, "\n") {
+				t.Errorf("%s findings:\n got %v\nwant %v", c.root, got, wantLines)
 			}
 		})
 	}
@@ -602,21 +630,169 @@ func TestUnitFindingsResolvesBareCommandAgainstTheSearchPath(t *testing.T) {
 	}
 }
 
-// TestUnitFindingsUnfoundBareCommandIsAGap: a bare name in no search-path
-// directory is not attributable to anything, and INV-9 says that is a gap.
-func TestUnitFindingsUnfoundBareCommandIsAGap(t *testing.T) {
+// TestUnitFindingsUnfoundBareCommandIsAHijackableFinding: a bare name that
+// resolves to nothing is NOT a coverage gap. The check ran and got a determinate
+// answer -- systemd will resolve the name at runtime against a search path in
+// which nothing holds it -- and that answer is a hole an attacker can fill. The
+// unit file's own digest still verifies afterwards, because the unit was never
+// modified; the only thing that changed is a file appearing in a directory.
+func TestUnitFindingsUnfoundBareCommandIsAHijackableFinding(t *testing.T) {
 	root := unitTree(t, map[string]string{
-		"usr/lib/systemd/system/nowhere.service": "[Service]\nExecStart=nowhere-at-all --run\n",
+		"usr/lib/systemd/system/nowhere.service": "[Service]\nExecStop=nowhere-at-all --run\n",
+		"usr/bin/keep":                           "inert\n",
 	}, nil)
 	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
-		"usr/lib/systemd/system/nowhere.service",
+		"usr/lib/systemd/system/nowhere.service", "usr/bin/keep",
 	}}})
 	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
 	findings, gaps := UnitFindings(root, units, owners)
-	if len(findings) != 0 {
-		t.Errorf("findings = %+v, want none", findings)
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %+v, want none: an unfound bare command is a determinate answer, not an "+
+			"inability to look", gaps)
 	}
-	if len(gaps) != 1 || !strings.Contains(gaps[0].Reason, "search path") {
-		t.Fatalf("gaps = %+v, want one naming the search path", gaps)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %+v, want exactly 1", findings)
+	}
+	f := findings[0]
+	if f.RuleID != RuleUnitExecHijackable {
+		t.Errorf("rule = %q, want %q", f.RuleID, RuleUnitExecHijackable)
+	}
+	if f.Subject != "usr/lib/systemd/system/nowhere.service" {
+		t.Errorf("subject = %q, want the unit holding the directive", f.Subject)
+	}
+	// Every search-path directory in this tree is 0755 and owned by the test
+	// user, so nothing but that user can plant the name: visible, not alarming.
+	if f.Severity != finding.SevInfo {
+		t.Errorf("severity = %v, want info when no search-path directory is writable by a "+
+			"non-owner", f.Severity)
+	}
+	ev := strings.Join(f.Evidence, "\n")
+	for _, want := range []string{
+		"ExecStop",             // the directive
+		"nowhere-at-all",       // the bare name
+		"usr/local/sbin",       // the search path consulted, in order
+		"usr/bin",              // the directory that would win
+		"would be found first", // ...said as such
+	} {
+		if !strings.Contains(ev, want) {
+			t.Errorf("evidence does not mention %q:\n%s", want, ev)
+		}
+	}
+	if !strings.Contains(strings.ToLower(f.Limits), "runtime") {
+		t.Errorf("Limits does not say resolution happens at runtime (INV-6): %q", f.Limits)
+	}
+}
+
+// TestUnitFindingsHijackableWinnerIsTheFirstDirectoryTHATEXISTS: the search path
+// is consulted in order, and a directory absent from the root cannot receive a
+// file without also being created. Naming the first entry unconditionally would
+// tell an operator to inspect a directory that is not there.
+func TestUnitFindingsHijackableWinnerIsTheFirstDirectoryTHATEXISTS(t *testing.T) {
+	root := unitTree(t, map[string]string{
+		"usr/lib/systemd/system/hole.service": "[Service]\nExecStart=absent-helper\n",
+		"usr/local/bin/other":                 "inert\n",
+		"usr/bin/other":                       "inert\n",
+	}, nil)
+	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+		"usr/lib/systemd/system/hole.service",
+	}}})
+	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
+	findings, _ := UnitFindings(root, units, owners)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %+v, want exactly 1", findings)
+	}
+	ev := strings.Join(findings[0].Evidence, "\n")
+	if !strings.Contains(ev, "usr/local/bin/absent-helper") {
+		t.Errorf("evidence does not name usr/local/bin as the winner (usr/local/sbin does not exist "+
+			"in this root):\n%s", ev)
+	}
+}
+
+// TestUnitFindingsHijackableIsSuspiciousWhenTheWinnerIsGroupOrWorldWritable is
+// the severity argument made from the evidence rather than from a prior. A
+// root-only-writable directory needs root to plant the file, and an attacker who
+// already has root does not need this hole; a directory a non-root user can
+// write is a privilege boundary this hole crosses.
+func TestUnitFindingsHijackableIsSuspiciousWhenTheWinnerIsGroupOrWorldWritable(t *testing.T) {
+	root := unitTree(t, map[string]string{
+		"usr/lib/systemd/system/hole.service": "[Service]\nExecStart=absent-helper\n",
+		"usr/local/bin/other":                 "inert\n",
+	}, nil)
+	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+		"usr/lib/systemd/system/hole.service",
+	}}})
+	// git cannot store this mode, so it is a runtime chmod (see the fixture
+	// READMEs); 0777 is what a careless `install -d` or an unpacked tarball
+	// leaves behind.
+	if err := os.Chmod(filepath.Join(root.Name(), "usr/local/bin"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
+	findings, _ := UnitFindings(root, units, owners)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %+v, want exactly 1", findings)
+	}
+	if findings[0].Severity != finding.SevSuspicious {
+		t.Errorf("severity = %v, want suspicious: a non-root user can plant the name in the "+
+			"directory that wins", findings[0].Severity)
+	}
+	if !containsSubstr(findings[0].Evidence, "writable") {
+		t.Errorf("evidence does not say the winning directory is writable: %v", findings[0].Evidence)
+	}
+}
+
+// TestUnitFindingsOptionalPrefixOnAnAbsentBareCommandIsSilent: six of the eight
+// unit-coverage gaps measured on the reference system were
+// `ExecStartPre=-plymouth --wait quit` in systemd's own units. The `-` is the
+// unit author saying the command may be absent and its failure is ignored. The
+// check RAN and got a determinate answer; reporting that as "could not be
+// examined" is false, and INV-9 cuts both ways.
+func TestUnitFindingsOptionalPrefixOnAnAbsentBareCommandIsSilent(t *testing.T) {
+	root := unitTree(t, map[string]string{
+		"usr/lib/systemd/system/rescue.service": "[Service]\nExecStartPre=-plymouth --wait quit\n" +
+			"ExecStart=/usr/bin/rescue\n",
+		"usr/bin/rescue": "inert\n",
+	}, nil)
+	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+		"usr/lib/systemd/system/rescue.service", "usr/bin/rescue",
+	}}})
+	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
+	findings, gaps := UnitFindings(root, units, owners)
+	if len(findings) != 0 || len(gaps) != 0 {
+		t.Fatalf("findings = %+v, gaps = %+v; want neither for a documented optional dependency "+
+			"that is absent", findings, gaps)
+	}
+}
+
+// TestUnitFindingsOptionalPrefixIsNotAFreePass: `-` says "failure is ignored",
+// not "this command is uninteresting". A command that DOES resolve is subject to
+// the ordinary ownership verdict, or an attacker gets an exemption for the price
+// of one character.
+func TestUnitFindingsOptionalPrefixIsNotAFreePass(t *testing.T) {
+	root := unitTree(t, map[string]string{
+		"usr/lib/systemd/system/abs.service":  "[Service]\nExecStartPre=-/usr/local/bin/evil-inert\n",
+		"usr/lib/systemd/system/bare.service": "[Service]\nExecStartPre=-evil-inert-bare\n",
+		"usr/local/bin/evil-inert":            "inert marker, not a payload\n",
+		"usr/local/bin/evil-inert-bare":       "inert marker, not a payload\n",
+	}, nil)
+	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+		"usr/lib/systemd/system/abs.service", "usr/lib/systemd/system/bare.service",
+	}}})
+	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
+	findings, gaps := UnitFindings(root, units, owners)
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %+v, want none", gaps)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("findings = %+v, want 2: both the absolute and the bare `-` command resolve to an "+
+			"unowned file and both are ordinary unowned-ExecStart findings", findings)
+	}
+	for _, f := range findings {
+		if f.RuleID != RuleUnitExecUnowned {
+			t.Errorf("%s: rule = %q, want %q", f.Subject, f.RuleID, RuleUnitExecUnowned)
+		}
+		if f.Severity != finding.SevSuspicious {
+			t.Errorf("%s: severity = %v, want suspicious", f.Subject, f.Severity)
+		}
 	}
 }

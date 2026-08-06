@@ -536,11 +536,19 @@ func runExplain(offlineRoot string, noNet bool, tier, fingerprint string, stdout
 // 2-9). A non-nil error means a hard failure occurred before anything could
 // be analysed -- callers map that to exit 2, never 3.
 //
-// cl is a test seam: nil means "build the real HTTP client", so production
-// call sites (runScan, runExplain) are unchanged by its presence. Without it
-// no hermetic test could reach scan's exit-0 path through a network check --
+// cl is a test seam: nil means "build the real HTTP client". Without it no
+// hermetic test could reach scan's exit-0 path through a network check --
 // sweep hardcoded aur.NewHTTP with no way to inject aur.Fake, which is why two
 // exit-0 criticals (report-sec findings 1 and 4) survived task 9's own suite.
+//
+// Since the full pipeline landed, sweep has NO production caller: runScan and
+// runExplain both go through fullScan, which needs the parsed package set for
+// the ownership oracle, the derived exemptions and correlation's attribution,
+// and so calls loadDBs/sweepWith itself. What remains here is the
+// provenance-only path, kept because the tests that pin P1-A's exit-code
+// contract are about provenance alone and should not have to stand up an
+// integrity and surfaces scan to assert it. It is a test entry point living in
+// a production file; do not add a caller to it.
 func sweep(ctx context.Context, cfg config.Config, noNet bool, cl aur.Client) (finding.Result, report.Summary, error) {
 	d, err := loadDBs(cfg)
 	if err != nil {

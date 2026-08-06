@@ -16,7 +16,6 @@ import (
 
 	"github.com/lookatitude/aurvet/internal/check"
 	"github.com/lookatitude/aurvet/internal/config"
-	"github.com/lookatitude/aurvet/internal/finding"
 )
 
 // ---------------------------------------------------------------------------
@@ -688,13 +687,4 @@ func writeFile(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func hasGap(res finding.Result, ruleID string) bool {
-	for _, g := range res.Gaps {
-		if g.RuleID == ruleID {
-			return true
-		}
-	}
-	return false
 }

@@ -149,12 +149,26 @@
       {
         "epoch": 1,
         "semantics_digest": "635d34a0e5ca1aba5434e294a79f7dac3c4ede3a16c4a423a65775d1a5c5049a"
+      },
+      {
+        "epoch": 2,
+        "semantics_digest": "89c6ffd192e30fb084ab38849f134cc5ea7d57ca2a7dd69204fc198a61ec0f0c"
+      }
+    ],
+    "unit-execstart-hijackable": [
+      {
+        "epoch": 1,
+        "semantics_digest": "4e1f5578320bfb39eebfdf8ed4703f6eaf139babbbf32da3d4db1d3ef57d1d97"
       }
     ],
     "unit-execstart-unowned": [
       {
         "epoch": 1,
         "semantics_digest": "d183928cfa2951cdb68acbf257a9f91ae67d21780ed4ec767aba783a7e32a99e"
+      },
+      {
+        "epoch": 2,
+        "semantics_digest": "cbfad2aa8ff3c9fb45b2b96f032cb235ab8186431b2adaa43f1d15c14e4260d8"
       }
     ],
     "wants-coverage": [

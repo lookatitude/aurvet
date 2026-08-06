@@ -1,11 +1,21 @@
 # Package-owned unit: listed in the owning package's %FILES%. ExecStart resolves
 # to a package-owned binary, so nothing here is reportable.
+#
+# The ExecStop below is the reference system's own shape, copied structurally
+# from systemd's systemd-tpm2-swtpm.service: a BARE command, carrying no `-`
+# prefix, that resolves to no file in systemd's search path. It is not a coverage
+# gap -- the check ran and got a determinate answer -- it is a hole an attacker
+# can fill by putting a file at that name in the first search-path directory, at
+# which point systemd runs it as root and this unit file's own digest still
+# verifies. Rated info here because every search-path directory in this root is
+# writable only by its owner.
 [Unit]
 Description=sysutil module loading
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/sysutil --load-modules
+ExecStop=sysutil_ioctl --unix /run/sysutil/socket -s
 
 [Install]
 WantedBy=multi-user.target

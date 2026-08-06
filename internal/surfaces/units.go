@@ -34,7 +34,13 @@
 //     UnitFindings (see unitSearchPath). The parser marks them Relative rather
 //     than resolving them itself: resolution needs a filesystem, and a parser
 //     that reaches for one stops being a function of its bytes.
+//   - a relative command that resolves to NOTHING, which is not a coverage gap
+//     but one of two determinate answers. With the `-` prefix it is a documented
+//     optional dependency that is absent and nothing is reported; without it,
+//     the name is unclaimed and whichever search-path directory receives it
+//     first decides what systemd runs as root -- RuleUnitExecHijackable.
 //
+
 // # What it deliberately does NOT do (INV-6 -- a shape mis-parsed in silence is
 // a check that goes quiet)
 //
@@ -86,7 +92,18 @@ import (
 // Rule and gap identifiers for the unit surface.
 const (
 	RuleUnitExecUnowned = "unit-execstart-unowned"
-	RuleUnitCoverage    = "unit-coverage"
+
+	// RuleUnitExecHijackable is a unit that names a BARE command which resolves
+	// to no file in systemd's search path. It is named for what it is rather
+	// than for what could not be done: the check ran and got a determinate
+	// answer. systemd resolves a bare name at runtime, first match in the search
+	// path wins, so a name that resolves to nothing today is a hole -- put a
+	// file at that name in the winning directory and systemd runs it as root
+	// with the unit's privileges, while the unit file's own digest still
+	// verifies because the unit was never touched.
+	RuleUnitExecHijackable = "unit-execstart-hijackable"
+
+	RuleUnitCoverage = "unit-coverage"
 )
 
 // ErrUnparseable wraps every refusal to parse a unit. A refusal becomes a
@@ -775,6 +792,14 @@ func probePresence(root *os.Root, rel string) presence {
 // gap. A value this parser could not pin to one file is a gap too -- otherwise a
 // unit whose ExecStart is "${DIR}/agent" reads as clean.
 //
+// A value that resolves to nothing is NOT in that last category, and separating
+// it out is what took this surface from 8 blocking coverage gaps on a stock Arch
+// host to 0 (the eight decomposed into six `-plymouth` optional dependencies and
+// two bare `swtpm_ioctl` holes). "Could not be examined" must keep meaning an
+// unreadable directory, an unparseable unit, or a specifier this parser cannot
+// expand; a determinate answer filed under it is a false statement that also
+// blocks `baseline init` under INV-3.
+//
 // Severity splits on PRESENCE, and the split is the difference between a rule
 // that is usable on a real system and one that is not. Measured on the reference
 // system: 3 of 4 unowned commands are absent files named by PACKAGED units
@@ -798,12 +823,29 @@ func UnitFindings(root *os.Root, units []Unit, owners *own.Owners) ([]finding.Fi
 			Reason:  "no ownership index was supplied, so no ExecStart could be attributed to a package",
 		}}
 	}
+	// The search-path winner is a property of the ROOT, not of any one unit, so
+	// it is probed once. It is also the same fact for every hijackable finding,
+	// which is why they can be compared against each other.
+	winner := findSearchPathWinner(root)
+
 	for _, u := range units {
 		seen := map[string]bool{}
 		for _, e := range u.Exec {
-			bin, via, gap := unitExecTarget(root, u, e)
-			if gap != nil {
+			out, bin, via, gap := unitExecTarget(root, u, e)
+			switch out {
+			case execGap:
 				gaps = append(gaps, *gap)
+				continue
+			case execOptionalAbsent:
+				// The unit author declared the command optional and it is not
+				// here. Determinate, and nothing to say about it.
+				continue
+			case execHijackable:
+				if seen["bare:"+e.Bin] {
+					continue
+				}
+				seen["bare:"+e.Bin] = true
+				findings = append(findings, unitHijackableFinding(u, e, winner))
 				continue
 			}
 			if seen[bin] {
@@ -863,8 +905,34 @@ func UnitFindings(root *os.Root, units []Unit, owners *own.Owners) ([]finding.Fi
 	return findings, gaps
 }
 
-// unitExecTarget decides which file an Exec value names, or returns the coverage
-// gap explaining why that could not be decided.
+// execOutcome is what asking "which file would this Exec value run" can produce.
+// Four answers rather than two, because collapsing them is exactly what put six
+// documented optional dependencies and two real hijack surfaces into one
+// undifferentiated gap list.
+type execOutcome int
+
+const (
+	// execResolved: one concrete path, subject to the ownership verdict.
+	execResolved execOutcome = iota
+
+	// execGap: this parser could not pin the value to a file at all (a
+	// specifier, a variable, an empty value, or no root to resolve against).
+	// INV-9 -- an inability, not an answer.
+	execGap
+
+	// execOptionalAbsent: a BARE command carrying systemd's `-` prefix that
+	// resolves to nothing. The unit's own author declared the command optional
+	// and systemd ignores its failure; the command is not here. That is a
+	// determinate answer, and reporting it as "could not be examined" would be
+	// false. Neither a gap nor a finding.
+	execOptionalAbsent
+
+	// execHijackable: a bare command, NOT marked optional, that resolves to
+	// nothing. A finding -- see RuleUnitExecHijackable.
+	execHijackable
+)
+
+// unitExecTarget decides which file an Exec value names.
 //
 // The relative case is resolved against systemd's own search path rather than
 // guessed at or written off: the FIRST directory holding the name is the file
@@ -872,12 +940,18 @@ func UnitFindings(root *os.Root, units []Unit, owners *own.Owners) ([]finding.Fi
 // rather than the first OWNED one. Stopping at the first owned candidate would
 // silently absolve a name planted in /usr/local/bin ahead of the packaged
 // /usr/bin copy -- reporting the packaged file and missing the shadow.
-func unitExecTarget(root *os.Root, u Unit, e Exec) (bin, via string, gap *finding.Gap) {
+//
+// The `-` prefix suppresses only the UNRESOLVED bare case, and the conjunction
+// is deliberate: `-` says "failure is ignored", not "this command is
+// uninteresting". `ExecStartPre=-/usr/local/bin/evil` resolves, and it gets the
+// ordinary ownership verdict like any other value -- otherwise an attacker buys
+// an exemption for the price of one character.
+func unitExecTarget(root *os.Root, u Unit, e Exec) (out execOutcome, bin, via string, gap *finding.Gap) {
 	if e.Resolvable {
-		return e.Bin, "", nil
+		return execResolved, e.Bin, "", nil
 	}
 	if !e.Relative || root == nil {
-		return "", "", &finding.Gap{
+		return execGap, "", "", &finding.Gap{
 			RuleID:  RuleUnitCoverage,
 			Subject: u.Path,
 			Reason: fmt.Sprintf("%s = %s (in %s) was not attributed to a package: %s",
@@ -887,17 +961,135 @@ func unitExecTarget(root *os.Root, u Unit, e Exec) (bin, via string, gap *findin
 	for _, dir := range unitSearchPath {
 		cand := path.Join(dir, e.Bin)
 		if probePresence(root, cand) == presencePresent {
-			return "/" + cand, fmt.Sprintf("%q is a bare command name; it was resolved to /%s, the first "+
-				"entry in systemd's search path (%s) that holds a file of that name",
+			return execResolved, "/" + cand, fmt.Sprintf("%q is a bare command name; it was resolved to /%s, "+
+				"the first entry in systemd's search path (%s) that holds a file of that name",
 				e.Bin, cand, strings.Join(unitSearchPath, ", ")), nil
 		}
 	}
-	return "", "", &finding.Gap{
-		RuleID:  RuleUnitCoverage,
-		Subject: u.Path,
-		Reason: fmt.Sprintf("%s = %s (in %s): the bare command %q was not found in systemd's search "+
-			"path (%s), so it could not be attributed to a package",
-			e.Directive, e.Raw, e.Origin, e.Bin, strings.Join(unitSearchPath, ", ")),
+	if strings.Contains(e.Prefixes, "-") {
+		return execOptionalAbsent, "", "", nil
+	}
+	return execHijackable, "", "", nil
+}
+
+// searchPathWinner is which search-path directory would capture a bare name, and
+// what is known about who can write to it.
+//
+// Winner is the first entry in unitSearchPath that EXISTS in the scanned root.
+// Naming the first entry unconditionally would send an operator to inspect a
+// directory that is not there; a directory that does not exist cannot receive a
+// file without also being created, which is a larger and separately visible
+// change. Skipped records the entries passed over, so the reasoning is in the
+// evidence rather than in this comment.
+type searchPathWinner struct {
+	Dir     string   // relative path; "" when no search-path directory exists
+	Skipped []string // earlier entries absent from the root
+	Mode    fs.FileMode
+	Known   bool // whether Mode could be read at all (INV-9)
+}
+
+// writableByNonOwner reports the fact severity turns on: a group- or
+// world-writable directory can receive the planted name from someone who is not
+// root, which is a privilege boundary this hole crosses. An attacker who already
+// has root does not need the hole at all.
+func (w searchPathWinner) writableByNonOwner() bool {
+	return w.Known && w.Mode.Perm()&0o022 != 0
+}
+
+// findSearchPathWinner probes the search path through the confined root. It
+// opens directories only to stat them; nothing is read and nothing is executed.
+func findSearchPathWinner(root *os.Root) searchPathWinner {
+	w := searchPathWinner{}
+	if root == nil {
+		return w
+	}
+	for _, dir := range unitSearchPath {
+		f, err := root.Open(dir)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOTDIR) {
+				w.Skipped = append(w.Skipped, dir)
+				continue
+			}
+			// EACCES on a search-path directory: it is there, and what its mode
+			// is cannot be said. That is the higher severity, never a silence.
+			w.Dir = dir
+			return w
+		}
+		st, serr := f.Stat()
+		f.Close()
+		if serr != nil || !st.IsDir() {
+			w.Skipped = append(w.Skipped, dir)
+			continue
+		}
+		w.Dir, w.Mode, w.Known = dir, st.Mode(), true
+		return w
+	}
+	return w
+}
+
+// unitLimitHijackable is the INV-6 text for RuleUnitExecHijackable, and its
+// first job is to say that this is a statement about the search path AS IT IS
+// NOW. systemd performs the lookup at runtime, so nothing here predicts what
+// will run -- it reports that nothing currently would, and which directory
+// decides that.
+const unitLimitHijackable = "systemd resolves a bare command name at RUNTIME, so this is a statement about " +
+	"the search path as it stands in the scanned root at this moment and not a prediction about what will " +
+	"run. Nothing is currently executed from this name; the finding is that the name is unclaimed and the " +
+	"first search-path directory to receive it decides what runs, while the unit file's own digest continues " +
+	"to verify because the unit is never modified. This is weak evidence on its own and is rated accordingly: " +
+	"a packaged unit naming a command from an uninstalled optional dependency looks exactly like this, and " +
+	"the check cannot tell the two apart. It is also blind to the competent case -- a payload built into its " +
+	"own $pkgdir and shipped in the package's file list yields an ExecStart resolving to a package-owned " +
+	"binary and every check in this phase goes silent."
+
+// unitHijackableFinding builds the finding for a bare command that resolves to
+// nothing. The evidence names the unit, the directive, the bare name, the search
+// path consulted IN ORDER, and which directory would win -- an operator who
+// cannot see the winning directory cannot check the claim or fix the hole.
+func unitHijackableFinding(u Unit, e Exec, w searchPathWinner) finding.Finding {
+	sev := finding.SevInfo
+	var winnerNote string
+	switch {
+	case w.Dir == "":
+		winnerNote = fmt.Sprintf("none of the search-path directories (%s) exists in this root, so the "+
+			"name could only be captured by creating one of them first",
+			strings.Join(unitSearchPath, ", "))
+	case !w.Known:
+		sev = finding.SevSuspicious
+		winnerNote = fmt.Sprintf("a file placed at /%s/%s would be found first; who may write to that "+
+			"directory could not be determined, so the higher severity was kept", w.Dir, e.Bin)
+	case w.writableByNonOwner():
+		sev = finding.SevSuspicious
+		winnerNote = fmt.Sprintf("a file placed at /%s/%s would be found first, and that directory is "+
+			"mode %#o -- group- or world-writable, so a non-root user can plant the name",
+			w.Dir, e.Bin, w.Mode.Perm())
+	default:
+		winnerNote = fmt.Sprintf("a file placed at /%s/%s would be found first; that directory is mode "+
+			"%#o, so planting the name needs its owner's privileges already",
+			w.Dir, e.Bin, w.Mode.Perm())
+	}
+
+	evidence := []string{
+		fmt.Sprintf("%s = %s%s (from %s)", e.Directive, e.Prefixes, e.Raw, e.Origin),
+		fmt.Sprintf("the command %q is a bare name: it is not a path, so systemd looks it up in its own "+
+			"search path", e.Bin),
+		fmt.Sprintf("search path consulted, in order: %s", strings.Join(unitSearchPath, ", ")),
+		"no directory in that search path currently holds a file of that name",
+		winnerNote,
+	}
+	if len(w.Skipped) > 0 {
+		evidence = append(evidence, fmt.Sprintf("earlier search-path entries absent from this root and "+
+			"therefore passed over: %s", strings.Join(w.Skipped, ", ")))
+	}
+	return finding.Finding{
+		RuleID:      RuleUnitExecHijackable,
+		SubjectKind: "systemd-unit",
+		Subject:     u.Path,
+		Severity:    sev,
+		Summary: fmt.Sprintf("unit %s runs the bare command %q, which resolves to no file in systemd's "+
+			"search path", u.Name, e.Bin),
+		Evidence: append(evidence, unitExtraEvidence(u)...),
+		Limits:   unitLimitHijackable,
 	}
 }
 

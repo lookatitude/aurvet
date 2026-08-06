@@ -165,7 +165,7 @@ func TestScanReachableRulesAreDeclared(t *testing.T) {
 		"integrity-link-target", "integrity-missing", "integrity-unowned-setuid",
 		"hook-coverage", "local-db", "sync-coverage",
 		// P1-C surfaces
-		"unit-execstart-unowned", "unit-coverage",
+		"unit-execstart-unowned", "unit-execstart-hijackable", "unit-coverage",
 		"wants-link-unowned-target", "wants-coverage",
 		"hook-suppressed", "hook-unowned", "hook-dirs",
 		"surface-preload-unowned", "surface-generator-unowned",

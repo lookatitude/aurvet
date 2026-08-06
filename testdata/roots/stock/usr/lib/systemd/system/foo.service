@@ -6,12 +6,20 @@
 #
 # Nothing here is ever handed to systemd: aurvet parses unit files from disk and
 # never talks to systemd (INV-2), so the comments are safe and the file is inert.
+#
+# The ExecStartPre below is the reference system's dominant shape and is the
+# reason this root stays silent: six of the eight unit-coverage gaps measured
+# there were `ExecStartPre=-plymouth --wait quit` in systemd's OWN units. The `-`
+# is the unit author declaring the command optional -- systemd ignores its
+# failure -- and plymouth is not installed in this root. A check that reports
+# that as "could not be examined" is stating something false.
 [Unit]
 Description=Foo service (fixture)
 Documentation=man:foo(8)
 
 [Service]
 Type=simple
+ExecStartPre=-fooplymouth --wait quit
 ExecStart=/usr/bin/foo --system
 
 [Install]

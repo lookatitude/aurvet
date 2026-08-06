@@ -264,16 +264,41 @@ var builtIn = []Semantics{
 		"member mtime readability",
 		"foreign-package %INSTALLDATE% availability",
 	}},
-	{RuleID: "unit-execstart-unowned", Epoch: 1, Inputs: []string{
+	// Epoch 2: a bare command that resolves to nothing no longer reaches this
+	// rule at all. It used to fall through to unit-coverage; it is now
+	// unit-execstart-hijackable, and the `-` (ignore-failure) prefix on such a
+	// command suppresses both. What this rule matches -- a command that DOES
+	// resolve, including a `-`-prefixed one -- is unchanged in shape but no
+	// longer shares an input with the unresolved case.
+	{RuleID: "unit-execstart-unowned", Epoch: 2, Inputs: []string{
 		"unit search path and drop-in resolution",
 		"ExecStart command extraction and interpreter handling",
 		"bare-command resolution against systemd's search path",
+		"the `-` ignore-failure prefix, which does NOT exempt a command that resolves",
 		"ownership verdict for the resolved command",
 		"presence of the resolved command (absent is info, present is suspicious)",
 	}},
-	{RuleID: "unit-coverage", Epoch: 1, Inputs: []string{
+	// Epoch 1: new rule. A bare command resolving to no file in systemd's search
+	// path is a determinate answer, not an inability to look, so it is a finding
+	// rather than the coverage gap it used to be.
+	{RuleID: "unit-execstart-hijackable", Epoch: 1, Inputs: []string{
+		"bare (non-path) Exec command extraction",
+		"systemd's compiled-in search path and its order",
+		"absence of the name from every search-path directory",
+		"the `-` ignore-failure prefix, which suppresses this rule entirely",
+		"the winning directory: first search-path entry present in the root",
+		"the winning directory's permission bits (group- or world-writable is suspicious, else info)",
+	}},
+	// Epoch 2: two shapes left this rule. A bare command absent from the search
+	// path is now a finding, and a `-`-prefixed absent bare command is neither a
+	// gap nor a finding -- the unit's own author declared it optional. What
+	// remains is what "the check could not run" should always have meant.
+	{RuleID: "unit-coverage", Epoch: 2, Inputs: []string{
 		"unit files parsed versus unit files unparseable",
 		"unit directory readability",
+		"Exec values naming no concrete file (specifier, variable, empty value)",
+		"the `-` ignore-failure prefix on an unresolved bare command, which is not a gap",
+		"unresolved bare commands, which are a finding rather than a gap",
 	}},
 	{RuleID: "wants-link-unowned-target", Epoch: 1, Inputs: []string{
 		"enablement-link target resolution against the scanned root",
