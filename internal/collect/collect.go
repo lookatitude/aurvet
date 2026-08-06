@@ -6,11 +6,17 @@
 // IT CONTAINS NO PARSERS, and that is the architectural point of P1-B rather
 // than a style preference. The tool's job is parsing attacker-controlled input
 // while needing to read root-only files; those two requirements are separated in
-// time instead of accepted together. This package therefore does four things --
-// directory walk, confined open, fstat, streaming sha256 -- and buffers raw
-// bytes for everything else. Decompression, tokenising and interpretation all
-// happen after the capability is dropped, so a parser bug is an unprivileged
-// bug.
+// time instead of accepted together. This package therefore does five things --
+// directory walk, confined open, fstat, streaming sha256, and a newline split of
+// the local database's plain-text `files` to learn which paths to open -- and
+// buffers raw bytes for everything else. Decompression, tokenising and
+// interpretation all happen after the capability is dropped, so a parser bug is
+// an unprivileged bug. RecordedPolicy states why the fifth is a name list rather
+// than a parser, and where the line is.
+//
+// The tier decides HOW MUCH is read here, not later: after the drop this process
+// can read nothing a normal user cannot, so a verification tier whose hash set
+// were chosen in phase 2 would be a tier that silently could not do its job.
 //
 // The consequence is stated plainly because it constrains future work: anything
 // this collector did not buffer is unavailable to analysis for that run, by
@@ -46,15 +52,67 @@ import (
 	"github.com/lookatitude/aurvet/internal/safe"
 )
 
-// The four kinds of thing a walk finds. They are the strings mtree writes for
-// its type= keyword, so the analyse phase compares Kind against Entry.Type
+// The kinds of thing phase 1 finds. The first four are the strings mtree writes
+// for its type= keyword, so the analyse phase compares Kind against Entry.Type
 // directly rather than translating between two vocabularies -- a translation
-// table is somewhere for a mismatch to hide.
+// table is somewhere for a mismatch to hide. The last two exist because asking
+// about a RECORDED path can produce two answers a walk never produces: the path
+// is not there, and the path is there but could not be examined coherently.
 const (
 	KindFile  = "file"
 	KindLink  = "link"
 	KindDir   = "dir"
 	KindOther = "other" // fifo, socket, device: recorded, never opened for content
+
+	// KindAbsent: the confined open returned ENOENT. An observed absence, and
+	// deliberately NOT a gap -- a packaged file that was deleted is a fact this
+	// phase established, not a hole in its coverage.
+	KindAbsent = "absent"
+
+	// KindUnread: the path exists in some form and could not be examined --
+	// refused as a symlink component, unreadable, mutated mid-scan. Unread
+	// carries the reason, and there is ALWAYS a Gap naming the same subject, so
+	// the analyse phase consumes this rather than raising a second gap for the
+	// same shortfall.
+	KindUnread = "unread"
+)
+
+// RecordedPolicy says what phase 1 does with the paths the local database's
+// plain-text `files` records. It is how a verification tier's hash set is
+// decided BEFORE the capability is dropped, which it has to be: after the drop
+// the process holds nothing, so a phase-2 decision to read a root-only file is a
+// decision that fails.
+//
+// WHY READING `files` IS NOT A PARSER (spec §11.1). `files` is plain text and
+// its %FILES% section is a newline-delimited list of names; extracting it is a
+// newline split and a prefix test. Phase 1 already turns attacker-controlled
+// bytes into names -- getdents returns directory entries from a hostile
+// filesystem and the walk splits and joins them into paths -- so this is the
+// same operation through a different syscall. What §11.1 keeps out of the
+// privileged phase is a FORMAT parser: nested, escaped, compressed or
+// length-prefixed input that can be driven into a bug. The mtree is gzip and
+// carries vis(3) escapes, so it stays in phase 2; `files` has none of those
+// properties. Nothing here decompresses, unescapes, or interprets a field.
+type RecordedPolicy int
+
+const (
+	// RecordedIgnore: the recorded paths are not visited at all. The zero value,
+	// so a caller that does not ask for them does not silently get them.
+	RecordedIgnore RecordedPolicy = iota
+
+	// RecordedStat: each recorded path is opened once, confined, and fstat'd.
+	// Nothing is read. This is what tier meta needs -- a missing file, a swapped
+	// symlink and a fifo are all still established from a descriptor.
+	RecordedStat
+
+	// RecordedSecurity: RecordedStat, plus a digest for everything the
+	// DESCRIPTOR'S OWN MODE says decides what runs (executable, setuid, setgid,
+	// sticky) and everything under a watched path. This is tier triage.
+	RecordedSecurity
+
+	// RecordedAll: every recorded regular file is hashed. This is tier full and
+	// tier paranoid.
+	RecordedAll
 )
 
 // ErrConfig reports a configuration that cannot be collected from. It is the one
@@ -84,8 +142,19 @@ type Config struct {
 	DBPath string
 
 	// Walk lists subtrees to walk, relative to Root. Empty means the whole
-	// tree.
+	// tree. Every regular file found under one is hashed.
 	Walk []string
+
+	// Sweep lists subtrees enumerated for METADATA ONLY: every entry is
+	// described from the fstat of a confined open and nothing is read. It is
+	// what the unowned-file and setuid sweeps need, and separating it from Walk
+	// is what keeps those sweeps from silently costing a full-tree hash.
+	Sweep []string
+
+	// Recorded says what to do with the paths the local database records. See
+	// RecordedPolicy: this is where a tier's hash set is decided, while the
+	// capability is still held.
+	Recorded RecordedPolicy
 
 	// Skip lists subtrees never entered, relative to Root. What lands here is
 	// recorded in Raw.Skipped so a report can state it: a skip the operator
@@ -220,6 +289,11 @@ type File struct {
 	// resolving them would manufacture findings, and following them while
 	// holding read capability over the whole filesystem would be worse.
 	Link string
+
+	// Unread is why this path could not be examined, set only with KindUnread.
+	// A Gap with the same subject was raised alongside it, so a consumer states
+	// the shortfall once rather than twice.
+	Unread string
 }
 
 // Raw is everything phase 1 buffered, and the only thing the analyse phase gets
@@ -246,6 +320,18 @@ type Raw struct {
 	// BufferedBytes is what the buffers actually cost, for comparison against
 	// the ~41 MB measured budget.
 	BufferedBytes int64
+}
+
+// ByPath indexes Files on their "./"-rooted path, which is the form mtree
+// records, so the analyse phase joins evidence to records without rewriting
+// either. One path yields one File: the collector already deduplicates its
+// leaves, so a duplicate here would be a bug rather than a shape to merge.
+func (r Raw) ByPath() map[string]File {
+	m := make(map[string]File, len(r.Files))
+	for _, f := range r.Files {
+		m[f.Path] = f
+	}
+	return m
 }
 
 // Complete reports whether every subject was examined. It mirrors
@@ -288,8 +374,10 @@ func Collect(cfg Config) (Raw, error) {
 	c.collectDB(dbRel)
 	c.collectBufferPaths()
 
-	// Then the walk, which produces the leaf paths, and the hash pass over them.
+	// Then the walk, which produces the leaf paths, the recorded paths the
+	// database named, and the one pass that opens each of them exactly once.
 	leaves := c.walk()
+	leaves = c.appendRecorded(leaves)
 	c.hashAll(leaves)
 
 	sort.Slice(c.raw.Packages, func(i, j int) bool { return c.raw.Packages[i].Dir < c.raw.Packages[j].Dir })
@@ -550,11 +638,29 @@ func (c *collector) release(size int64) {
 
 // -------------------------------------------------------------------- walk ----
 
-// leaf is a path the walk found but did not read: a regular file, or an entry
-// whose type the kernel would not name in its dirent.
+// hashPolicy is what one leaf's descriptor is read for. It is decided before the
+// open and, for hashIfSecurity, completed from the fstat of the descriptor that
+// would be hashed -- never from a stat of the path taken separately.
+type hashPolicy int
+
+const (
+	hashNever      hashPolicy = iota // opened, fstat'd, not read
+	hashIfSecurity                   // read if the descriptor's own mode says it decides what runs
+	hashAlways                       // read
+)
+
+// leaf is a path phase 1 will open exactly once: a regular file the walk found,
+// an entry whose type the kernel would not name in its dirent, or a path the
+// local database records.
 type leaf struct {
-	rel  string // "./"-rooted, as recorded
-	open string // the same path without "./", as fsx wants it
+	rel    string // "./"-rooted, as recorded
+	open   string // the same path without "./", as fsx wants it
+	policy hashPolicy
+
+	// recorded marks a leaf that came from the database rather than from the
+	// walk. It changes how absence and a symlink leaf are treated: for a
+	// recorded path both are answers, for a walked path they cannot occur.
+	recorded bool
 }
 
 // walk enumerates the configured subtrees and records everything it can describe
@@ -569,25 +675,45 @@ type leaf struct {
 func (c *collector) walk() []leaf {
 	var leaves []leaf
 	for _, sub := range c.cfg.Walk {
-		rel := strings.TrimPrefix(sub, "./")
-		rel = strings.TrimSuffix(rel, "/")
-		if rel == "" {
-			rel = "."
-		}
-		dir, err := c.openDirRel(rel)
-		if err != nil {
-			c.gap("collect-walk", display(rel), "subtree could not be opened: %v; nothing beneath it was examined", err)
-			continue
-		}
-		c.walkDir(dir, rel, 0, &leaves)
-		dir.Close()
+		c.walkSubtree(sub, hashAlways, false, &leaves)
+	}
+	for _, sub := range c.cfg.Sweep {
+		c.walkSubtree(sub, hashNever, true, &leaves)
 	}
 	return leaves
 }
 
+// walkSubtree enters one configured subtree. policy is what its regular files
+// are opened for; optional says a subtree that is simply not there is an answer
+// rather than a hole.
+//
+// The distinction matters. A Walk subtree is named explicitly, so its absence is
+// a configuration the caller should hear about. A Sweep subtree comes from a
+// standard set -- usr, etc, opt, boot, srv -- and not every root has every one of
+// them; gapping the missing ones would put a permanent exit 3 on every machine
+// without /opt, which trains an operator to ignore code 3. Only ENOENT is
+// forgiven: a subtree that exists and could not be opened is still a hole.
+func (c *collector) walkSubtree(sub string, policy hashPolicy, optional bool, leaves *[]leaf) {
+	rel := strings.TrimPrefix(sub, "./")
+	rel = strings.TrimSuffix(rel, "/")
+	if rel == "" {
+		rel = "."
+	}
+	dir, err := c.openDirRel(rel)
+	if err != nil {
+		if optional && errors.Is(err, fs.ErrNotExist) {
+			return
+		}
+		c.gap("collect-walk", display(rel), "subtree could not be opened: %v; nothing beneath it was examined", err)
+		return
+	}
+	defer dir.Close()
+	c.walkDir(dir, rel, 0, policy, leaves)
+}
+
 // walkDir lists one directory from its open descriptor and recurses. dirRel is
 // the directory's path relative to Root, "." for the root itself.
-func (c *collector) walkDir(dir *os.File, dirRel string, depth int, leaves *[]leaf) {
+func (c *collector) walkDir(dir *os.File, dirRel string, depth int, policy hashPolicy, leaves *[]leaf) {
 	if depth > c.cfg.MaxDepth {
 		c.gap("collect-walk", display(dirRel), "not examined: the walk depth limit of %d was reached, which a legitimate tree does not reach", c.cfg.MaxDepth)
 		return
@@ -621,16 +747,16 @@ func (c *collector) walkDir(dir *os.File, dirRel string, depth int, leaves *[]le
 
 		switch {
 		case e.Type().IsDir():
-			c.walkChildDir(dirFd, childRel, e.Name(), depth, leaves)
+			c.walkChildDir(dirFd, childRel, e.Name(), depth, policy, leaves)
 		case e.Type().IsRegular():
-			*leaves = append(*leaves, leaf{rel: display(childRel), open: childRel})
+			*leaves = append(*leaves, leaf{rel: display(childRel), open: childRel, policy: policy})
 		case e.Type()&fs.ModeSymlink != 0:
 			c.recordSymlink(dirFd, childRel, e.Name())
 		case e.Type()&fs.ModeIrregular != 0:
 			// DT_UNKNOWN: the filesystem would not say. The hash pass finds
 			// out from an fstat of a confined open, which is the only
 			// trustworthy answer anyway.
-			*leaves = append(*leaves, leaf{rel: display(childRel), open: childRel})
+			*leaves = append(*leaves, leaf{rel: display(childRel), open: childRel, policy: policy})
 		default:
 			// fifo, socket, device. Recorded from an fstatat, never opened for
 			// content: a blocking open on a fifo is denial of tool.
@@ -642,7 +768,7 @@ func (c *collector) walkDir(dir *os.File, dirRel string, depth int, leaves *[]le
 // walkChildDir opens a child directory from its parent's descriptor and recurses
 // into it. The open is O_NOFOLLOW: if the directory the listing named has been
 // replaced by a symlink since, the descent is refused rather than redirected.
-func (c *collector) walkChildDir(dirFd int, childRel, name string, depth int, leaves *[]leaf) {
+func (c *collector) walkChildDir(dirFd int, childRel, name string, depth int, policy hashPolicy, leaves *[]leaf) {
 	fd, err := openatNoFollow(dirFd, name, unix.O_RDONLY|unix.O_DIRECTORY)
 	if err != nil {
 		c.gap("collect-walk", display(childRel), "directory could not be opened: %v; its contents were not examined", err)
@@ -657,7 +783,7 @@ func (c *collector) walkChildDir(dirFd int, childRel, name string, depth int, le
 		return
 	}
 	c.addFile(fileFromStat(display(childRel), KindDir, st))
-	c.walkDir(child, childRel, depth+1, leaves)
+	c.walkDir(child, childRel, depth+1, policy, leaves)
 }
 
 // recordSymlink records a link's own metadata and its target as bytes. readlinkat
@@ -699,6 +825,161 @@ func (c *collector) skipped(rel string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------- recorded ----
+
+// watchedPrefixes and watchedExact are the paths tier triage hashes whatever
+// their mode says, because what they contain decides what runs even when nothing
+// about them is executable: unit files, pacman hooks, shell fragments sourced at
+// login, and the loader's preload list.
+//
+// They are matched on the "./"-rooted recorded form, as strings, with no
+// resolution: this list decides what to READ, so a lookup that followed a
+// symlink to answer it would be taking its instructions from the filesystem it
+// is examining.
+var (
+	watchedPrefixes = []string{
+		"./usr/lib/systemd/",
+		"./etc/systemd/",
+		"./usr/share/libalpm/hooks/",
+		"./etc/pacman.d/hooks/",
+		"./etc/profile.d/",
+	}
+	watchedExact = []string{"./etc/ld.so.preload"}
+)
+
+// watched reports whether a "./"-rooted path is one triage reads unconditionally.
+func watched(rel string) bool {
+	for _, p := range watchedExact {
+		if rel == p {
+			return true
+		}
+	}
+	for _, p := range watchedPrefixes {
+		if strings.HasPrefix(rel, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendRecorded adds the paths the local database records to the leaf list,
+// deduplicated against everything the walk already found.
+//
+// Deduplication is not an optimisation. Two leaves for one path would mean two
+// confined opens of the same name, which is exactly the second resolution
+// internal/fsx exists to prevent, and it would put two Files with the same path
+// into the evidence for Raw.ByPath to silently collapse.
+func (c *collector) appendRecorded(leaves []leaf) []leaf {
+	if c.cfg.Recorded == RecordedIgnore {
+		return leaves
+	}
+	policy := hashNever
+	switch c.cfg.Recorded {
+	case RecordedSecurity:
+		policy = hashIfSecurity
+	case RecordedAll:
+		policy = hashAlways
+	}
+
+	// Everything already spoken for: leaves queued by the walk, and the paths
+	// the walk described without queueing them (directories, symlinks, fifos).
+	seen := make(map[string]int, len(leaves))
+	for i, l := range leaves {
+		seen[l.rel] = i
+	}
+	c.mu.Lock()
+	for _, f := range c.raw.Files {
+		if _, ok := seen[f.Path]; !ok {
+			seen[f.Path] = -1
+		}
+	}
+	pkgs := c.raw.Packages
+	c.mu.Unlock()
+
+	for _, pkg := range pkgs {
+		if len(pkg.FileList) == 0 {
+			continue
+		}
+		paths, bad := recordedPaths(pkg.FileList)
+		for _, b := range bad {
+			// Measured on the reference system: zero recorded paths are
+			// absolute, contain a ".." component, or carry a NUL. There is no
+			// legitimate population to accommodate, so any occurrence is
+			// reported rather than normalised into something openable.
+			c.gap("collect-recorded", pkg.Dir,
+				"the package records the path %q, which is not a safe relative path; it was not examined", b)
+		}
+		for _, p := range paths {
+			rel := display(p)
+			if i, ok := seen[rel]; ok {
+				if i >= 0 && leaves[i].policy < policy {
+					leaves[i].policy = policy
+					leaves[i].recorded = true
+				}
+				continue
+			}
+			seen[rel] = len(leaves)
+			leaves = append(leaves, leaf{rel: rel, open: p, policy: policy, recorded: true})
+		}
+	}
+	return leaves
+}
+
+// recordedPaths extracts the non-directory paths one package's plain-text
+// `files` records, and the ones it refuses.
+//
+// This is a newline split and a prefix test, NOT a parser -- see RecordedPolicy
+// for why that distinction is the one spec §11.1 draws. The %FILES% section is a
+// list of names, one per line, directories written with a trailing slash;
+// %BACKUP% lines carry a second tab-separated field and are deliberately not
+// read here, because the exemption they feed is derived from parsed hooks in
+// phase 2 anyway. A line is refused, never repaired: a path that needs fixing
+// before it can be opened is a path whose meaning this phase would be inventing.
+func recordedPaths(b []byte) (paths, bad []string) {
+	inFiles := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "%") && strings.HasSuffix(line, "%") {
+			inFiles = line == "%FILES%"
+			continue
+		}
+		if !inFiles {
+			continue
+		}
+		if strings.HasSuffix(line, "/") {
+			// A directory. It carries no digest and no target, so there is
+			// nothing to open it for.
+			continue
+		}
+		if !safeRecordedPath(line) {
+			bad = append(bad, line)
+			continue
+		}
+		paths = append(paths, line)
+	}
+	return paths, bad
+}
+
+// safeRecordedPath applies the same rule internal/fsx applies to a path before
+// any syscall: relative, no NUL, no empty, "." or ".." component. It is checked
+// here as well as there so the refusal is attributable to the package that
+// recorded it rather than to whichever open happened to fail.
+func safeRecordedPath(p string) bool {
+	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsRune(p, 0) {
+		return false
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(p, "./"), "/") {
+		switch part {
+		case "", ".", "..":
+			return false
+		}
+	}
+	return true
 }
 
 // -------------------------------------------------------------------- hash ----
@@ -768,24 +1049,19 @@ func (c *collector) hashAll(leaves []leaf) {
 	}
 }
 
-// examine opens one leaf confined, streams its digest from that descriptor, and
-// re-fstats the same descriptor afterwards.
+// examine opens one leaf confined, streams its digest from that descriptor if
+// the leaf's policy calls for one, and re-fstats the same descriptor afterwards.
 //
 // There is no stat before the open and the path is never resolved a second time.
 // Everything recorded about this file comes from the descriptor fsx.OpenConfined
 // returned, which is what makes the digest and the metadata statements about the
-// same object rather than about a path at two different instants.
+// same object rather than about a path at two different instants. The hashing
+// decision for hashIfSecurity is taken from THAT fstat, so it is a statement
+// about the file that would be read and not about the mode a package recorded.
 func (c *collector) examine(l leaf) error {
 	f, st, err := fsx.OpenConfined(c.root, l.open)
 	if err != nil {
-		if errors.Is(err, fsx.ErrNotRegular) {
-			// Not a gap: we asked what it was and got a definite answer. What
-			// it is exactly comes from the fstat, so "other" is a claim we can
-			// support.
-			c.addFile(fileFromStat(l.rel, KindOther, st))
-			return nil
-		}
-		return err
+		return c.examineFailure(l, st, err)
 	}
 	defer f.Close()
 
@@ -793,12 +1069,23 @@ func (c *collector) examine(l leaf) error {
 		beforeHashForTest(l.rel)
 	}
 
+	if !hashWanted(l.policy, l.rel, st) {
+		// A metadata-only record still owes the file the mutation check:
+		// otherwise its size and mode could describe a different generation of
+		// the file than the descriptor that is being reported on.
+		if err := fsx.CheckUnchanged(f, st); err != nil {
+			return c.unread(l, err)
+		}
+		c.addFile(fileFromStat(l.rel, KindFile, st))
+		return nil
+	}
+
 	sum, n, err := fsx.Digest(f, st)
 	if err != nil {
 		// Includes fsx.ErrMutatedDuringScan, which accuses the scan's timing
 		// rather than the package -- so it must not become a digest of
 		// incoherent bytes, and must not be silence either.
-		return err
+		return c.unread(l, err)
 	}
 
 	rec := fileFromStat(l.rel, KindFile, st)
@@ -811,6 +1098,68 @@ func (c *collector) examine(l leaf) error {
 	}
 	c.addFile(rec)
 	return nil
+}
+
+// examineFailure turns a refused open into evidence. A walked leaf can only ever
+// fail for a reason worth gapping; a RECORDED leaf has two failures that are
+// answers rather than holes, and conflating them with a refusal would report a
+// deleted file and an unreadable one as the same thing.
+func (c *collector) examineFailure(l leaf, st unix.Stat_t, err error) error {
+	switch {
+	case errors.Is(err, fsx.ErrNotRegular):
+		// Not a gap: we asked what it was and got a definite answer. What it is
+		// exactly comes from the fstat, so "other" is a claim we can support.
+		c.addFile(fileFromStat(l.rel, KindOther, st))
+		return nil
+
+	case l.recorded && errors.Is(err, fs.ErrNotExist):
+		// The packaged path is simply not there. Established from a confined
+		// open, so it is an observation and not a refusal.
+		c.addFile(File{Path: l.rel, Kind: KindAbsent})
+		return nil
+
+	case l.recorded && errors.Is(err, fsx.ErrSymlink):
+		// O_NOFOLLOW refused the leaf, which is how we learn it is a symlink.
+		// The target is READ and never resolved: 4,145 legitimate targets on the
+		// reference system contain "..", and resolving them while holding read
+		// capability over the tree would be worse than useless.
+		target, rerr := fsx.ReadLinkConfined(c.root, l.open)
+		if rerr != nil {
+			return c.unread(l, rerr)
+		}
+		c.addFile(File{Path: l.rel, Kind: KindLink, Link: target})
+		return nil
+	}
+	return c.unread(l, err)
+}
+
+// unread records that a path could not be examined and returns the error, so the
+// caller raises the one gap that names it. A recorded path also gets a File, so
+// the analyse phase can tell "not examined" from "never asked about" without
+// re-deriving it from the gap list.
+func (c *collector) unread(l leaf, err error) error {
+	if l.recorded {
+		c.addFile(File{Path: l.rel, Kind: KindUnread, Unread: err.Error()})
+	}
+	return err
+}
+
+// hashWanted completes the hashing decision from the fstat of the descriptor
+// that would be read.
+//
+// The security-relevant subset is keyed on THAT mode, not on the mode the
+// package recorded. The recorded mode is what a package claims; the mode on the
+// descriptor is what the kernel will honour when something executes the file,
+// and a file made executable after installation is precisely the case worth
+// reading.
+func hashWanted(p hashPolicy, rel string, st unix.Stat_t) bool {
+	switch p {
+	case hashAlways:
+		return true
+	case hashIfSecurity:
+		return st.Mode&0o7111 != 0 || watched(rel)
+	}
+	return false
 }
 
 // ------------------------------------------------------------------ helpers ---

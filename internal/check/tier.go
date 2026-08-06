@@ -1,7 +1,7 @@
 // internal/check/tier.go
 //
-// The four verification tiers, and the single confined pass over the filesystem
-// that produces the observations integrity.go compares.
+// The four verification tiers, and the translation of phase 1's evidence into
+// the observations integrity.go compares.
 //
 // The tiers exist because verifying every digest on the reference system means
 // reading 19.8 GiB. That cost is worth paying by default -- `full` is the
@@ -10,19 +10,23 @@
 // operator chooses is honest in a way that a silently sampled scan is not: the
 // weaker tiers report their own blindness as coverage gaps rather than as
 // silence (INV-3).
+//
+// NOTHING IN THIS FILE PERFORMS I/O, and that is spec §11.1 rather than a style
+// preference. A tier is a decision about how much to read, and after the
+// capability drop this process can read nothing a normal user cannot, so the
+// decision has to be made while the capability is held -- in internal/collect,
+// from the paths the local database records. CollectPolicy is that decision
+// travelling to phase 1; Observe is phase 1's answer coming back.
 package check
 
 import (
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"strings"
 
-	"github.com/lookatitude/aurvet/internal/fsx"
+	"github.com/lookatitude/aurvet/internal/collect"
 	"github.com/lookatitude/aurvet/internal/mtree"
 	"github.com/lookatitude/aurvet/internal/safe"
-	"golang.org/x/sys/unix"
 )
 
 // Tier selects how much work one verification pass does.
@@ -35,17 +39,39 @@ const (
 	// nothing is hashed. Every observation is mtime-assisted by construction.
 	TierMeta Tier = iota
 
-	// TierTriage hashes two populations: everything whose stat disagrees with
-	// the record, and -- unconditionally, whatever stat says -- the
-	// security-relevant subset. See Verify.
+	// TierTriage hashes the security-relevant subset and nothing else:
+	// everything the DESCRIPTOR'S OWN MODE says decides what runs -- executable,
+	// setuid, setgid, sticky -- plus everything under a watched path (unit
+	// directories, pacman hook directories, profile.d, ld.so.preload). Symlink
+	// targets come free from a readlink. Every other recorded path is opened,
+	// fstat'd and left unread.
+	//
+	// The subset is decided in phase 1, from the fstat of the descriptor that
+	// would be hashed, because after the capability drop this process cannot
+	// read a root-only file at all. That makes it strictly stronger than keying
+	// on the mode a package RECORDED: the recorded mode is what the package
+	// claims, the descriptor's mode is what the kernel honours when something
+	// executes the file, and a file made executable after installation is
+	// exactly the case worth reading.
+	//
+	// WHAT TRIAGE CANNOT SEE, stated because it is a real weakening and §13's
+	// own "triage is reassurance, not verification" is the reason it is
+	// acceptable rather than an excuse for leaving it unsaid: a file OUTSIDE the
+	// security-relevant subset whose contents changed while its size stayed the
+	// same is not detected, whatever its mtime says. Only tier full hashes it.
+	// This blindness is reported as an integrity-coverage gap on every run, so
+	// it reaches the operator rather than only the reader of this comment.
 	TierTriage
 
 	// TierFull hashes every path with a recorded digest, skipping only the
 	// derived exemptions. This is the default.
 	TierFull
 
-	// TierParanoid additionally hashes the exempt paths, so the exemption set
-	// itself can be audited rather than trusted.
+	// TierParanoid additionally compares the exempt paths, so the exemption set
+	// itself can be audited rather than trusted, and adds the metadata-only
+	// sweep of the watched trees that UnownedSUID needs. Spec §13 assigns both
+	// the unowned walk and the SUID sweep to this tier and to no other, so
+	// integrity-unowned-setuid CANNOT FIRE below it -- see UnownedSUID.
 	TierParanoid
 )
 
@@ -88,50 +114,57 @@ func (t Tier) String() string {
 	return "unknown"
 }
 
-// SecurityRelevant reports whether an entry is in the subset TierTriage hashes
-// regardless of what stat says.
+// CollectPolicy is the hashing policy this tier requires of phase 1.
 //
-// The subset is derived from the record's own mode: anything executable, and
-// anything carrying setuid, setgid or sticky. Those are the files whose contents
-// decide what runs on the machine, which is exactly the population an attacker
-// who can set mtime would want the prefilter to skip. Symlinks are included
-// because comparing a link target costs a readlink and no read at all.
-//
-// Deliberately NOT part of the subset: everything under /etc. Configuration is
-// the noisiest population on a real system (it is what %BACKUP% exists for), and
-// pulling it in would spend the tier's whole budget on files whose difference
-// says the least.
-func SecurityRelevant(e mtree.Entry) bool {
-	if e.Type == "link" {
-		return true
+// It exists because a tier's hash set MUST be decidable while the read
+// capability is still held. After the drop the process holds nothing, so a
+// phase-2 decision to read a root-only file is a decision that fails; a tier
+// that made one would be strictly weaker than it looks, which is the
+// manufactured confidence this project exists to avoid.
+func (t Tier) CollectPolicy() collect.RecordedPolicy {
+	switch t {
+	case TierMeta:
+		return collect.RecordedStat
+	case TierTriage:
+		return collect.RecordedSecurity
+	default: // TierFull, TierParanoid
+		return collect.RecordedAll
 	}
-	return e.Mode&0o7111 != 0
 }
 
-// Verify performs one confined pass over the recorded entries and returns what
-// it observed, keyed by the recorded path.
+// errRecordKind reports that the object standing at a recorded path is not the
+// kind of thing a digest can be taken from.
+var errRecordKind = errors.New("recorded path is not a regular file")
+
+// beforeObserveForTest runs at the top of observe. Production leaves it nil;
+// tier_test.go sets it to raise a panic from inside the observation of one
+// specific path, which is the only way to prove containment works from outside.
+var beforeObserveForTest func(path string)
+
+// Observe joins one package's mtree records to the evidence phase 1 gathered and
+// returns what was observed, keyed by the recorded path.
 //
-// Two properties are load-bearing and easy to lose:
+// It performs NO I/O. Everything it reports comes from the descriptor
+// internal/collect opened once, confined, with O_NOFOLLOW, and fstat'd -- the
+// digest, the mode, the size and the link target are all statements about that
+// one descriptor rather than about a path resolved twice.
 //
-//   - THE STAT COMES FROM THE DESCRIPTOR THAT WOULD BE HASHED. fsx.OpenConfined
-//     opens once and fstats that fd; the triage prefilter then decides from that
-//     stat. A prefilter that lstat'd the path and then opened it would reopen a
-//     TOCTOU window fsx exists to close -- the attacker swaps the path between
-//     the two resolutions and the scan reports on a file it never examined.
-//   - THE SECURITY-RELEVANT SUBSET IS HASHED WHATEVER STAT SAYS. mtime and size
-//     are writable by anyone who can write the file, so a prefilter that trusted
-//     them to decide what to look at would be taking its instructions from the
-//     attacker. Everything the prefilter DID decide is marked MtimeAssisted, so
-//     no finding derived from it is ever presented as equally strong (INV-6).
+// A recorded path with no evidence is simply absent from the result. Integrity
+// turns that into a coverage gap naming the package, which is the honest
+// statement: the scan produced no observation, so nothing can be said.
 //
-// Verify is a pure function of (root, entries, exemptions): no ambient paths, no
-// process state, no network (INV-4). It never resolves a symlink and never
-// follows one; a link entry's target is read as a string and compared as one,
-// because 4,145 legitimate targets on the reference system contain "..".
-func (t Tier) Verify(root *os.Root, entries []mtree.Entry, ex Exemptions) map[string]Observed {
+// Observe is a pure function of (entries, files, exemptions): no ambient paths,
+// no process state, no network (INV-4). It never resolves a symlink; a link
+// entry's target is compared as a string, because 4,145 legitimate targets on
+// the reference system contain "..".
+func (t Tier) Observe(entries []mtree.Entry, files map[string]collect.File, ex Exemptions) map[string]Observed {
 	obs := make(map[string]Observed, len(entries))
 	for _, e := range entries {
 		if e.Type == "dir" {
+			continue
+		}
+		f, ok := files[e.Path]
+		if !ok {
 			continue
 		}
 		// Per-PATH containment (INV-9). One crafted record must cost one
@@ -143,7 +176,7 @@ func (t Tier) Verify(root *os.Root, entries []mtree.Entry, ex Exemptions) map[st
 		// the only place it works.
 		var o Observed
 		err, _ := safe.Run(e.Path, func() error {
-			o = t.observe(root, e, ex)
+			o = t.observe(e, f, ex)
 			return nil
 		})
 		if err != nil {
@@ -154,112 +187,59 @@ func (t Tier) Verify(root *os.Root, entries []mtree.Entry, ex Exemptions) map[st
 	return obs
 }
 
-// beforeObserveForTest runs at the top of observe. Production leaves it nil;
-// tier_test.go sets it to raise a panic from inside the observation of one
-// specific path, which is the only way to prove containment works from outside.
-var beforeObserveForTest func(path string)
-
-// observe examines one entry.
-func (t Tier) observe(root *os.Root, e mtree.Entry, ex Exemptions) Observed {
+// observe translates one file's evidence into an observation about one record.
+func (t Tier) observe(e mtree.Entry, f collect.File, ex Exemptions) Observed {
 	if beforeObserveForTest != nil {
 		beforeObserveForTest(e.Path)
 	}
 	o := Observed{Path: e.Path}
 
-	if e.Type == "link" {
-		target, err := fsx.ReadLinkConfined(root, e.Path)
-		if err != nil {
-			return unreadable(o, err)
-		}
-		o.Kind, o.Link = ObsLink, target
-		return o
-	}
-
-	// An exempt path is not opened at all below paranoid: pacman rewrites it,
-	// so reading it buys a known-useless answer at real I/O cost.
-	if t != TierParanoid {
+	// An exempt path is compared at no tier below paranoid: pacman rewrites it,
+	// so the answer is known useless. Phase 1 hashed it anyway -- exemptions are
+	// derived from PARSED hooks and are not available while the capability is
+	// held -- which costs 321 files and 1.3 MiB on the reference system and buys
+	// the property that phase 1 hashes and phase 2 alone decides what a mismatch
+	// means. A link is never exempt: comparing a target costs no read.
+	if e.Type != "link" && t != TierParanoid {
 		if _, ok := ex.Applies(e); ok {
 			o.Kind = ObsExempt
 			return o
 		}
 	}
 
-	f, st, err := fsx.OpenConfined(root, e.Path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			o.Kind = ObsMissing
+	switch f.Kind {
+	case collect.KindFile:
+		o.Mode, o.Size = f.Mode, f.Size
+		if f.SHA256 != "" {
+			o.Kind, o.SHA256 = ObsHashed, f.SHA256
 			return o
 		}
-		return unreadable(o, err)
-	}
-	defer f.Close()
+		// Opened and fstat'd, never read. Any verdict resting on this rests on
+		// size and mode, both of which anyone who can write the file can set.
+		o.Kind, o.MtimeAssisted = ObsMetadataOnly, true
+		return o
 
-	o.Mode = uint32(st.Mode & 0o7777)
-	o.Size = st.Size
+	case collect.KindLink:
+		o.Kind, o.Link = ObsLink, f.Link
+		return o
 
-	// The prefilter decision, taken from the fstat of the descriptor above and
-	// from nothing else.
-	hash, assisted := t.decide(e, st)
-	o.MtimeAssisted = assisted
-	if !hash {
-		o.Kind = ObsMetadataOnly
-		// Even a metadata-only observation owes the file the mutation check:
-		// otherwise "size and mtime agreed" could be a statement about two
-		// different generations of the file.
-		if err := fsx.CheckUnchanged(f, st); err != nil {
-			return unreadable(o, err)
-		}
+	case collect.KindAbsent:
+		o.Kind = ObsMissing
+		return o
+
+	case collect.KindUnread:
+		// The collector already raised a gap naming this subject; Gapped says
+		// so, so Integrity states the one shortfall once instead of twice.
+		o = unreadable(o, errors.New(f.Unread))
+		o.Gapped = true
 		return o
 	}
 
-	sum, _, err := fsx.Digest(f, st)
-	if err != nil {
-		// Includes fsx.ErrMutatedDuringScan: neither "matches" nor "does not
-		// match", and reported as neither.
-		return unreadable(o, err)
-	}
-	o.Kind, o.SHA256 = ObsHashed, sum
-	return o
-}
-
-// decide reports whether to hash this entry, and whether stat participated in
-// the decision.
-func (t Tier) decide(e mtree.Entry, st unix.Stat_t) (hash, assisted bool) {
-	switch t {
-	case TierMeta:
-		// Nothing is hashed, and every verdict rests on metadata.
-		return false, true
-	case TierTriage:
-		if SecurityRelevant(e) {
-			// Hashed whatever stat says, so no part of this verdict was
-			// delegated to a field the attacker controls.
-			return true, false
-		}
-		if statAgrees(e, st) {
-			return false, true
-		}
-		return true, true
-	default: // TierFull, TierParanoid
-		return true, false
-	}
-}
-
-// statAgrees reports whether the descriptor's own stat matches the record's size
-// and mtime.
-//
-// mtime is compared at one-second granularity. mtree carries a fractional part
-// (every one of the 461,601 time= values on the reference system does), but a
-// package's recorded nanoseconds and the filesystem's are not reliably identical
-// after a copy, and a prefilter that disagreed with every file would hash
-// everything and stop being a tier. The imprecision is affordable precisely
-// because it can only ever cause MORE hashing than necessary in the general
-// case, and because the population where it could cause less -- the
-// security-relevant subset -- is not subject to this test at all.
-func statAgrees(e mtree.Entry, st unix.Stat_t) bool {
-	if st.Size != e.Size {
-		return false
-	}
-	return st.Mtim.Sec == int64(e.Time)
+	// KindDir or KindOther: a fifo, socket, device or directory stands where a
+	// regular file was recorded. Refused after the fstat of the descriptor, so
+	// this is a definite answer and not a guess -- but it is not a digest, and it
+	// is not an accusation either.
+	return unreadable(o, fmt.Errorf("%w: it is a %s", errRecordKind, f.Kind))
 }
 
 // unreadable attributes a refusal to the observation. Kind is set to

@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	"github.com/lookatitude/aurvet/internal/alpm"
+	"github.com/lookatitude/aurvet/internal/collect"
 	"github.com/lookatitude/aurvet/internal/finding"
-	"github.com/lookatitude/aurvet/internal/fsx"
 	"github.com/lookatitude/aurvet/internal/hook"
 	"github.com/lookatitude/aurvet/internal/mtree"
 	"github.com/lookatitude/aurvet/internal/safe"
@@ -26,7 +26,7 @@ func sha256Of(s string) string {
 }
 
 // tierRoot builds a fixture root and returns it opened as an os.Root, which is
-// the only handle Verify ever gets: --offline-root is a parameter, not a second
+// the only handle phase 1 ever gets: --offline-root is a parameter, not a second
 // code path (INV-4).
 func tierRoot(t *testing.T) (*os.Root, string) {
 	t.Helper()
@@ -65,6 +65,74 @@ func mtimeOf(t *testing.T, p string) float64 {
 	return float64(st.Mtim.Sec) + float64(st.Mtim.Nsec)/1e9
 }
 
+// phase1 runs the REAL privileged phase over the fixture root: it writes the
+// plain-text `files` a package would record, then lets internal/collect discover
+// the paths from it, open each one confined, fstat it and hash what the tier
+// asks for. Nothing here hands collect a path list directly, because the
+// newline split of `files` is the part spec §11.1 permits phase 1 to do and a
+// test that bypassed it would be testing a shape the binary never runs.
+func phase1(t *testing.T, dir string, tier Tier, entries []mtree.Entry) collect.Raw {
+	t.Helper()
+	var list strings.Builder
+	list.WriteString("%FILES%\n")
+	for _, e := range entries {
+		if e.Type == "dir" {
+			continue
+		}
+		list.WriteString(strings.TrimPrefix(e.Path, "./") + "\n")
+	}
+	pkgDir := filepath.Join(dir, "var/lib/pacman/local/fixture-1-1")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"desc":  "%NAME%\nfixture\n",
+		"files": list.String(),
+		"mtree": "",
+	} {
+		if err := os.WriteFile(filepath.Join(pkgDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raw, err := collect.Collect(collect.Config{
+		Root:     dir,
+		DBPath:   filepath.Join(dir, "var/lib/pacman/local"),
+		Walk:     []string{"var/lib/pacman/local"},
+		Recorded: tier.CollectPolicy(),
+		Workers:  4,
+	})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	return raw
+}
+
+// observeRaw is the whole two-phase path a scan takes, in one call: collect,
+// then join. It returns the collector's evidence too, because several
+// properties below are statements about which phase reported a shortfall.
+func observeRaw(t *testing.T, dir string, tier Tier, entries []mtree.Entry, ex Exemptions) (map[string]Observed, collect.Raw) {
+	t.Helper()
+	raw := phase1(t, dir, tier, entries)
+	return tier.Observe(entries, raw.ByPath(), ex), raw
+}
+
+func observe(t *testing.T, dir string, tier Tier, entries []mtree.Entry, ex Exemptions) map[string]Observed {
+	t.Helper()
+	obs, _ := observeRaw(t, dir, tier, entries, ex)
+	return obs
+}
+
+// collectGapFor reports whether phase 1 raised a gap naming this subject.
+func collectGapFor(raw collect.Raw, subject string) (finding.Gap, bool) {
+	for _, g := range raw.Gaps {
+		if g.Subject == subject {
+			return g, true
+		}
+	}
+	return finding.Gap{}, false
+}
+
 func TestParseTierDefaultsToFull(t *testing.T) {
 	cases := map[string]Tier{
 		"":         TierFull,
@@ -95,11 +163,11 @@ func TestParseTierDefaultsToFull(t *testing.T) {
 }
 
 func TestVerifyFullHashesTheFileItOpened(t *testing.T) {
-	root, dir := tierRoot(t)
+	_, dir := tierRoot(t)
 	writeAt(t, dir, "usr/bin/foo", "hello", 0o755)
 	entries := []mtree.Entry{{Path: "./usr/bin/foo", Type: "file", Mode: 0o755, Size: 5, SHA256: sha256Of("hello")}}
 
-	obs := TierFull.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierFull, entries, Exemptions{})
 	o := obs["./usr/bin/foo"]
 	if o.Kind != ObsHashed {
 		t.Fatalf("kind = %v, want ObsHashed (err=%v)", o.Kind, o.Err)
@@ -120,7 +188,7 @@ func TestVerifyFullHashesTheFileItOpened(t *testing.T) {
 	// Now the content diverges from the record: the same code path must report
 	// it. (A check whose test passes with the check deleted is not a check.)
 	writeAt(t, dir, "usr/bin/foo", "tampered", 0o755)
-	obs = TierFull.Verify(root, entries, Exemptions{})
+	obs = observe(t, dir, TierFull, entries, Exemptions{})
 	res := Integrity("foo", entries, obs, Exemptions{}, TierFull)
 	f := integrityFor(t, res, "integrity-digest-mismatch", "./usr/bin/foo")
 	if f.Severity != finding.SevSuspicious {
@@ -130,8 +198,14 @@ func TestVerifyFullHashesTheFileItOpened(t *testing.T) {
 
 // A symlink standing where a regular file was recorded is refused unresolved,
 // and that refusal is a coverage gap rather than a hash of the swap target.
+//
+// Phase 1 learns it is a symlink from O_NOFOLLOW refusing the open, then reads
+// the target with readlinkat and never resolves it -- so the evidence can say
+// where the link claims to point without a single byte of the swap target being
+// read. Integrity sees the record and the observation disagree about type and
+// gaps it: it cannot verify contents it deliberately did not read.
 func TestVerifyRefusesASymlinkWhereAFileWasRecorded(t *testing.T) {
-	root, dir := tierRoot(t)
+	_, dir := tierRoot(t)
 	writeAt(t, dir, "real/secret", "sensitive", 0o644)
 	if err := os.MkdirAll(filepath.Join(dir, "usr/bin"), 0o755); err != nil {
 		t.Fatal(err)
@@ -141,13 +215,13 @@ func TestVerifyRefusesASymlinkWhereAFileWasRecorded(t *testing.T) {
 	}
 	entries := []mtree.Entry{{Path: "./usr/bin/foo", Type: "file", Mode: 0o755, Size: 5, SHA256: sha256Of("hello")}}
 
-	obs := TierFull.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierFull, entries, Exemptions{})
 	o := obs["./usr/bin/foo"]
-	if o.Kind != ObsUnreadable {
-		t.Fatalf("kind = %v, want ObsUnreadable", o.Kind)
+	if o.Kind != ObsLink {
+		t.Fatalf("kind = %v, want ObsLink (err=%v)", o.Kind, o.Err)
 	}
-	if !errors.Is(o.Err, fsx.ErrSymlink) {
-		t.Errorf("err = %v, want ErrSymlink", o.Err)
+	if o.SHA256 != "" {
+		t.Fatalf("the swap target was hashed: %s", o.SHA256)
 	}
 	if o.SHA256 == sha256Of("sensitive") {
 		t.Fatal("the swap target was hashed")
@@ -157,14 +231,17 @@ func TestVerifyRefusesASymlinkWhereAFileWasRecorded(t *testing.T) {
 		t.Errorf("a refusal produced a finding rather than a gap (INV-9): %+v", res.Findings)
 	}
 	if len(res.Gaps) != 1 {
-		t.Errorf("want one gap, got %+v", res.Gaps)
+		t.Fatalf("want one gap, got %+v", res.Gaps)
+	}
+	if !strings.Contains(res.Gaps[0].Reason, "refused") {
+		t.Errorf("the gap does not say the contents were not verified: %q", res.Gaps[0].Reason)
 	}
 }
 
 // A fifo where a file was recorded must not hang the scan: that would turn a
 // hostile filesystem into a denial of the tool with no panic to recover from.
 func TestVerifyRefusesAFifoWithoutBlocking(t *testing.T) {
-	root, dir := tierRoot(t)
+	_, dir := tierRoot(t)
 	if err := os.MkdirAll(filepath.Join(dir, "var/run"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -172,12 +249,12 @@ func TestVerifyRefusesAFifoWithoutBlocking(t *testing.T) {
 		t.Skipf("mkfifo unavailable: %v", err)
 	}
 	entries := []mtree.Entry{{Path: "./var/run/pipe", Type: "file", SHA256: sha256Of("x")}}
-	obs := TierFull.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierFull, entries, Exemptions{})
 	if got := obs["./var/run/pipe"].Kind; got != ObsUnreadable {
 		t.Fatalf("kind = %v, want ObsUnreadable", got)
 	}
-	if !errors.Is(obs["./var/run/pipe"].Err, fsx.ErrNotRegular) {
-		t.Errorf("err = %v, want ErrNotRegular", obs["./var/run/pipe"].Err)
+	if !errors.Is(obs["./var/run/pipe"].Err, errRecordKind) {
+		t.Errorf("err = %v, want errRecordKind", obs["./var/run/pipe"].Err)
 	}
 }
 
@@ -185,7 +262,7 @@ func TestVerifyRefusesAFifoWithoutBlocking(t *testing.T) {
 // a resolving implementation would fail or manufacture a finding, and 4,145
 // legitimate targets on the reference system contain "..".
 func TestVerifyReadsLinkTargetsWithoutResolvingThem(t *testing.T) {
-	root, dir := tierRoot(t)
+	_, dir := tierRoot(t)
 	const target = "../../../nonexistent/../usr/lib/libfoo.so.1"
 	if err := os.MkdirAll(filepath.Join(dir, "usr/lib"), 0o755); err != nil {
 		t.Fatal(err)
@@ -195,7 +272,7 @@ func TestVerifyReadsLinkTargetsWithoutResolvingThem(t *testing.T) {
 	}
 	entries := []mtree.Entry{{Path: "./usr/lib/libfoo.so", Type: "link", Link: target}}
 
-	obs := TierFull.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierFull, entries, Exemptions{})
 	o := obs["./usr/lib/libfoo.so"]
 	if o.Kind != ObsLink {
 		t.Fatalf("kind = %v, want ObsLink (err=%v)", o.Kind, o.Err)
@@ -214,7 +291,7 @@ func TestVerifyReadsLinkTargetsWithoutResolvingThem(t *testing.T) {
 	if err := os.Symlink("../../tmp/evil.so", filepath.Join(dir, "usr/lib/libfoo.so")); err != nil {
 		t.Fatal(err)
 	}
-	obs = TierFull.Verify(root, entries, Exemptions{})
+	obs = observe(t, dir, TierFull, entries, Exemptions{})
 	res := Integrity("foo", entries, obs, Exemptions{}, TierFull)
 	if _, ok := findingForSubject(res, "integrity-link-target", "./usr/lib/libfoo.so"); !ok {
 		t.Fatalf("a repointed symlink produced no finding: %+v %+v", res.Findings, res.Gaps)
@@ -222,22 +299,22 @@ func TestVerifyReadsLinkTargetsWithoutResolvingThem(t *testing.T) {
 }
 
 func TestVerifyReportsAMissingPath(t *testing.T) {
-	root, _ := tierRoot(t)
+	_, dir := tierRoot(t)
 	entries := []mtree.Entry{{Path: "./usr/share/doc/foo", Type: "file", SHA256: sha256Of("x")}}
-	obs := TierFull.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierFull, entries, Exemptions{})
 	if got := obs["./usr/share/doc/foo"].Kind; got != ObsMissing {
 		t.Fatalf("kind = %v, want ObsMissing (err=%v)", got, obs["./usr/share/doc/foo"].Err)
 	}
 }
 
 func TestMetaTierNeverHashes(t *testing.T) {
-	root, dir := tierRoot(t)
+	_, dir := tierRoot(t)
 	p := writeAt(t, dir, "usr/bin/foo", "tampered", 0o755)
 	entries := []mtree.Entry{{
 		Path: "./usr/bin/foo", Type: "file", Mode: 0o755,
 		Size: int64(len("tampered")), Time: mtimeOf(t, p), SHA256: sha256Of("original"),
 	}}
-	obs := TierMeta.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierMeta, entries, Exemptions{})
 	o := obs["./usr/bin/foo"]
 	if o.Kind != ObsMetadataOnly {
 		t.Fatalf("kind = %v, want ObsMetadataOnly", o.Kind)
@@ -261,8 +338,13 @@ func TestMetaTierNeverHashes(t *testing.T) {
 // to miss and required: trusting mtime to decide what to hash is trusting the
 // attacker who can set mtime. Both files below agree with their record on size
 // AND mtime while their contents differ; the executable must still be hashed.
+//
+// The subset is decided in phase 1 from the fstat of the descriptor that would
+// be read. Note what the record says here and what it does not have to say: the
+// mode below could claim anything at all and the executable would still be
+// hashed, because it is the kernel's mode that decides what runs.
 func TestTriageAlwaysHashesTheSecurityRelevantSubset(t *testing.T) {
-	root, dir := tierRoot(t)
+	_, dir := tierRoot(t)
 	quiet := writeAt(t, dir, "usr/share/doc/foo/README", "tampered", 0o644)
 	exe := writeAt(t, dir, "usr/bin/foo", "tampered", 0o755)
 	entries := []mtree.Entry{
@@ -272,7 +354,7 @@ func TestTriageAlwaysHashesTheSecurityRelevantSubset(t *testing.T) {
 			Size: int64(len("tampered")), Time: mtimeOf(t, exe), SHA256: sha256Of("original")},
 	}
 
-	obs := TierTriage.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierTriage, entries, Exemptions{})
 
 	quietObs := obs["./usr/share/doc/foo/README"]
 	if quietObs.Kind != ObsMetadataOnly {
@@ -302,32 +384,103 @@ func TestTriageAlwaysHashesTheSecurityRelevantSubset(t *testing.T) {
 	}
 }
 
-// When stat DOES disagree, triage hashes -- and the resulting finding says that
-// stat is what selected it.
-func TestTriageHashesWhenStatDisagreesAndMarksIt(t *testing.T) {
-	root, dir := tierRoot(t)
+// TestTriageDoesNotHashOutsideTheSubsetAndStatesTheLoss is the deliberate
+// weakening of tier triage, asserted rather than left implicit.
+//
+// Triage's hash set has to be decidable in phase 1, because after the capability
+// drop the process cannot read a root-only file at all. So a file outside the
+// security-relevant subset is opened, fstat'd and NOT read, whatever its size
+// and mtime say. A size disagreement is still reported -- metadata can
+// contradict a record even though it can never confirm one -- and the paths that
+// went unhashed are gapped with the limit spelled out, because a limit an
+// operator only meets in the source is a limit they never meet.
+func TestTriageDoesNotHashOutsideTheSubsetAndStatesTheLoss(t *testing.T) {
+	_, dir := tierRoot(t)
 	p := writeAt(t, dir, "usr/share/foo.dat", "much longer content", 0o644)
 	entries := []mtree.Entry{{
 		Path: "./usr/share/foo.dat", Type: "file", Mode: 0o644,
 		Size: 4, Time: mtimeOf(t, p), SHA256: sha256Of("orig"),
 	}}
-	obs := TierTriage.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierTriage, entries, Exemptions{})
 	o := obs["./usr/share/foo.dat"]
-	if o.Kind != ObsHashed {
-		t.Fatalf("kind = %v, want ObsHashed", o.Kind)
+	if o.Kind != ObsMetadataOnly {
+		t.Fatalf("kind = %v, want ObsMetadataOnly: a stat disagreement must not make triage read a "+
+			"file it could not have decided to read while it still held the capability", o.Kind)
 	}
 	if !o.MtimeAssisted {
-		t.Error("a stat-selected observation is not marked mtime-assisted (INV-6)")
+		t.Error("a metadata-only observation is not marked mtime-assisted (INV-6)")
 	}
 	res := Integrity("foo", entries, obs, Exemptions{}, TierTriage)
 	f := integrityFor(t, res, "integrity-digest-mismatch", "./usr/share/foo.dat")
 	if !containsString(f.Evidence, "mtime-assisted") {
 		t.Errorf("finding does not carry the marker: %v", f.Evidence)
 	}
+	if !containsString(f.Evidence, "contents not hashed") {
+		t.Errorf("a size-only finding does not say the contents were not read: %v", f.Evidence)
+	}
+	g, ok := gapForSubject(res, "integrity-coverage", "foo")
+	if !ok {
+		t.Fatalf("triage did not gap the path it left unhashed: %+v", res.Gaps)
+	}
+	if !strings.Contains(g.Reason, "NOT detected at this tier") {
+		t.Errorf("the triage coverage gap does not state the tier's blindness: %q", g.Reason)
+	}
 }
 
-func TestExemptPathIsNotOpenedBelowParanoid(t *testing.T) {
-	root, dir := tierRoot(t)
+// The same file at tier full IS read, so the weakening above is a property of
+// triage rather than of the whole pipeline.
+func TestFullHashesWhatTriageSkips(t *testing.T) {
+	_, dir := tierRoot(t)
+	p := writeAt(t, dir, "usr/share/foo.dat", "tampered", 0o644)
+	entries := []mtree.Entry{{
+		Path: "./usr/share/foo.dat", Type: "file", Mode: 0o644,
+		Size: int64(len("tampered")), Time: mtimeOf(t, p), SHA256: sha256Of("orig"),
+	}}
+	if got := observe(t, dir, TierTriage, entries, Exemptions{})["./usr/share/foo.dat"].Kind; got != ObsMetadataOnly {
+		t.Fatalf("triage kind = %v, want ObsMetadataOnly", got)
+	}
+	obs := observe(t, dir, TierFull, entries, Exemptions{})
+	if got := obs["./usr/share/foo.dat"].Kind; got != ObsHashed {
+		t.Fatalf("full kind = %v, want ObsHashed", got)
+	}
+	res := Integrity("foo", entries, obs, Exemptions{}, TierFull)
+	if _, ok := findingForSubject(res, "integrity-digest-mismatch", "./usr/share/foo.dat"); !ok {
+		t.Fatalf("tier full did not report a size-identical content change: %+v %+v", res.Findings, res.Gaps)
+	}
+}
+
+// A watched path is hashed at triage even though nothing about it is
+// executable: a unit file decides what runs without being runnable itself.
+func TestTriageHashesWatchedPathsWhateverTheirMode(t *testing.T) {
+	_, dir := tierRoot(t)
+	p := writeAt(t, dir, "usr/lib/systemd/system/foo.service", "[Service]\nExecStart=/usr/bin/evil\n", 0o644)
+	entries := []mtree.Entry{{
+		Path: "./usr/lib/systemd/system/foo.service", Type: "file", Mode: 0o644,
+		Size: int64(len("[Service]\nExecStart=/usr/bin/evil\n")), Time: mtimeOf(t, p),
+		SHA256: sha256Of("[Service]\nExecStart=/usr/bin/true\n"),
+	}}
+	obs := observe(t, dir, TierTriage, entries, Exemptions{})
+	o := obs["./usr/lib/systemd/system/foo.service"]
+	if o.Kind != ObsHashed {
+		t.Fatalf("a non-executable unit file was not hashed at tier triage (kind=%v); its contents "+
+			"decide what runs and its mode says nothing about that", o.Kind)
+	}
+	if o.MtimeAssisted {
+		t.Error("an unconditionally hashed observation was marked mtime-assisted")
+	}
+	res := Integrity("foo", entries, obs, Exemptions{}, TierTriage)
+	if _, ok := findingForSubject(res, "integrity-digest-mismatch", "./usr/lib/systemd/system/foo.service"); !ok {
+		t.Fatalf("no finding for a rewritten unit file: %+v %+v", res.Findings, res.Gaps)
+	}
+}
+
+// An exempt path IS opened and hashed by phase 1 -- exemptions are derived from
+// PARSED hooks and do not exist while the capability is held -- and is then not
+// COMPARED below paranoid. Phase 1 hashes; phase 2 alone decides what a mismatch
+// means. Measured cost of hashing the exempt set on the reference system: 321
+// files, 1.3 MiB.
+func TestExemptPathIsNotComparedBelowParanoid(t *testing.T) {
+	_, dir := tierRoot(t)
 	writeAt(t, dir, "etc/ld.so.cache", "regenerated", 0o644)
 	ex := DeriveExemptions([]hook.Hook{{
 		Name: "11-glibc-remove-ldconfig-cache.hook", When: "PreTransaction",
@@ -335,37 +488,17 @@ func TestExemptPathIsNotOpenedBelowParanoid(t *testing.T) {
 	}}, nil)
 	entries := []mtree.Entry{{Path: "./etc/ld.so.cache", Type: "file", Mode: 0o644, SHA256: sha256Of("as-shipped")}}
 
-	if got := TierFull.Verify(root, entries, ex)["./etc/ld.so.cache"].Kind; got != ObsExempt {
+	if got := observe(t, dir, TierFull, entries, ex)["./etc/ld.so.cache"].Kind; got != ObsExempt {
 		t.Errorf("tier full kind = %v, want ObsExempt", got)
 	}
-	par := TierParanoid.Verify(root, entries, ex)["./etc/ld.so.cache"]
+	par := observe(t, dir, TierParanoid, entries, ex)["./etc/ld.so.cache"]
 	if par.Kind != ObsHashed {
 		t.Fatalf("tier paranoid kind = %v, want ObsHashed", par.Kind)
 	}
-	res := Integrity("glibc", entries, TierParanoid.Verify(root, entries, ex), ex, TierParanoid)
+	res := Integrity("glibc", entries, observe(t, dir, TierParanoid, entries, ex), ex, TierParanoid)
 	f := integrityFor(t, res, "integrity-digest-mismatch", "./etc/ld.so.cache")
 	if f.Severity != finding.SevInfo {
 		t.Errorf("severity = %v, want info: %s", f.Severity, formatFinding(f))
-	}
-}
-
-func TestSecurityRelevant(t *testing.T) {
-	cases := []struct {
-		e    mtree.Entry
-		want bool
-	}{
-		{mtree.Entry{Type: "file", Mode: 0o755}, true},
-		{mtree.Entry{Type: "file", Mode: 0o4755}, true},
-		{mtree.Entry{Type: "file", Mode: 0o2755}, true},
-		{mtree.Entry{Type: "file", Mode: 0o4644}, true},
-		{mtree.Entry{Type: "file", Mode: 0o644}, false},
-		{mtree.Entry{Type: "file", Mode: 0o444}, false},
-		{mtree.Entry{Type: "link", Mode: 0o777}, true},
-	}
-	for _, c := range cases {
-		if got := SecurityRelevant(c.e); got != c.want {
-			t.Errorf("SecurityRelevant(%+v) = %v, want %v", c.e, got, c.want)
-		}
 	}
 }
 
@@ -383,14 +516,14 @@ func TestVerifyRefusesALinkReachedThroughAnEscapingDirectory(t *testing.T) {
 	if err := os.Symlink("../../../etc/shadow", filepath.Join(outside, "bait")); err != nil {
 		t.Fatal(err)
 	}
-	root, dir := tierRoot(t)
+	_, dir := tierRoot(t)
 	// "usr" inside the root is a symlink to a directory outside it.
 	if err := os.Symlink(outside, filepath.Join(dir, "usr")); err != nil {
 		t.Fatal(err)
 	}
 	entries := []mtree.Entry{{Path: "./usr/bait", Type: "link", Link: "../../../etc/shadow"}}
 
-	obs := TierFull.Verify(root, entries, Exemptions{})
+	obs, raw := observeRaw(t, dir, TierFull, entries, Exemptions{})
 	o := obs["./usr/bait"]
 	if o.Kind != ObsUnreadable {
 		t.Fatalf("a link reached through an escaping directory was read (kind=%v, link=%q); the "+
@@ -399,38 +532,57 @@ func TestVerifyRefusesALinkReachedThroughAnEscapingDirectory(t *testing.T) {
 	if o.Link != "" {
 		t.Errorf("refused, yet a target was reported: %q", o.Link)
 	}
+	// The shortfall is reported ONCE. Phase 1 is the phase that met the refusal,
+	// so phase 1 is the phase that names it; Integrity consumes that gap rather
+	// than restating it under a second rule ID.
+	if _, ok := collectGapFor(raw, "./usr/bait"); !ok {
+		t.Fatalf("phase 1 did not gap the refused path: %+v", raw.Gaps)
+	}
+	if !o.Gapped {
+		t.Error("the observation does not record that phase 1 already gapped it")
+	}
 	res := Integrity("foo", entries, obs, Exemptions{}, TierFull)
 	if len(res.Findings) != 0 {
 		t.Errorf("an escape produced a finding rather than a gap (INV-9): %+v", res.Findings)
 	}
-	if _, ok := gapForSubject(res, "integrity-link-target", "./usr/bait"); !ok {
-		t.Errorf("no gap for a refused link: %+v", res.Gaps)
+	if len(res.Gaps) != 0 {
+		t.Errorf("the same shortfall was gapped twice, once by each phase: %+v", res.Gaps)
 	}
 }
 
-// A path an mtree should never contain must never reach a syscall -- and that
-// has to hold on BOTH paths out of observe(), the digest one through
-// fsx.OpenConfined and the symlink one through fsx.ReadLinkConfined.
+// A path a package database should never contain must never reach a syscall.
+// The refusal now happens in phase 1, on the plain-text name list, before the
+// path is ever handed to fsx -- and it is attributed to the package that
+// recorded it rather than to whichever errno the kernel happened to produce.
+//
+// Measured on the reference system: zero of 386,645 recorded paths are
+// absolute, contain a ".." component, or carry a NUL. There is no legitimate
+// population to accommodate, so any occurrence is damning.
 func TestVerifyRefusesHostilePaths(t *testing.T) {
-	root, _ := tierRoot(t)
-	hostile := []string{"/etc/passwd", "./usr/../../etc/passwd", "", "./usr/bin/\x00foo", "./usr//bin/x"}
+	_, dir := tierRoot(t)
+	hostile := []string{"/etc/passwd", "./usr/../../etc/passwd", "./usr/bin/\x00foo", "./usr//bin/x"}
 	for _, kind := range []string{"file", "link"} {
 		for _, p := range hostile {
 			e := mtree.Entry{Path: p, Type: kind, SHA256: sha256Of("x")}
 			if kind == "link" {
 				e.Link = "somewhere"
 			}
-			obs := TierFull.Verify(root, []mtree.Entry{e}, Exemptions{})
-			o, ok := obs[p]
-			if !ok {
-				t.Errorf("type=%s path %q produced no observation at all; a refusal must be attributable", kind, p)
-				continue
+			obs, raw := observeRaw(t, dir, TierFull, []mtree.Entry{e}, Exemptions{})
+			if o, ok := obs[p]; ok {
+				t.Errorf("type=%s path %q was observed (kind=%v, link=%q); it must never have been opened",
+					kind, p, o.Kind, o.Link)
 			}
-			if o.Kind != ObsUnreadable {
-				t.Errorf("type=%s path %q: kind = %v, want ObsUnreadable", kind, p, o.Kind)
+			if _, ok := collectGapFor(raw, "fixture-1-1"); !ok {
+				t.Errorf("type=%s path %q: phase 1 refused it without saying so: %+v", kind, p, raw.Gaps)
 			}
-			if o.Link != "" {
-				t.Errorf("type=%s path %q: refused, yet a target was reported (%q)", kind, p, o.Link)
+			// An unexamined path is never a clean path: the package carries a
+			// coverage gap for it (INV-3).
+			res := Integrity("fixture", []mtree.Entry{e}, obs, Exemptions{}, TierFull)
+			if len(res.Findings) != 0 {
+				t.Errorf("type=%s path %q produced a finding rather than a gap: %+v", kind, p, res.Findings)
+			}
+			if _, ok := gapForSubject(res, ruleForEntry(e), p); !ok {
+				t.Errorf("type=%s path %q produced no coverage gap: %+v", kind, p, res.Gaps)
 			}
 		}
 	}
@@ -505,7 +657,7 @@ func TestFPGateIntegrityIsQuietOnABenignRoot(t *testing.T) {
 
 	for _, tier := range []Tier{TierMeta, TierTriage, TierFull} {
 		t.Run(tier.String(), func(t *testing.T) {
-			obs := tier.Verify(root, entries, ex)
+			obs := observe(t, dir, tier, entries, ex)
 			res := Integrity("glibc", entries, obs, ex, tier)
 			for _, f := range res.Findings {
 				if f.Severity >= finding.SevSuspicious {
@@ -538,7 +690,7 @@ func TestFPGateIntegrityIsQuietOnABenignRoot(t *testing.T) {
 	// Liveness floor: the same benign fixture, with one byte of tampering,
 	// must still speak. A quiet scanner satisfies "no findings" trivially.
 	writeAt(t, dir, "usr/bin/foo", "#!/bin/sh\ncurl\n", 0o755)
-	res := Integrity("glibc", entries, TierFull.Verify(root, entries, ex), ex, TierFull)
+	res := Integrity("glibc", entries, observe(t, dir, TierFull, entries, ex), ex, TierFull)
 	if _, ok := findingForSubject(res, "integrity-digest-mismatch", "./usr/bin/foo"); !ok {
 		t.Fatalf("the benign root went quiet after tampering: %+v %+v", res.Findings, res.Gaps)
 	}
@@ -550,7 +702,7 @@ func TestFPGateIntegrityIsQuietOnABenignRoot(t *testing.T) {
 // would never report that it had not -- which is a working instruction for
 // becoming invisible.
 func TestPanicOnOnePathIsAGapAndTheScanContinues(t *testing.T) {
-	root, dir := tierRoot(t)
+	_, dir := tierRoot(t)
 	writeAt(t, dir, "usr/bin/a", "a", 0o755)
 	writeAt(t, dir, "usr/bin/b", "b", 0o755)
 	entries := []mtree.Entry{
@@ -565,7 +717,7 @@ func TestPanicOnOnePathIsAGapAndTheScanContinues(t *testing.T) {
 	}
 	t.Cleanup(func() { beforeObserveForTest = nil })
 
-	obs := TierFull.Verify(root, entries, Exemptions{})
+	obs := observe(t, dir, TierFull, entries, Exemptions{})
 	if got := obs["./usr/bin/a"].Kind; got != ObsUnreadable {
 		t.Fatalf("panicking path kind = %v, want ObsUnreadable", got)
 	}

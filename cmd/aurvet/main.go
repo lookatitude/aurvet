@@ -679,14 +679,15 @@ func sweepWith(ctx context.Context, cfg config.Config, d dbs, noNet bool, cl aur
 //
 // WHAT THIS PIPELINE DOES NOT DO, stated because the omissions are real:
 //
-//   - It does not walk the whole filesystem. The walk collect performs is scoped
-//     to the local database, because content verification is Tier.Verify's job
-//     over the paths an mtree RECORDS, and a second full-tree walk would read
-//     every file twice. The consequence is that check.UnownedSUID has no input
-//     and is not wired: a setuid file owned by no package is not reported by this
-//     build. That is a missing check, not a silent pass -- it is named here and
-//     in the handoff rather than papered over with a gap that would block every
-//     baseline on every machine.
+//   - It does not walk the whole filesystem at any tier. Below paranoid it opens
+//     exactly the paths the local database RECORDS -- 386,645 non-directory
+//     entries on the reference system, learned in phase 1 from a newline split of
+//     the plain-text `files`, not from the gzipped mtree. Paranoid adds a
+//     metadata-only sweep of usr, etc, opt, boot and srv minus the collector's
+//     skip list, which is what check.UnownedSUID needs and what spec §13 assigns
+//     to that tier. So integrity-unowned-setuid fires at paranoid and nowhere
+//     else, and the trees the sweep still cannot see are stated in the rule's own
+//     limits rather than left to be discovered.
 //   - It does not read pacman.log. Correlation's temporal key therefore rests on
 //     mtree time= against %INSTALLDATE% only; `baseline init` supplies the
 //     transaction times as well, so its correlation is strictly stronger than
@@ -708,10 +709,20 @@ var (
 	privDropAll      = privdrop.DropAll
 )
 
-// beforeVerifyForTest runs immediately before each package's contents are read.
-// Production leaves it nil; the ordering test uses it to place the reads in
-// sequence against the privilege transitions.
-var beforeVerifyForTest func()
+// beforeCollectForTest runs immediately before phase 1, and beforeVerifyForTest
+// immediately before each package's records are COMPARED against phase 1's
+// evidence. Production leaves both nil.
+//
+// The pair is what makes the staged model testable from outside. Every read of a
+// file's contents happens between them; nothing after beforeVerifyForTest reads
+// anything for integrity. A test that only asserted "ReduceToRead was called"
+// would pass on a build that reduced after the first read, and a test that
+// marked the comparison as though it were a read would assert nothing at all
+// once the reads moved into collect -- which is exactly what happened here.
+var (
+	beforeCollectForTest func()
+	beforeVerifyForTest  func()
+)
 
 // stagePrivilege reduces the process to CAP_DAC_READ_SEARCH before the first
 // read and returns the function that destroys what is left of its privilege
@@ -846,7 +857,10 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 
 	// Phase 1: buffer the database bytes through confined opens, while the read
 	// capability is held. Nothing here parses.
-	raw, cerr := collect.Collect(collectConfig(p.cfg))
+	if beforeCollectForTest != nil {
+		beforeCollectForTest()
+	}
+	raw, cerr := collect.Collect(collectConfig(p.cfg, p.tier))
 	if cerr != nil {
 		res.Gaps = append(res.Gaps, finding.Gap{
 			RuleID: "collect-db", Subject: p.cfg.DBPath,
@@ -871,11 +885,20 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 	}
 	ex := check.DeriveExemptions(active, d.pkgs)
 
-	// Phase 2: parse, verify, compare. Parsing happens here, on buffered bytes,
-	// after the privileged buffering is over.
-	ires := verifyPackages(p.tier, root, raw.Packages, ex, &out)
+	// Phase 2: parse, compare. Parsing happens here, on buffered bytes, after the
+	// privileged phase is over, and NOTHING below reads the filesystem for
+	// integrity: every digest, mode and link target compared here came off the
+	// descriptor collect opened once.
+	observed := raw.ByPath()
+	ires := verifyPackages(p.tier, raw.Packages, observed, ex, &out)
 	res.Findings = append(res.Findings, ires.Findings...)
 	res.Gaps = append(res.Gaps, ires.Gaps...)
+
+	// The unowned setuid sweep, which has input only at paranoid because only
+	// paranoid asks collect for the metadata sweep those files live in.
+	sres := check.UnownedSUID(suidFiles(raw, owners))
+	res.Findings = append(res.Findings, sres.Findings...)
+	res.Gaps = append(res.Gaps, sres.Gaps...)
 
 	// A tier is a claim about work, so it is derived from the work.
 	//
@@ -933,16 +956,30 @@ func finishPrivilege(res *finding.Result, dropAll func() error) {
 	}
 }
 
-// collectConfig is the collector's configuration for a scan.
+// sweepTrees are the subtrees tier paranoid enumerates for metadata, on top of
+// the recorded paths every tier opens. They are the trees packages install into,
+// which is where an unowned setuid file has to be to matter; collect.DefaultSkip
+// still applies inside them, and what that hides is stated in the rule's limits
+// rather than here, because the reader who needs it is reading a finding.
+var sweepTrees = []string{"usr", "etc", "opt", "boot", "srv"}
+
+// collectConfig is the collector's configuration for a scan at one tier.
 //
-// The walk is scoped to the local database on purpose. collect's contract is to
-// hash what it walks, and Tier.Verify hashes what the mtrees RECORD; a full-tree
-// walk here would read every packaged file twice for one answer. See the block
-// comment above for what that costs.
-func collectConfig(cfg config.Config) collect.Config {
+// The tier travels INTO phase 1 rather than being applied after it. That is the
+// whole shape of spec §11.1's staged model: the process holds the read
+// capability only during collection, so a decision to read a root-only file has
+// to be taken while it still can be acted on. collect learns which paths to open
+// from the plain-text `files` of each package -- a newline split, no
+// decompression and no mtree parse -- and the gzip, the vis(3) unescaping and
+// every other format parser stay on the unprivileged side of the drop.
+func collectConfig(cfg config.Config, t check.Tier) collect.Config {
 	cc := collect.DefaultConfig(cfg.Root)
 	cc.DBPath = cfg.DBPath
 	cc.Walk = []string{dbRel(cfg)}
+	cc.Recorded = t.CollectPolicy()
+	if t == check.TierParanoid {
+		cc.Sweep = sweepTrees
+	}
 	return cc
 }
 
@@ -964,7 +1001,7 @@ func dbRel(cfg config.Config) string {
 // contained: one crafted mtree costs one coverage gap, not the other 1,409. Each
 // worker goroutine carries its own recover, because a panic in a goroutine
 // cannot be recovered by the goroutine that started it (INV-9).
-func verifyPackages(t check.Tier, root *os.Root, pkgs []collect.Package, ex check.Exemptions, out *scanRun) finding.Result {
+func verifyPackages(t check.Tier, pkgs []collect.Package, observed map[string]collect.File, ex check.Exemptions, out *scanRun) finding.Result {
 	var (
 		mu  sync.Mutex
 		res finding.Result
@@ -1008,7 +1045,7 @@ func verifyPackages(t check.Tier, root *os.Root, pkgs []collect.Package, ex chec
 					pkg := pkgs[i]
 					name := pkgNameFromDir(pkg.Dir)
 					perr, panicked := safe.Run(pkg.Dir, func() error {
-						add(verifyOne(t, root, name, pkg, ex))
+						add(verifyOne(t, name, pkg, observed, ex))
 						return nil
 					})
 					if perr != nil {
@@ -1044,10 +1081,10 @@ type obsCounts struct {
 	bytes        int64
 }
 
-// verifyOne handles one package: parse, observe, compare. The bool reports
+// verifyOne handles one package: parse, join, compare. The bool reports
 // whether this package was verified at all, so a package that never got past its
 // mtree is not counted as covered.
-func verifyOne(t check.Tier, root *os.Root, name string, pkg collect.Package, ex check.Exemptions) (finding.Result, obsCounts, bool) {
+func verifyOne(t check.Tier, name string, pkg collect.Package, observed map[string]collect.File, ex check.Exemptions) (finding.Result, obsCounts, bool) {
 	if len(pkg.MTree) == 0 {
 		// collect already gapped the read that failed. A second gap for the same
 		// shortfall teaches an operator to skim.
@@ -1064,7 +1101,7 @@ func verifyOne(t check.Tier, root *os.Root, name string, pkg collect.Package, ex
 	if beforeVerifyForTest != nil {
 		beforeVerifyForTest()
 	}
-	obs := t.Verify(root, entries, ex)
+	obs := t.Observe(entries, observed, ex)
 
 	var c obsCounts
 	for _, o := range obs {
@@ -1077,6 +1114,35 @@ func verifyOne(t check.Tier, root *os.Root, name string, pkg collect.Package, ex
 		}
 	}
 	return check.Integrity(name, entries, obs, ex, t), c, true
+}
+
+// suidFiles is check.UnownedSUID's input: every setuid or setgid regular file
+// phase 1 described, with the package that claims it if the ownership index knew
+// one.
+//
+// The mode comes from the fstat of the descriptor the collector opened, not from
+// what any package recorded, because the mode that matters is the one the kernel
+// will honour. An ownership lookup that FAILED yields no finding: Resolve's third
+// state exists precisely so "I could not tell" cannot masquerade as "nobody owns
+// it", which here would be a fabricated accusation.
+func suidFiles(raw collect.Raw, owners *own.Owners) []check.SUIDFile {
+	var out []check.SUIDFile
+	for _, f := range raw.Files {
+		if f.Kind != collect.KindFile || f.Mode&0o6000 == 0 {
+			continue
+		}
+		pkg, st, err := owners.Resolve(f.Path)
+		if err != nil || st == own.Unresolved {
+			continue
+		}
+		if st == own.Owned && pkg == "" {
+			// Owned by a package the index could not name. Reporting it as
+			// unowned would turn a naming failure into an accusation.
+			continue
+		}
+		out = append(out, check.SUIDFile{Path: f.Path, Mode: f.Mode, Owner: pkg})
+	}
+	return out
 }
 
 // pkgNameFromDir recovers a package name from its local-database directory,

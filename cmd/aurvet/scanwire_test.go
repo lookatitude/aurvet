@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -480,6 +481,11 @@ func copyTree(src, dst string) error {
 // The staged-privilege model, asserted by ORDER rather than by the mere fact
 // that the calls exist: a reduction after the first read protects nothing, and a
 // drop before the last read turns coverage into gaps.
+//
+// The reads all live in phase 1 now, so the window they have to fall inside is
+// the one between beforeCollectForTest and beforeVerifyForTest. Asserting
+// against the COMPARISON phase instead would be asserting nothing: it performs
+// no I/O, so its position relative to the drop cannot fail.
 func TestPrivilegeIsReducedBeforeTheFirstReadAndDroppedAfterTheLast(t *testing.T) {
 	var seq atomic.Int64
 	var reduced, dropped int64
@@ -488,15 +494,16 @@ func TestPrivilegeIsReducedBeforeTheFirstReadAndDroppedAfterTheLast(t *testing.T
 	privReduceToRead = func() error { reduced = seq.Add(1); return nil }
 	privDropAll = func() error { dropped = seq.Add(1); return nil }
 
-	var firstRead, lastRead int64
-	origObserve := beforeVerifyForTest
-	t.Cleanup(func() { beforeVerifyForTest = origObserve })
+	var collectStart, firstCompare, lastCompare int64
+	origCollect, origVerify := beforeCollectForTest, beforeVerifyForTest
+	t.Cleanup(func() { beforeCollectForTest, beforeVerifyForTest = origCollect, origVerify })
+	beforeCollectForTest = func() { collectStart = seq.Add(1) }
 	beforeVerifyForTest = func() {
 		n := seq.Add(1)
-		if firstRead == 0 {
-			firstRead = n
+		if firstCompare == 0 {
+			firstCompare = n
 		}
-		lastRead = n
+		lastCompare = n
 	}
 
 	root := integrityRoot(t, "x", "x")
@@ -510,14 +517,18 @@ func TestPrivilegeIsReducedBeforeTheFirstReadAndDroppedAfterTheLast(t *testing.T
 	if reduced == 0 || dropped == 0 {
 		t.Fatalf("privilege was not staged: reduced=%d dropped=%d", reduced, dropped)
 	}
-	if firstRead == 0 {
-		t.Fatal("no file was read; the ordering assertion would pass vacuously")
+	if collectStart == 0 || firstCompare == 0 {
+		t.Fatalf("a phase did not run; the ordering assertion would pass vacuously: collect=%d compare=%d",
+			collectStart, firstCompare)
 	}
-	if reduced > firstRead {
-		t.Errorf("privilege was reduced (%d) after the first read (%d)", reduced, firstRead)
+	if reduced > collectStart {
+		t.Errorf("privilege was reduced (%d) after phase 1 began reading (%d)", reduced, collectStart)
 	}
-	if dropped < lastRead {
-		t.Errorf("privilege was dropped (%d) before the last read (%d)", dropped, lastRead)
+	if collectStart > firstCompare {
+		t.Errorf("a comparison (%d) preceded the collection it compares against (%d)", firstCompare, collectStart)
+	}
+	if dropped < lastCompare {
+		t.Errorf("privilege was dropped (%d) before the last comparison (%d)", dropped, lastCompare)
 	}
 }
 
@@ -687,4 +698,191 @@ func writeFile(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The staged privilege model, as a property of what the phases can see
+// ---------------------------------------------------------------------------
+
+// TestIntegrityReadsNothingAfterPhaseOne is spec §11.1 asserted by CONSEQUENCE
+// rather than by inspection: if the comparison phase still touched the
+// filesystem, restoring the tampered file between the two phases would make the
+// finding disappear.
+//
+// It has to be asserted this way. "The parse happens after the drop" is not
+// observable from a test that cannot become root, but "the verdict does not
+// change when the tree changes underneath the analyser" is, and it is the
+// property that actually matters: after the drop this process holds nothing, so
+// an analyser that re-read would be reading as an ordinary user and silently
+// reporting less on exactly the files that need privilege.
+func TestIntegrityReadsNothingAfterPhaseOne(t *testing.T) {
+	root := integrityRoot(t, "the packaged bytes\n", "tampered\n")
+	target := filepath.Join(root, "usr/bin/zlib")
+
+	orig := beforeVerifyForTest
+	t.Cleanup(func() { beforeVerifyForTest = orig })
+	var once sync.Once
+	beforeVerifyForTest = func() {
+		// Between collection and comparison, put the file back exactly as the
+		// package recorded it. A phase 2 that reads would now find a match.
+		once.Do(func() {
+			if err := os.WriteFile(target, []byte("the packaged bytes\n"), 0o644); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+
+	run, err := fullScan(t.Context(), pipeline{cfg: resolveForTest(t, root), tier: check.TierFull, euid: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range run.Result.Findings {
+		if f.RuleID == "integrity-digest-mismatch" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the mismatch vanished when the file was restored between the phases: the comparison "+
+			"phase re-read the filesystem, which after the capability drop it cannot do\n%+v %+v",
+			run.Result.Findings, run.Result.Gaps)
+	}
+}
+
+// The evidence the comparison rests on comes from phase 1, so a file phase 1
+// never opened produces no verdict at all rather than a fabricated one.
+func TestAPathPhaseOneNeverOpenedYieldsNoVerdict(t *testing.T) {
+	root := integrityRoot(t, "x", "x")
+	// A path the mtree records and `files` does not: phase 1 learns what to open
+	// from `files`, so this path is never opened and must become a gap.
+	db := filepath.Join(root, "var/lib/pacman/local/zlib-1.3.1-2/files")
+	body, err := os.ReadFile(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(db, []byte("%FILES%\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = body
+
+	run, err := fullScan(t.Context(), pipeline{cfg: resolveForTest(t, root), tier: check.TierFull, euid: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range run.Result.Findings {
+		if strings.HasPrefix(f.RuleID, "integrity-") {
+			t.Errorf("a path that was never opened produced a finding: %+v", f)
+		}
+	}
+	found := false
+	for _, g := range run.Result.Gaps {
+		if g.RuleID == "integrity-digest-mismatch" && strings.Contains(g.Reason, "no observation") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an unexamined path was not reported as a coverage gap (INV-3): %+v", run.Result.Gaps)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The unowned setuid sweep
+// ---------------------------------------------------------------------------
+
+// suidRoot builds a root with one package-owned setuid helper and one setuid
+// binary no package claims.
+func suidRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	writePackageRoot(t, root, "util-linux", "2.41-1", []mtreeFile{
+		{Rel: "usr/bin/mount", Recorded: "owned helper\n", OnDisk: "owned helper\n"},
+	})
+	// os.ModeSetuid, not 0o4755: Go's FileMode does not carry the Unix setuid bit
+	// in its permission word, so the octal spelling would silently set 0o755 and
+	// the fixture would assert nothing.
+	if err := os.Chmod(filepath.Join(root, "usr/bin/mount"), 0o755|os.ModeSetuid); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(root, "usr/local/bin/backdoor")
+	if err := os.MkdirAll(filepath.Dir(planted), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planted, []byte("#!/bin/sh\nid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(planted, 0o755|os.ModeSetuid); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// integrity-unowned-setuid is a declared rule, so it must be able to fire. It
+// fires at paranoid, which is the tier spec §13 assigns the unowned walk and the
+// full SUID sweep to.
+func TestUnownedSetuidFiresAtParanoid(t *testing.T) {
+	root := suidRoot(t)
+	run, err := fullScan(t.Context(), pipeline{cfg: resolveForTest(t, root), tier: check.TierParanoid, euid: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range run.Result.Findings {
+		if f.RuleID == "integrity-unowned-setuid" {
+			got = append(got, f.Subject)
+		}
+	}
+	if len(got) != 1 || got[0] != "./usr/local/bin/backdoor" {
+		t.Fatalf("unowned setuid subjects = %v, want exactly [./usr/local/bin/backdoor]\n%+v", got, run.Result.Findings)
+	}
+	// A package-owned setuid binary is ordinary and must not be reported: sudo,
+	// ping and mount all look like this on every system.
+	for _, f := range run.Result.Findings {
+		if f.RuleID == "integrity-unowned-setuid" && strings.Contains(f.Subject, "mount") {
+			t.Errorf("a package-owned setuid helper was reported: %+v", f)
+		}
+	}
+}
+
+// The same rule at the default tier says NOTHING, and that is by design rather
+// than by accident: the metadata sweep it needs is what paranoid buys. Stated
+// here because a rule that only fires at a non-default tier is otherwise
+// indistinguishable from one that never fires.
+func TestUnownedSetuidDoesNotFireBelowParanoid(t *testing.T) {
+	root := suidRoot(t)
+	for _, tier := range []check.Tier{check.TierMeta, check.TierTriage, check.TierFull} {
+		t.Run(tier.String(), func(t *testing.T) {
+			run, err := fullScan(t.Context(), pipeline{cfg: resolveForTest(t, root), tier: tier, euid: 1000})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range run.Result.Findings {
+				if f.RuleID == "integrity-unowned-setuid" {
+					t.Errorf("tier %s reported an unowned setuid file without the sweep that finds one: %+v", tier, f)
+				}
+			}
+		})
+	}
+}
+
+// The rule's limits must name the trees the sweep cannot see. "Full SUID sweep"
+// is not full, and the limits text is where that gets said rather than a silent
+// pass: a setuid binary in /tmp or a user's home is invisible at every tier.
+func TestUnownedSetuidStatesWhatTheSweepCannotSee(t *testing.T) {
+	root := suidRoot(t)
+	run, err := fullScan(t.Context(), pipeline{cfg: resolveForTest(t, root), tier: check.TierParanoid, euid: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range run.Result.Findings {
+		if f.RuleID != "integrity-unowned-setuid" {
+			continue
+		}
+		for _, want := range []string{"home", "tmp", "paranoid"} {
+			if !strings.Contains(f.Limits, want) {
+				t.Errorf("the limits do not mention %q, so the rule's blindness reaches nobody:\n%s", want, f.Limits)
+			}
+		}
+		return
+	}
+	t.Fatal("no finding to inspect")
 }

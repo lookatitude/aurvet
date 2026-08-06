@@ -612,3 +612,318 @@ func TestCollectBuffersRequestedExtraFiles(t *testing.T) {
 		t.Errorf("no gap for a requested file that is absent; gaps=%v", raw.Gaps)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The recorded paths: phase 1's hash set, learned from the plain-text `files`
+// ---------------------------------------------------------------------------
+
+// recordedPaths is the whole of what phase 1 is permitted to interpret, so what
+// it accepts and what it refuses is asserted directly rather than inferred from
+// a scan's output. Every refusal below is measured to have a population of zero
+// on the reference system: 386,645 recorded non-directory entries, none of them
+// absolute, none containing a ".." component, none carrying a NUL.
+func TestRecordedPathsIsANameListAndNothingMore(t *testing.T) {
+	list := "%FILES%\n" +
+		"usr/bin/hello\n" +
+		"usr/lib/\n" + // a directory: nothing to open it for
+		"usr/share/doc/read me.txt\n" + // a literal space; `files` does not vis-escape
+		"\n" +
+		"%BACKUP%\n" +
+		"etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e\n" +
+		"%FILES%\n" +
+		"usr/bin/second\n"
+
+	paths, bad := recordedPaths([]byte(list))
+	want := []string{"usr/bin/hello", "usr/share/doc/read me.txt", "usr/bin/second"}
+	if strings.Join(paths, "|") != strings.Join(want, "|") {
+		t.Errorf("paths = %q, want %q", paths, want)
+	}
+	if len(bad) != 0 {
+		t.Errorf("a benign list produced refusals: %q", bad)
+	}
+	// A %BACKUP% line carries a second tab-separated field. Reading it as a path
+	// would produce a name no open can ever match, which is a manufactured
+	// "missing file" finding on every %BACKUP% entry on the system.
+	for _, p := range paths {
+		if strings.Contains(p, "\t") {
+			t.Errorf("a %%BACKUP%% line was read as a path: %q", p)
+		}
+	}
+}
+
+func TestRecordedPathsRefusesEveryHostileShape(t *testing.T) {
+	hostile := []string{
+		"/etc/passwd",
+		"usr/../../etc/passwd",
+		"./../etc/passwd",
+		"usr//bin/x",
+		"usr/bin/\x00foo",
+		".",
+		"..",
+	}
+	for _, h := range hostile {
+		paths, bad := recordedPaths([]byte("%FILES%\n" + h + "\n"))
+		if len(paths) != 0 {
+			t.Errorf("%q was accepted as a path: %q", h, paths)
+		}
+		if len(bad) != 1 || bad[0] != h {
+			t.Errorf("%q was not reported as refused: %q", h, bad)
+		}
+	}
+}
+
+// A path outside the %FILES% section is not a path. `files` has no nesting and
+// no escaping, but it does have sections, and reading a %BACKUP% digest as a
+// filename would be interpreting a field.
+func TestRecordedPathsIgnoresEverythingOutsideTheFilesSection(t *testing.T) {
+	paths, bad := recordedPaths([]byte("%BACKUP%\netc/foo.conf\tdeadbeef\nusr/bin/never\n"))
+	if len(paths) != 0 || len(bad) != 0 {
+		t.Errorf("paths=%q bad=%q, want neither: nothing outside %%FILES%% is a path", paths, bad)
+	}
+}
+
+// recordedConfig scans the fixture root's recorded paths at the given policy,
+// walking nothing but the database (which is what a scan below paranoid does).
+func recordedConfig(root string, policy RecordedPolicy) Config {
+	cfg := testConfig(root)
+	cfg.Walk = []string{"var/lib/pacman/local"}
+	cfg.Recorded = policy
+	return cfg
+}
+
+// writeFileList replaces one fixture package's `files` with an explicit list.
+func writeFileList(t *testing.T, root, pkgDir string, paths ...string) {
+	t.Helper()
+	body := "%FILES%\n" + strings.Join(paths, "\n") + "\n"
+	p := filepath.Join(root, "var/lib/pacman/local", pkgDir, "files")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The recorded paths are opened even though the walk never enters their
+// subtree. This is the property the staged model rests on: phase 1 knows what to
+// read without decompressing an mtree, so the gzip and the vis(3) unescaping
+// stay on the unprivileged side of the drop.
+func TestCollectOpensRecordedPathsWithoutWalkingThem(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	writeFileList(t, root, "a52dec-0.8.0-1", "usr/bin/hello", "usr/lib/liba.so", "usr/share/doc/gone")
+
+	raw := mustCollect(t, recordedConfig(root, RecordedAll))
+
+	hello := fileFor(t, raw, "./usr/bin/hello")
+	if hello.Kind != KindFile || hello.SHA256 != payloadSHA256 {
+		t.Errorf("recorded regular file: kind=%s sha256=%s", hello.Kind, hello.SHA256)
+	}
+	// A recorded symlink: O_NOFOLLOW refuses the open, readlinkat reads the
+	// target, and the target is never resolved.
+	link := fileFor(t, raw, "./usr/lib/liba.so")
+	if link.Kind != KindLink || link.Link != "../../lib/liba.so.1" {
+		t.Errorf("recorded symlink: kind=%s link=%q", link.Kind, link.Link)
+	}
+	// A recorded path that is not there is an ANSWER, established from a
+	// confined open, and must not be a coverage gap.
+	gone := fileFor(t, raw, "./usr/share/doc/gone")
+	if gone.Kind != KindAbsent {
+		t.Errorf("absent recorded path: kind=%s, want %s", gone.Kind, KindAbsent)
+	}
+	if g, ok := gapFor(raw, "./usr/share/doc/gone"); ok {
+		t.Errorf("an observed absence was reported as a coverage gap: %+v", g)
+	}
+}
+
+// A recorded path that could not be examined is a gap AND carries KindUnread, so
+// the analyse phase can consume the one gap instead of raising a second.
+func TestCollectMarksAnUnreadableRecordedPath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is readable and the refusal cannot be provoked")
+	}
+	root, _ := fixtureRoot(t)
+	writeFileList(t, root, "a52dec-0.8.0-1", "usr/bin/locked")
+
+	raw := mustCollect(t, recordedConfig(root, RecordedAll))
+	locked := fileFor(t, raw, "./usr/bin/locked")
+	if locked.Kind != KindUnread {
+		t.Fatalf("kind = %s, want %s", locked.Kind, KindUnread)
+	}
+	if locked.Unread == "" {
+		t.Error("KindUnread carries no reason")
+	}
+	if _, ok := gapFor(raw, "./usr/bin/locked"); !ok {
+		t.Errorf("an unreadable recorded path produced no gap: %+v", raw.Gaps)
+	}
+}
+
+// RecordedSecurity decides from the fstat of the descriptor it would hash, not
+// from anything a package recorded. usr/bin/hello is 0755 and is read;
+// usr/share/doc/readme is 0644 and is not.
+func TestRecordedSecurityKeysOnTheDescriptorsOwnMode(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	writeFileList(t, root, "a52dec-0.8.0-1", "usr/bin/hello", "usr/share/doc/readme")
+
+	raw := mustCollect(t, recordedConfig(root, RecordedSecurity))
+	if got := fileFor(t, raw, "./usr/bin/hello").SHA256; got != payloadSHA256 {
+		t.Errorf("an executable was not hashed at RecordedSecurity: sha256=%q", got)
+	}
+	readme := fileFor(t, raw, "./usr/share/doc/readme")
+	if readme.SHA256 != "" {
+		t.Errorf("a non-executable was hashed at RecordedSecurity: %s", readme.SHA256)
+	}
+	if readme.Kind != KindFile || readme.Size != payloadSize {
+		t.Errorf("the unhashed file lost its metadata: kind=%s size=%d", readme.Kind, readme.Size)
+	}
+
+	// Same file, made executable: the answer changes, because the mode that
+	// decides what runs is the one on disk.
+	if err := os.Chmod(filepath.Join(root, "usr/share/doc/readme"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw = mustCollect(t, recordedConfig(root, RecordedSecurity))
+	if got := fileFor(t, raw, "./usr/share/doc/readme").SHA256; got != payloadSHA256 {
+		t.Errorf("a file made executable after installation was not hashed: sha256=%q", got)
+	}
+}
+
+// A watched path is hashed at RecordedSecurity whatever its mode: a unit file
+// decides what runs without being runnable itself.
+func TestRecordedSecurityHashesWatchedPathsWhateverTheirMode(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	payload, err := os.ReadFile(payloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "usr/lib/systemd/system"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "usr/lib/systemd/system/foo.service"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFileList(t, root, "a52dec-0.8.0-1", "usr/lib/systemd/system/foo.service")
+
+	raw := mustCollect(t, recordedConfig(root, RecordedSecurity))
+	if got := fileFor(t, raw, "./usr/lib/systemd/system/foo.service").SHA256; got != payloadSHA256 {
+		t.Errorf("a mode-0644 unit file was not hashed at RecordedSecurity: sha256=%q", got)
+	}
+}
+
+// RecordedStat is tier meta: every recorded path is still opened once, confined,
+// and fstat'd, and nothing at all is read.
+func TestRecordedStatOpensEverythingAndHashesNothing(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	writeFileList(t, root, "a52dec-0.8.0-1", "usr/bin/hello", "usr/bin/pipe")
+
+	raw := mustCollect(t, recordedConfig(root, RecordedStat))
+	hello := fileFor(t, raw, "./usr/bin/hello")
+	if hello.SHA256 != "" {
+		t.Errorf("RecordedStat hashed a file: %s", hello.SHA256)
+	}
+	if hello.Size != payloadSize || hello.Mode != 0o755 {
+		t.Errorf("RecordedStat lost the descriptor's own metadata: size=%d mode=%o", hello.Size, hello.Mode)
+	}
+	// A fifo standing where a file was recorded is still established from a
+	// descriptor rather than guessed at, and the open must not block.
+	if got := fileFor(t, raw, "./usr/bin/pipe").Kind; got != KindOther {
+		t.Errorf("fifo kind = %s, want %s", got, KindOther)
+	}
+}
+
+// RecordedIgnore is the zero value: a caller that does not ask for the recorded
+// paths does not silently get them, and does not silently pay for them.
+func TestRecordedIgnoreVisitsNoRecordedPath(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	writeFileList(t, root, "a52dec-0.8.0-1", "usr/bin/hello")
+
+	raw := mustCollect(t, recordedConfig(root, RecordedIgnore))
+	for _, f := range raw.Files {
+		if f.Path == "./usr/bin/hello" {
+			t.Fatalf("RecordedIgnore opened a recorded path anyway: %+v", f)
+		}
+	}
+}
+
+// The sweep enumerates without reading: it is what the setuid and unowned checks
+// need, and making it hash would silently turn a metadata question into a
+// whole-tree read (28,239 MiB on the reference system against 20,497 MiB of
+// recorded content).
+func TestSweepEnumeratesWithoutHashing(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	cfg := recordedConfig(root, RecordedIgnore)
+	cfg.Sweep = []string{"usr"}
+
+	raw := mustCollect(t, cfg)
+	hello := fileFor(t, raw, "./usr/bin/hello")
+	if hello.SHA256 != "" {
+		t.Errorf("the sweep hashed a file: %s", hello.SHA256)
+	}
+	if hello.Mode != 0o755 || hello.Size != payloadSize {
+		t.Errorf("the sweep did not describe the file from its descriptor: mode=%o size=%d", hello.Mode, hello.Size)
+	}
+}
+
+// A sweep subtree that does not exist is an answer, not a hole. usr, etc, opt,
+// boot and srv are a standard set and not every root has every one; gapping the
+// missing ones would put a permanent exit 3 on every machine without /opt.
+// A subtree that EXISTS and cannot be opened is still a gap.
+func TestAMissingSweepSubtreeIsNotAGap(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	cfg := recordedConfig(root, RecordedIgnore)
+	cfg.Sweep = []string{"usr", "opt", "srv"}
+
+	raw := mustCollect(t, cfg)
+	for _, g := range raw.Gaps {
+		if g.Subject == "./opt" || g.Subject == "./srv" {
+			t.Errorf("a sweep subtree that simply does not exist was gapped: %+v", g)
+		}
+	}
+	if _, ok := gapFor(raw, "./usr/escdir"); ok {
+		t.Log("escaping directory link recorded, as expected")
+	}
+}
+
+// A recorded path the walk already found is opened ONCE. Two leaves for one path
+// would be a second resolution of the same name, which is exactly the TOCTOU
+// window internal/fsx exists to close.
+func TestARecordedPathIsNotOpenedTwiceWhenTheSweepAlsoFindsIt(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	writeFileList(t, root, "a52dec-0.8.0-1", "usr/bin/hello", "usr/lib/liba.so")
+	cfg := recordedConfig(root, RecordedAll)
+	cfg.Sweep = []string{"usr"}
+
+	raw := mustCollect(t, cfg)
+	seen := map[string]int{}
+	for _, f := range raw.Files {
+		seen[f.Path]++
+	}
+	for _, p := range []string{"./usr/bin/hello", "./usr/lib/liba.so"} {
+		if seen[p] != 1 {
+			t.Errorf("%s produced %d evidence records, want 1", p, seen[p])
+		}
+	}
+	// The recorded policy still wins over the sweep's: a path the sweep would
+	// only stat is hashed because the database records it.
+	if got := fileFor(t, raw, "./usr/bin/hello").SHA256; got != payloadSHA256 {
+		t.Errorf("the sweep downgraded a recorded path to metadata only: sha256=%q", got)
+	}
+}
+
+// A hostile recorded path is refused before any syscall, and the refusal is
+// attributed to the PACKAGE that recorded it rather than to whichever errno the
+// kernel happened to produce.
+func TestAHostileRecordedPathIsAGapAgainstItsPackage(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	writeFileList(t, root, "a52dec-0.8.0-1", "usr/bin/hello", "../../../etc/shadow")
+
+	raw := mustCollect(t, recordedConfig(root, RecordedAll))
+	g, ok := gapFor(raw, "a52dec-0.8.0-1")
+	if !ok {
+		t.Fatalf("a hostile recorded path produced no gap: %+v", raw.Gaps)
+	}
+	if !strings.Contains(g.Reason, "../../../etc/shadow") {
+		t.Errorf("the gap does not name the path it refused: %q", g.Reason)
+	}
+	// The rest of the package is still examined: one crafted record costs one
+	// coverage gap, not the package (INV-9).
+	if got := fileFor(t, raw, "./usr/bin/hello").SHA256; got != payloadSHA256 {
+		t.Errorf("a hostile record cost the rest of the package: sha256=%q", got)
+	}
+}

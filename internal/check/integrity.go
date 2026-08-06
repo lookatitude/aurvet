@@ -82,6 +82,12 @@ type Observed struct {
 	// examine, so a finding derived from this observation can say so (INV-6).
 	// The triage tier sets it; full and paranoid never do.
 	MtimeAssisted bool
+
+	// Gapped records that phase 1 already raised a coverage gap naming this
+	// path. Integrity then consumes that gap instead of raising a second one:
+	// two true statements about one shortfall is still one shortfall, and the
+	// duplication is the sort of inflation the INV-8 gate exists to catch.
+	Gapped bool
 }
 
 const (
@@ -94,7 +100,11 @@ const (
 		"deleted. Does not establish tampering, and does not establish that anything replaced it."
 	limitSUID = "Not compromise on its own: locally built or vendor-installed software legitimately ships setuid " +
 		"helpers. Ownership was resolved from the package database only -- a file owned by a package this scan " +
-		"could not read would appear unowned here."
+		"could not read would appear unowned here. THE SWEEP IS NOT A FULL SWEEP, and its blindness is the more " +
+		"important limit: it covers usr, etc, opt, boot and srv minus the collector's skip list, which excludes " +
+		"home, root, media, mnt, tmp, var/tmp and var/cache. A setuid binary planted in /tmp or in a user's home " +
+		"is invisible to this rule at every tier, including paranoid. It also runs at tier paranoid only, so a " +
+		"scan at any other tier says nothing at all about unowned setuid files."
 	limitMtimeAssisted = "The contents were never read: this rests on size and mtime from the descriptor's own " +
 		"fstat, both of which an attacker who can write the file can also set. Re-run at tier full to hash it."
 )
@@ -142,6 +152,12 @@ func Integrity(pkg string, entries []mtree.Entry, obs map[string]Observed, ex Ex
 			continue
 
 		case ObsUnreadable:
+			if o.Gapped {
+				// The collector already reported this exact shortfall against
+				// this exact subject. Saying it again under a second rule ID
+				// inflates the gap count without adding a fact.
+				continue
+			}
 			res.Gaps = append(res.Gaps, finding.Gap{
 				RuleID: ruleForEntry(e), Subject: e.Path,
 				Reason: fmt.Sprintf("could not be examined: %v", o.Err),
@@ -227,12 +243,18 @@ func Integrity(pkg string, entries []mtree.Entry, obs map[string]Observed, ex Ex
 	}
 
 	if notHashed > 0 {
-		res.Gaps = append(res.Gaps, finding.Gap{
-			RuleID: "integrity-coverage", Subject: pkg,
-			Reason: fmt.Sprintf("%d of %d recorded paths were verified by metadata only and never hashed "+
-				"(mtime-assisted, tier %s); mtime and size are both writable by anyone who can write the "+
-				"file, so those paths are not covered by this run", notHashed, checkable, t),
-		})
+		reason := fmt.Sprintf("%d of %d recorded paths were verified by metadata only and never hashed "+
+			"(mtime-assisted, tier %s); mtime and size are both writable by anyone who can write the "+
+			"file, so those paths are not covered by this run", notHashed, checkable, t)
+		if t == TierTriage {
+			// The tier's limit stated where the operator meets it. A limit that
+			// only appears in the source is a limit they never meet, and this
+			// one is why `baseline init` refuses a triage-tier basis.
+			reason += ". Tier triage hashes only what the descriptor's own mode says decides what runs, " +
+				"plus the watched paths; a file outside that subset whose contents changed while its size " +
+				"stayed the same is NOT detected at this tier whatever its mtime says. Re-run at tier full"
+		}
+		res.Gaps = append(res.Gaps, finding.Gap{RuleID: "integrity-coverage", Subject: pkg, Reason: reason})
 	}
 	return res
 }
@@ -354,6 +376,19 @@ type SUIDFile struct {
 // digests are checked by Integrity above). One that no package owns was put
 // there by something else, which is worth a look and is not by itself
 // compromise -- hence suspicious, with the ownership caveat stated.
+//
+// THIS RULE IS TIER PARANOID ONLY, said here because a declared rule that fires
+// only at a non-default tier is otherwise indistinguishable from one that never
+// fires -- and that has already bitten this project once. Its input is the
+// metadata-only sweep of the watched trees, which spec §13 assigns to paranoid
+// and to no other tier; at meta, triage and full this function is called with
+// nothing and correctly reports nothing.
+//
+// Measured on the reference system: 33 setuid/setgid regular files, all inside
+// the swept trees, all package-owned, so the rule produces zero findings there.
+// That is the right baseline for a suspicious-severity rule -- any occurrence is
+// damning -- and it is also why the sweep's blindness is stated in limitSUID
+// rather than left to be discovered.
 func UnownedSUID(files []SUIDFile) finding.Result {
 	var res finding.Result
 	sorted := append([]SUIDFile(nil), files...)
