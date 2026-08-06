@@ -285,7 +285,15 @@ func triageList(env baselineEnv, opts triageOpts, stdout, stderr io.Writer) int 
 			return jsonOr(stdout, stderr, triageListDoc(path, triage.Outcome{}, nil))
 		}
 		fmt.Fprintf(stdout, "no triage records at %s\n", path)
-		fmt.Fprintln(stdout, "nothing is being held back on this host, which is the correct default")
+		// "this host" is wrong under --offline-root, where the store read is the
+		// examined tree's and not this machine's. Saying so would be a small lie
+		// about whose suppressions were just reported empty, which is the kind of
+		// sentence an operator would reasonably act on.
+		where := "on this host"
+		if opts.offlineRoot != "" {
+			where = "in the examined tree"
+		}
+		fmt.Fprintf(stdout, "nothing is being held back %s, which is the correct default\n", where)
 		return exitClean
 	}
 

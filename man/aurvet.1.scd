@@ -140,7 +140,13 @@ spellings are accepted, as is _-flag=value_.
 	record could not be read at all. *drop* removes a record by fingerprint.
 
 	The four writing verbs refuse under *-offline-root* (INV-5). *list* reads and
-	is allowed.
+	is allowed -- and it lists *the examined tree's* store, not this host's,
+	because every path aurvet touches derives from the root it was given (INV-4).
+	So *aurvet triage list -offline-root /mnt/target* answers "what has been
+	triaged on that system", which is the question worth asking about a mounted
+	filesystem; it is not a way to review your own records while inspecting one.
+	*adjudicate* *list* behaves the same way. The store's path is printed in the
+	header of every listing, so which one you are reading is never a guess.
 
 *adjudicate* _fingerprint_|*list*|*revoke* _fingerprint_
 	Record, list or withdraw a signed judgement about one finding: "I looked at
