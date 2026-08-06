@@ -63,6 +63,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of text")
 	sinceLast := fs.Bool("since-last", false,
 		"list only findings new since the previous scan; the exit code still reflects the full result")
+	// -since is `diff` only, and is NOT a variant of -since-last: that one narrows
+	// a scan's listing against the previous report, this one chooses which signed
+	// baseline the drift is measured from. The names are close enough that the help
+	// text for each says what the other is.
+	since := fs.String("since", "",
+		"diff only: measure drift from this chain entry instead of the newest -- a seq, a hash prefix, "+
+			"or head~N (unrelated to -since-last, which filters a scan)")
 	minSeverity := fs.String("min-severity", "",
 		"reporting floor: info, suspicious, critical (default from config)")
 	// The verification tier. It selects how much work the scan DOES; it is never
@@ -385,6 +392,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			remote:          *remote,
 			protectedRemote: *protectedRemote,
 			tier:            *tier,
+			since:           *since,
 			args:            append([]string{"diff"}, cmdArgs...),
 		}, stdout, stderr)
 
@@ -400,6 +408,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			remote:          *remote,
 			protectedRemote: *protectedRemote,
 			tier:            *tier,
+			since:           *since,
 			args:            cmdArgs,
 		}, stdout, stderr)
 

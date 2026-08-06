@@ -21,6 +21,7 @@ _aurvet_flags=(
 	-offline-root
 	-show-recipe
 	-since-last
+	-since
 	-tier
 	-reason
 	-scope

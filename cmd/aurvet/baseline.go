@@ -84,6 +84,11 @@ type baselineOpts struct {
 	// scan executed, which the bootstrap refusal then judges.
 	tier string
 
+	// since is `diff --since ENTRY`: which chain entry the drift is measured
+	// from. Empty means the head, which is what diff did before the flag existed.
+	// See cmd/aurvet/since.go for the accepted forms.
+	since string
+
 	args []string
 
 	// Seams. Their zero values select production behaviour, so run() constructs
@@ -137,6 +142,16 @@ func runBaseline(opts baselineOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
 		return exitUsage
 	}
+	// -since selects a diff's basis and means nothing to any other subcommand, so
+	// the others refuse it rather than ignore it. An ignored flag is the failure
+	// this file already guards against on the positional: `baseline init -since 3`
+	// would otherwise look like it had signed something relative to entry 3.
+	if opts.since != "" && opts.args[0] != "diff" {
+		fmt.Fprintf(stderr, "aurvet: -since selects which entry a diff measures from and does not "+
+			"apply to `baseline %s`\n", opts.args[0])
+		baselineUsage(stderr)
+		return exitUsage
+	}
 	switch opts.args[0] {
 	case "init":
 		return baselineWrite(env, opts, true, stdout, stderr)
@@ -180,6 +195,9 @@ func baselineUsage(w io.Writer) {
 	fmt.Fprintln(w, "  verify  verify the chain against the last confirmed push")
 	fmt.Fprintln(w, "  pushed  record that the chain has been pushed (-remote, -protected-remote)")
 	fmt.Fprintln(w, "  diff    classify drift against the signed baseline (also `aurvet diff`)")
+	fmt.Fprintln(w, "          -since ENTRY measures from an older entry instead of the newest:")
+	fmt.Fprintln(w, "          a seq (0, 1, ...), a hash prefix of 8+ hex characters, or head~N.")
+	fmt.Fprintln(w, "          An ambiguous or unknown ENTRY is refused and the chain is listed.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "signing: -key <openssh private key> or -signer <ssh-agent key fingerprint>")
 	fmt.Fprintln(w, "  aurvet never generates a signing key: `ssh-keygen -t ed25519` (or -t ed25519-sk")
@@ -651,8 +669,17 @@ func baselineDiff(env baselineEnv, opts baselineOpts, stdout, stderr io.Writer) 
 			"not the same as no drift\n", env.store.Path())
 		return exitIncomplete
 	}
-	head := records[len(records)-1]
-	payload, err := env.store.LoadPayload(head.Entry.Payload.SHA256, baseline.NamespaceManifest, env.trusted)
+	// Which entry the drift is measured FROM. Empty selector means the head, so the
+	// no-flag path is unchanged. Every record here has already been authenticated
+	// by Load against the trusted set, and LoadPayload below authenticates the
+	// payload the chosen entry commits to -- selecting an older entry takes exactly
+	// the same trust path as the head and adds no new one.
+	basis, err := selectEntry(records, opts.since)
+	if err != nil {
+		fmt.Fprintf(stderr, "aurvet: %v\n", err)
+		return exitUsage
+	}
+	payload, err := env.store.LoadPayload(basis.Entry.Payload.SHA256, baseline.NamespaceManifest, env.trusted)
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
 		return exitIncomplete
@@ -701,10 +728,23 @@ func baselineDiff(env baselineEnv, opts baselineOpts, stdout, stderr io.Writer) 
 	}
 
 	writeReplicationBanner(stdout, replicationStatusFor(env))
-	fmt.Fprintf(stdout, "drift against baseline of %s: %d corroborated, %d adjudicated, "+
-		"%d unexplained, %d log-coverage gap\n", m.CreatedAt,
+	// The basis is named on every run, not only when -since was given. A drift
+	// report whose reader cannot tell WHICH baseline it was measured from is a
+	// number without a denominator, and that was true before this flag existed --
+	// the line used to carry the manifest's timestamp and nothing identifying the
+	// entry.
+	fmt.Fprintf(stdout, "drift against baseline of %s (entry seq %d, %s of %s): %d corroborated, "+
+		"%d adjudicated, %d unexplained, %d log-coverage gap\n",
+		m.CreatedAt, basis.Entry.Seq, short12(basis.Hash()), countEntries(len(records)),
 		rep.Counts[baseline.BucketCorroborated], rep.Counts[baseline.BucketAdjudicated],
 		rep.Counts[baseline.BucketUnexplained], rep.Counts[baseline.BucketLogCoverageGap])
+	if head := records[len(records)-1]; basis.Entry.Seq != head.Entry.Seq {
+		// On its own line, and prefixed like the truncation warning below, because
+		// the counts above are measured from a basis the operator chose and every
+		// later reader of this output will assume the newest one unless told.
+		fmt.Fprintf(stdout, "!! measured from an older entry, NOT the newest baseline; the newest is %s\n",
+			refOf(head))
+	}
 	if rep.Truncated {
 		fmt.Fprintln(stdout, "!! pacman.log has been TRUNCATED since the baseline was signed: it now "+
 			"begins later than the baseline recorded")

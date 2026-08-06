@@ -447,7 +447,31 @@ spellings are accepted, as is _-flag=value_.
 *-since-last*
 	*scan* only: list only findings that are new since the previous stored
 	scan. The exit code still reflects the full result, not the filtered
-	view.
+	view. Not to be confused with *-since*, immediately below: that one chooses
+	which signed baseline a *diff* measures from, and has nothing to do with
+	scan reports.
+
+*-since* _ENTRY_
+	*diff* only: measure drift from an older chain entry instead of the newest
+	one. _ENTRY_ is a *seq* (the position *baseline init* and *append* print,
+	running from 0), a *hash prefix* of at least 8 hex characters (so the
+	12-character hash those commands print can be pasted straight in), or
+	*head~N* to step back N entries.
+
+	The chosen entry takes exactly the same trust path as the head: the whole
+	chain is authenticated against the trusted keys before any entry is
+	selected, and the manifest that entry commits to is verified before it is
+	parsed. Choosing an older basis cannot widen what is trusted.
+
+	An _ENTRY_ that matches nothing, that is too short to be a hash prefix, or
+	that is ambiguous — a token like *12345678* is both a decimal seq and valid
+	hex — is *refused*, and the refusal lists the chain so the next attempt has
+	something to name. It never falls back to the newest entry: a diff measured
+	from a basis the operator did not choose is a wrong answer wearing the shape
+	of a right one.
+
+	Every *diff* names the entry it measured from, with or without this flag,
+	and says so explicitly when that entry is not the newest.
 
 *-version*
 	Print build identity, the embedded root key fingerprints, the delegation

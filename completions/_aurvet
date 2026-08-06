@@ -43,6 +43,7 @@ _aurvet() {
 		'-json[emit machine-readable JSON instead of text]'
 		'-no-network[skip every outbound request; network checks become coverage gaps]'
 		'-since-last[scan: show only findings new since the previous scan]'
+		'-since[diff: measure drift from this chain entry -- a seq, hash prefix, or head~N]:entry:'
 		'-show-recipe[review/install: print the recipe text in full]'
 		'-offline-root[examine a mounted filesystem instead of the running system]:root:_files -/'
 		'-min-severity[reporting floor]:severity:(info suspicious critical)'
