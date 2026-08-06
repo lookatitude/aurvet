@@ -312,6 +312,14 @@ type Raw struct {
 	// Buffered maps a requested BufferPaths entry to its raw bytes.
 	Buffered map[string][]byte
 
+	// DBListed reports whether the local database directory was enumerated at
+	// all. It is not derivable from len(Packages): a database that lists but
+	// holds nothing and a database that could not be opened both yield zero
+	// packages, and the caller owes its user different answers for the two --
+	// an empty system versus a scan that never had an oracle. There is a Gap
+	// carrying the reason in the second case.
+	DBListed bool
+
 	// Skipped lists the subtrees that were not entered, "./"-rooted.
 	Skipped []string
 
@@ -625,6 +633,9 @@ func (c *collector) collectDB(dbRel string) {
 		c.gap("collect-db", dbRel, "local database could not be listed: %v", err)
 		return
 	}
+	c.mu.Lock()
+	c.raw.DBListed = true
+	c.mu.Unlock()
 
 	for _, e := range names {
 		switch {

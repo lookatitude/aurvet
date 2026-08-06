@@ -594,6 +594,22 @@ func TestCollectGapsAMissingDatabase(t *testing.T) {
 	if _, ok := gapFor(raw, "var/lib/pacman/nonexistent"); !ok {
 		t.Errorf("no gap for a missing database; gaps=%v", raw.Gaps)
 	}
+	// Zero packages is the same number an empty-but-readable database yields,
+	// and the caller has to tell those apart: one is a system with nothing
+	// installed, the other is a scan with no oracle at all.
+	if raw.DBListed {
+		t.Errorf("DBListed = true for a database that could not be opened")
+	}
+}
+
+// The companion to the above: a database that WAS enumerated says so, so a
+// caller can distinguish "nothing installed" from "nothing readable".
+func TestCollectReportsThatTheDatabaseWasListed(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	raw := mustCollect(t, testConfig(root))
+	if !raw.DBListed {
+		t.Errorf("DBListed = false for a database that was read; gaps=%v", raw.Gaps)
+	}
 }
 
 // Extra raw files (P1-C's surface files: unit files, hooks) are buffered by the

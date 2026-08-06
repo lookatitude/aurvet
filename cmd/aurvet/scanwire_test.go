@@ -886,3 +886,45 @@ func TestUnownedSetuidStatesWhatTheSweepCannotSee(t *testing.T) {
 	}
 	t.Fatal("no finding to inspect")
 }
+
+// TestThePackageSetComesFromPhaseOneBuffers is the local database's half of
+// spec §11.1, asserted by CONSEQUENCE like TestIntegrityReadsNothingAfterPhaseOne:
+// the database is destroyed the instant phase 1 returns, and the package set
+// must not follow it.
+//
+// Before this lane the database was read TWICE -- once by internal/collect
+// under the read capability, once again by alpm.LoadLocalDB through ordinary
+// os.Open -- and this test fails against that build, because the second read
+// finds nothing and the scan reports zero packages. Two reads of one
+// attacker-writable input are two chances to be told different things, and the
+// one the ownership oracle was built from was the second.
+func TestThePackageSetComesFromPhaseOneBuffers(t *testing.T) {
+	root := integrityRoot(t, "x", "x")
+	db := filepath.Join(root, "var/lib/pacman/local")
+
+	orig := afterCollectForTest
+	t.Cleanup(func() { afterCollectForTest = orig })
+	var once sync.Once
+	afterCollectForTest = func() {
+		once.Do(func() {
+			if err := os.RemoveAll(db); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+
+	run, err := fullScan(t.Context(), pipeline{cfg: resolveForTest(t, root), tier: check.TierFull, euid: 1000})
+	if err != nil {
+		t.Fatalf("the scan aborted when the database was removed after phase 1, so it was still "+
+			"reading it there: %v", err)
+	}
+	if run.Summary.Total != 1 {
+		t.Errorf("%d packages after the database was removed between the phases, want 1: the package "+
+			"set was re-read rather than parsed from phase 1's buffers", run.Summary.Total)
+	}
+	for _, g := range run.Result.Gaps {
+		if g.RuleID == "local-db" {
+			t.Errorf("a local-db gap appeared for a database phase 1 read successfully: %+v", g)
+		}
+	}
+}

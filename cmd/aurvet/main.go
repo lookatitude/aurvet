@@ -654,14 +654,59 @@ type dbs struct {
 	dbPath string
 }
 
+// dbsFromRaw builds the same two databases from what phase 1 already buffered,
+// which is what a scan uses.
+//
+// The local database is not read again here. It was read once, under the read
+// capability, by internal/collect; parsing those bytes rather than opening the
+// 59 MB tree a second time removes a duplicate read of an attacker-writable
+// input whose two copies could disagree, and it is the precondition for the
+// desc parser ever moving to the unprivileged side of the drop (spec §11.1).
+//
+// The SYNC database is still read from disk here, and that is stated rather
+// than hidden: phase 1 does not buffer var/lib/pacman/sync, so alpm's tar+gzip
+// reader still runs inside the privileged window. See the note on
+// alpm.LoadSyncNames' caller in the receipt for this lane.
+func dbsFromRaw(cfg config.Config, raw collect.Raw) (dbs, error) {
+	if !raw.DBListed {
+		// Not a gap: with no local database there is no package set, no
+		// ownership oracle and no notion of what is supposed to be on this
+		// system. The scan does not start, exactly as it did not when this
+		// function read the directory itself.
+		reason := "it could not be listed"
+		for _, g := range raw.Gaps {
+			if g.RuleID == "collect-db" && strings.HasSuffix(cfg.DBPath, g.Subject) {
+				reason = g.Reason
+				break
+			}
+		}
+		return dbs{}, fmt.Errorf("the local package database at %s was not read: %s", cfg.DBPath, reason)
+	}
+	buf := make([]alpm.Buffered, 0, len(raw.Packages))
+	for _, p := range raw.Packages {
+		buf = append(buf, alpm.Buffered{Dir: p.Dir, Desc: p.Desc, Files: p.FileList})
+	}
+	pkgs, localGaps := alpm.PackagesFrom(buf)
+	return withSyncDB(cfg, pkgs, localGaps)
+}
+
 // loadDBs reads the local and sync databases and states what it could not read.
+//
+// A scan does not come through here -- it comes through dbsFromRaw, over phase
+// 1's buffers. This is the provenance-only entry point's loader.
 func loadDBs(cfg config.Config) (dbs, error) {
-	d := dbs{dbPath: cfg.DBPath}
 	pkgs, localGaps, err := alpm.LoadLocalDB(cfg.DBPath)
 	if err != nil {
 		return dbs{}, err
 	}
-	d.pkgs = pkgs
+	return withSyncDB(cfg, pkgs, localGaps)
+}
+
+// withSyncDB completes a dbs from a local package set: it loads the sync
+// database and states, as gaps, the two emptinesses that would otherwise be
+// reported as a clean sweep.
+func withSyncDB(cfg config.Config, pkgs []alpm.Package, localGaps []string) (dbs, error) {
+	d := dbs{dbPath: cfg.DBPath, pkgs: pkgs}
 
 	var extraGaps []finding.Gap
 	for _, g := range localGaps {
@@ -796,8 +841,13 @@ var (
 // would pass on a build that reduced after the first read, and a test that
 // marked the comparison as though it were a read would assert nothing at all
 // once the reads moved into collect -- which is exactly what happened here.
+// afterCollectForTest runs the instant phase 1 returns, which is the window the
+// package set is now parsed in: a test mutates the database there and asserts
+// the parsed package set did not follow, because it came off buffered bytes and
+// not off a second read.
 var (
 	beforeCollectForTest func()
+	afterCollectForTest  func()
 	beforeVerifyForTest  func()
 )
 
@@ -901,7 +951,23 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 		return scanRun{}, err
 	}
 
-	d, err := loadDBs(p.cfg)
+	// Phase 1: buffer the database bytes through confined opens, while the read
+	// capability is held. Nothing here parses.
+	//
+	// It runs FIRST, before anything needs the package set, because the package
+	// set is now derived from these buffers rather than from a second read of
+	// the same 59 MB database. Two reads of one attacker-writable input can
+	// disagree, and the loser of that disagreement was the ownership oracle
+	// every check downstream consults.
+	if beforeCollectForTest != nil {
+		beforeCollectForTest()
+	}
+	raw, cerr := collect.Collect(collectConfig(p.cfg, p.tier))
+	if afterCollectForTest != nil {
+		afterCollectForTest()
+	}
+
+	d, err := dbsFromRaw(p.cfg, raw)
 	if err != nil {
 		// The database could not be read at all: nothing below has an oracle to
 		// work from, and a scan of a system whose package set is unknown would be
@@ -911,6 +977,14 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 	}
 	res, summary := sweepWith(ctx, p.cfg, d, p.noNet, p.cl)
 	out.Summary = summary
+	if cerr != nil {
+		res.Gaps = append(res.Gaps, finding.Gap{
+			RuleID: "collect-db", Subject: p.cfg.DBPath,
+			Reason: fmt.Sprintf("the collector refused this configuration (%v); no package metadata was "+
+				"buffered, so nothing was verified", cerr),
+		})
+	}
+	res.Gaps = append(res.Gaps, raw.Gaps...)
 
 	root, rerr := os.OpenRoot(p.cfg.Root)
 	if rerr != nil {
@@ -931,21 +1005,6 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 		return out, nil
 	}
 	defer root.Close()
-
-	// Phase 1: buffer the database bytes through confined opens, while the read
-	// capability is held. Nothing here parses.
-	if beforeCollectForTest != nil {
-		beforeCollectForTest()
-	}
-	raw, cerr := collect.Collect(collectConfig(p.cfg, p.tier))
-	if cerr != nil {
-		res.Gaps = append(res.Gaps, finding.Gap{
-			RuleID: "collect-db", Subject: p.cfg.DBPath,
-			Reason: fmt.Sprintf("the collector refused this configuration (%v); no package metadata was "+
-				"buffered, so nothing was verified", cerr),
-		})
-	}
-	res.Gaps = append(res.Gaps, raw.Gaps...)
 
 	owners := own.IndexIn(root, d.pkgs)
 

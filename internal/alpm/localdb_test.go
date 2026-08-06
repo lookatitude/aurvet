@@ -4,6 +4,7 @@ package alpm
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -244,5 +245,70 @@ func TestLoadLocalDBFromStockFixture(t *testing.T) {
 	// "defaulted" apart.
 	if byName["foo-lib"].Base != "foo-common" {
 		t.Errorf("foo-lib base = %q, want foo-common (declared %%BASE%%, not defaulted from %%NAME%%)", byName["foo-lib"].Base)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The buffered parse (spec §11.1)
+// ---------------------------------------------------------------------------
+
+// PackagesFrom is the same parse over bytes phase 1 already buffered, so the
+// local database is read once rather than twice. It must agree with
+// LoadLocalDB on the same input, because the two are one contract with two
+// sources: a divergence would mean the parsed package set depends on WHICH
+// reader ran, which is the drift a second implementation always produces.
+func TestPackagesFromAgreesWithLoadLocalDB(t *testing.T) {
+	dbPath := "../../testdata/roots/stock/var/lib/pacman/local"
+	want, wantGaps, err := LoadLocalDB(dbPath)
+	if err != nil {
+		t.Fatalf("LoadLocalDB: %v", err)
+	}
+
+	entries, err := os.ReadDir(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf []Buffered
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		desc, err := os.ReadFile(filepath.Join(dbPath, e.Name(), "desc"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, err := os.ReadFile(filepath.Join(dbPath, e.Name(), "files"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf = append(buf, Buffered{Dir: e.Name(), Desc: desc, Files: files})
+	}
+
+	got, gaps := PackagesFrom(buf)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("PackagesFrom disagrees with LoadLocalDB:\n got %+v\nwant %+v", got, want)
+	}
+	if !reflect.DeepEqual(gaps, wantGaps) {
+		t.Errorf("gaps = %v, want %v", gaps, wantGaps)
+	}
+}
+
+// A package phase 1 could not buffer is a gap, never a package with empty
+// fields: an entry whose desc is missing has no name, and a nameless package
+// silently dropped is coverage lost without a word (INV-9).
+func TestPackagesFromGapsWhatPhaseOneCouldNotBuffer(t *testing.T) {
+	got, gaps := PackagesFrom([]Buffered{
+		{Dir: "zlib-1.3.1-2", Desc: []byte("%NAME%\nzlib\n\n%VERSION%\n1.3.1-2\n\n"), Files: []byte("%FILES%\nusr/lib/libz.so\n\n")},
+		{Dir: "unbuffered-1.0-1"},
+		{Dir: "nofiles-1.0-1", Desc: []byte("%NAME%\nnofiles\n\n")},
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %d packages, want 2 (zlib and nofiles)", len(got))
+	}
+	// Input order, not sorted: the gaps track the entries as phase 1 handed
+	// them over, so a reader can line a gap up against the buffer it came from.
+	want := []string{"unbuffered-1.0-1", "nofiles-1.0-1/files"}
+	if !reflect.DeepEqual(gaps, want) {
+		t.Errorf("gaps = %v, want %v", gaps, want)
 	}
 }
