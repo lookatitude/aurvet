@@ -8,6 +8,7 @@ tampered with
 # SYNOPSIS
 
 *aurvet* [_flags_] *scan*++
+*aurvet* [_flags_] *baseline* *init*|*append*|*status*|*verify*|*pushed*|*diff*++
 *aurvet* [_flags_] *review* _dir_|_pkgbase_++
 *aurvet* [_flags_] *install* _pkgbase_++
 *aurvet* [_flags_] *snapshot* _pkgbase_++
@@ -31,6 +32,41 @@ spellings are accepted, as is _-flag=value_.
 	Sweep the whole system: load the local and sync package databases,
 	establish provenance for every foreign (non-repository) package, and
 	report findings and coverage gaps. Takes no arguments.
+
+*baseline* *init*|*append*|*status*|*verify*|*pushed*|*diff*
+	The signed baseline and its append-only trust chain.
+
+	*init* runs a scan and signs the first baseline -- but refuses while any
+	unresolved critical finding exists (each must be adjudicated with a
+	recorded reason), refuses unprivileged, refuses a scan shallower than
+	*full* tier, refuses while _db.lck_ exists, and refuses any coverage gap
+	not declared recordable. Signing a baseline over a compromise makes the
+	compromise the reference point, and every later run then reports "no
+	change".
+
+	*append* writes a later entry on the same terms: the refusals are the same
+	ones, because every condition that protects the first entry protects the
+	rest. It additionally refuses while _db.lck_ exists -- reading a package
+	database mid-transaction produces spurious findings, and here they would
+	be signed.
+
+	*status* prints the chain, the unpushed tail and what was not checked.
+	*verify* verifies the chain against the last confirmed push and exits *3*
+	when no anchor exists, because truncation is then unchecked. *pushed*
+	*-remote* _url_ records that the chain has been pushed; it runs no *git*
+	and holds no credentials. *diff* classifies drift against the baseline
+	into corroborated, adjudicated, unexplained and log-coverage-gap.
+
+	Signing needs a key you supply: *-key* _file_ or *-signer* _fingerprint_
+	(an *ssh-agent* key, which is also the FIDO2 route). aurvet generates no
+	keys.
+
+	*A pushed chain is what makes truncation detectable at all*: entries
+	removed from the end of a chain leave one that still verifies. And the
+	remote's *force-push denial and branch protection are load-bearing
+	security controls*, not repository hygiene -- push credentials
+	necessarily live on the monitored machine, so the host being watched can
+	write to the record of what happened on it.
 
 *review* _dir_|_pkgbase_
 	Analyse one recipe and never build it. Leads with the rule hits and the

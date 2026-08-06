@@ -154,10 +154,20 @@ func parseChainFile(b []byte, trusted []*baseline.PublicKey) ([]Record, error) {
 		if ln == "" {
 			return nil, fmt.Errorf("%w: line %d is empty", ErrChainFile, i+2)
 		}
-		raw, encSig, ok := strings.Cut(ln, " ")
-		if !ok {
+		// The LAST space, not the first. Canonical JSON escapes control characters
+		// but NOT spaces, so any entry whose note, host or payload namespace
+		// contains one -- `"note":"baseline init"` is the first real example --
+		// puts a space inside the JSON. Splitting on the first space then cut the
+		// record in half: the file was written correctly and could never be read
+		// again, and because an unreadable chain file is an ERROR rather than an
+		// absent chain (see this file's header), one space in a note bricked the
+		// chain permanently. Base64 contains no spaces, so the last space is
+		// always the separator.
+		sp := strings.LastIndexByte(ln, ' ')
+		if sp < 0 {
 			return nil, fmt.Errorf("%w: line %d has no signature field", ErrChainFile, i+2)
 		}
+		raw, encSig := ln[:sp], ln[sp+1:]
 		sig, err := base64.StdEncoding.DecodeString(encSig)
 		if err != nil {
 			return nil, fmt.Errorf("%w: line %d signature: %v", ErrChainFile, i+2, err)

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aurvet — the chain, the anchor, and where the push credentials live</title>
+<style>
+  :root{--bg:#fff;--fg:#1a1d21;--muted:#5b6570;--border:#e4e7ec;--card:#f7f8fa;--accent:#2563eb;
+    --code-bg:#f4f5f7;--code-fg:#1a1d21;--note:#2563eb;--tip:#059669;--warn:#d97706;--danger:#dc2626;--success:#059669;
+    --shadow:0 1px 3px rgba(16,24,40,.08);--maxw:66rem;}
+  @media (prefers-color-scheme:dark){:root{--bg:#0f1216;--fg:#e6e8eb;--muted:#9aa4b0;--border:#232a33;--card:#161b22;
+    --accent:#6ea8ff;--code-bg:#161b22;--code-fg:#e6e8eb;--note:#6ea8ff;--tip:#34d399;--warn:#fbbf24;--danger:#f87171;--success:#34d399;
+    --shadow:0 1px 3px rgba(0,0,0,.4);}}
+  :root[data-theme="light"]{--bg:#fff;--fg:#1a1d21;--muted:#5b6570;--border:#e4e7ec;--card:#f7f8fa;--accent:#2563eb;--code-bg:#f4f5f7;--code-fg:#1a1d21;--note:#2563eb;--tip:#059669;--warn:#d97706;--danger:#dc2626;--success:#059669;}
+  :root[data-theme="dark"]{--bg:#0f1216;--fg:#e6e8eb;--muted:#9aa4b0;--border:#232a33;--card:#161b22;--accent:#6ea8ff;--code-bg:#161b22;--code-fg:#e6e8eb;--note:#6ea8ff;--tip:#34d399;--warn:#fbbf24;--danger:#f87171;--success:#34d399;}
+  *{box-sizing:border-box;} html{scroll-behavior:smooth;}
+  body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;}
+  .layout{display:grid;grid-template-columns:15rem minmax(0,1fr);max-width:86rem;margin:0 auto;}
+  aside{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;padding:2rem 1.15rem;border-right:1px solid var(--border);font-size:.88rem;}
+  aside .toc-title{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:.75rem;}
+  aside nav a{display:block;color:var(--muted);text-decoration:none;padding:.26rem 0;border-left:2px solid transparent;padding-left:.6rem;}
+  aside nav a:hover{color:var(--fg);} aside nav a.active{color:var(--accent);border-left-color:var(--accent);}
+  main{padding:2.5rem clamp(1.25rem,4vw,3.5rem);max-width:var(--maxw);}
+  .doc-title{font-size:2rem;line-height:1.15;margin:0 0 .4rem;letter-spacing:-.02em;}
+  .doc-subtitle{font-size:1.05rem;color:var(--muted);margin:0 0 1rem;}
+  .doc-meta{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:2.5rem;}
+  .chip{font-size:.78rem;padding:.22rem .6rem;border-radius:999px;background:var(--card);border:1px solid var(--border);color:var(--muted);}
+  h2{font-size:1.4rem;margin:2.6rem 0 .9rem;letter-spacing:-.01em;scroll-margin-top:1rem;}
+  h3{font-size:1.05rem;margin:1.5rem 0 .5rem;scroll-margin-top:1rem;}
+  a{color:var(--accent);}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.86em;background:var(--code-bg);padding:.12em .38em;border-radius:4px;}
+  pre{background:var(--code-bg);color:var(--code-fg);padding:.9rem 1.1rem;border-radius:8px;overflow-x:auto;border:1px solid var(--border);line-height:1.5;}
+  pre code{background:none;padding:0;font-size:.83rem;}
+  .table-wrap{overflow-x:auto;margin:1.1rem 0;}
+  table{border-collapse:collapse;width:100%;font-size:.89rem;}
+  th,td{text-align:left;padding:.52rem .75rem;border-bottom:1px solid var(--border);vertical-align:top;}
+  thead th{background:var(--card);font-weight:600;border-bottom:2px solid var(--border);}
+  tbody tr:hover{background:color-mix(in srgb,var(--accent) 5%,transparent);}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .callout{display:grid;grid-template-columns:1.4rem 1fr;gap:.55rem;margin:1.1rem 0;padding:.8rem 1rem;border-radius:8px;border:1px solid var(--border);background:var(--card);}
+  .callout .ico{font-size:1.05rem;}
+  .callout p:first-child{margin-top:0;} .callout p:last-child{margin-bottom:0;}
+  .callout.note{border-left:3px solid var(--note);} .callout.tip{border-left:3px solid var(--tip);}
+  .callout.warn{border-left:3px solid var(--warn);} .callout.danger{border-left:3px solid var(--danger);}
+  .callout.success{border-left:3px solid var(--success);}
+  details{border:1px solid var(--border);border-radius:8px;padding:.4rem 1rem;margin:.9rem 0;background:var(--card);}
+  details[open]{padding-bottom:.9rem;}
+  summary{cursor:pointer;font-weight:600;padding:.45rem 0;list-style:none;}
+  summary::-webkit-details-marker{display:none;}
+  summary::before{content:"▸";display:inline-block;margin-right:.5rem;transition:transform .15s;color:var(--muted);}
+  details[open]>summary::before{transform:rotate(90deg);}
+  .badge{display:inline-block;font-size:.69rem;font-weight:700;letter-spacing:.04em;padding:.14rem .42rem;border-radius:4px;text-transform:uppercase;white-space:nowrap;}
+  .b-done{background:color-mix(in srgb,var(--success) 18%,transparent);color:var(--success);}
+  .b-next{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent);}
+  .b-gate{background:color-mix(in srgb,var(--danger) 18%,transparent);color:var(--danger);}
+  .b-dec{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn);}
+  .theme-toggle{position:fixed;top:1rem;right:1rem;z-index:10;background:var(--card);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:.4rem .6rem;cursor:pointer;}
+  @media (max-width:52rem){.layout{grid-template-columns:1fr;} aside{position:static;height:auto;border-right:none;border-bottom:1px solid var(--border);}}
+  @media print{aside,.theme-toggle{display:none;} .layout{display:block;} main{max-width:none;padding:0;} details{border:none;} details:not([open])>*:not(summary){display:revert;} pre,table,.callout{break-inside:avoid;}}
+</style>
+</head>
+<body>
+<button class="theme-toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');r.setAttribute('data-theme',d==='dark'?'light':'dark');})()">&#9686; Theme</button>
+<div class="layout">
+  <aside>
+    <div class="toc-title">Chain replication</div>
+    <nav id="toc">
+      <a href="#claim">What a signed chain proves</a>
+      <a href="#credentials">Where the push credentials live</a>
+      <a href="#loadbearing">The two load-bearing remote controls</a>
+      <a href="#anchor">How the anchor is recorded</a>
+      <a href="#attacks">What each attack does to the report</a>
+      <a href="#operate">Operating it</a>
+    </nav>
+  </aside>
+  <main>
+    <h1 class="doc-title">The chain, the anchor, and where the push credentials live</h1>
+    <p class="doc-subtitle">P4 task 6. Read this before you believe a verified chain.</p>
+    <div class="doc-meta">
+      <span class="chip">internal/chain/replication.go</span>
+      <span class="chip">aurvet baseline pushed</span>
+      <span class="chip badge b-gate">hard ship gate</span>
+    </div>
+
+    <h2 id="claim">What a signed chain proves, and what it does not</h2>
+    <p>Every entry in <code>chain.log</code> is canonical JSON signed with a detached SSHSIG under
+      <code>chain-entry.aurvet.dev</code>, and each names its predecessor by <code>prev_hash</code>. A
+      verification therefore proves two things about the copy in front of you: every entry was signed by a
+      key you trust, and no entry in the middle was altered or removed.</p>
+    <div class="callout danger"><div class="ico">&#9888;</div><div>
+      <p><strong>It does not prove the copy is complete.</strong> Entries removed from the <em>end</em>
+        leave a chain that verifies exactly as it did before: nothing is inconsistent, there is simply
+        less. Truncation is invisible from inside the construction, and no amount of signing changes
+        that.</p></div></div>
+    <p>Closing it requires a length and head recorded somewhere the host cannot retroactively change —
+      an <strong>anchor</strong>. In practice that is a copy pushed to a remote.</p>
+
+    <h2 id="credentials">Where the push credentials live</h2>
+    <div class="callout danger"><div class="ico">&#9888;</div><div>
+      <p><strong>Push credentials necessarily live on the monitored machine.</strong> The host being
+        watched holds the credential that can write to the record of what happened on it. There is no
+        arrangement of local files, permissions or signatures that removes this: a machine that can push
+        can, with the same credential, attempt to rewrite what it pushed.</p></div></div>
+    <p>So the mitigation is <em>not local</em> and cannot be made local. It lives entirely on the
+      remote.</p>
+
+    <h2 id="loadbearing">The two load-bearing remote controls</h2>
+    <p>These are security controls, not repository hygiene. If either is missing, the anchor is worth
+      nothing and the tool is reporting confidence it has not earned.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Control</th><th>What it stops</th><th>If it is absent</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Force-push denial</strong> (reject non-fast-forward updates)</td>
+            <td>An attacker with the push credential replacing the remote history with a shorter or
+                forked one.</td>
+            <td>The remote can be rewritten to agree with the truncated local copy, and the anchor
+                confirms the attacker&rsquo;s version.</td></tr>
+        <tr><td><strong>Branch protection</strong> (no deletion, no history rewrite, ideally no direct
+                push outside the appending identity)</td>
+            <td>Deleting the branch and re-creating it, which achieves the same as a force-push by
+                another route.</td>
+            <td>Same outcome, one command further away.</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout note"><div class="ico">&#9432;</div><div>
+      <p>A reader who concludes &ldquo;the chain is signed, therefore it cannot be altered&rdquo; has
+        misunderstood the construction. That misunderstanding is exactly the manufactured confidence P4&rsquo;s
+        ship gate exists to prevent, which is why
+        <code>chain.ReplicationLimitsText</code> is printed with every finding derived from replication
+        state rather than being left in this document.</p></div></div>
+
+    <h2 id="anchor">How the anchor is recorded</h2>
+    <p><code>aurvet baseline pushed -remote &lt;url#ref&gt; [-protected-remote]</code> writes a signed
+      <code>replication.json</code> beside the chain: schema, remote, confirmed length, confirmed head,
+      confirmation time, and the operator&rsquo;s assertion that the remote is protected. It is signed under its
+      own namespace, <code>replication.aurvet.dev</code>, so a chain-entry signature can never be replayed as
+      an assertion that something was pushed.</p>
+    <p><strong>aurvet does not push.</strong> It runs no <code>git</code>, holds no credential and opens no
+      socket for this: pushing is your action or your CI&rsquo;s, and this command records that it happened.
+      <code>-protected-remote</code> is a claim aurvet cannot verify — it is recorded so that its
+      <em>absence</em> is visible in every subsequent report.</p>
+    <details><summary>Why sign a file the attacker could rewrite anyway?</summary>
+      <p>An attacker holding the signing key can rewrite the anchor. Signing it still buys two things.
+        Without the key, a longer confirmed push cannot be forged at all — the state reads
+        <em>absent</em>, and absent means &ldquo;nothing is known to be pushed&rdquo;, the loudest reading. With the
+        key, the only available move is to roll the anchor <em>back</em>, which <em>adds</em> unpushed
+        entries to the report. There is no edit to this file that makes a truncated chain look complete
+        without also producing a critical.</p>
+    </details>
+
+    <h2 id="attacks">What each attack does to the report</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Attack</th><th>Detected by</th><th>Report</th></tr></thead>
+      <tbody>
+        <tr><td>Alter an entry in the middle</td><td>the chain itself</td><td>refusal: <code>prev_hash</code> does not join up</td></tr>
+        <tr><td>Two branches in one file</td><td>the chain itself</td><td>refusal: forked history</td></tr>
+        <tr><td>Re-commit an old manifest</td><td>the chain itself</td><td>refusal: replayed payload</td></tr>
+        <tr><td><strong>Truncate the end</strong></td><td>the anchor, and only the anchor</td><td>critical: entries are missing from the end</td></tr>
+        <tr><td>Two copies, one branch each</td><td>the anchor</td><td>critical: at the pushed length the copies disagree</td></tr>
+        <tr><td>Forge a longer anchor</td><td>the signature</td><td>state reads absent &rarr; everything reads unpushed</td></tr>
+        <tr><td>Replace with an older anchor</td><td>nothing needs to</td><td>more entries read unpushed, never fewer</td></tr>
+        <tr><td>Delete the anchor</td><td>nothing needs to</td><td>coverage gap: completeness was not checked</td></tr>
+        <tr><td>Rewrite the remote (no force-push denial)</td><td><strong>nothing</strong></td><td>&mdash; this is why the two controls above are load-bearing</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="operate">Operating it</h2>
+    <pre><code># once, on the remote: deny non-fast-forward, protect the branch, no deletions.
+# then, after every `baseline init` / `baseline append`:
+git -C /var/lib/aurvet/chain push origin HEAD      # your action, your credential
+sudo aurvet baseline pushed -remote 'git@host:ops/chain.git#refs/heads/main' \
+     -protected-remote -key /path/to/key
+
+aurvet baseline status     # the chain, the unpushed tail, and what was not checked
+aurvet baseline verify     # exits 3 when there is no anchor: truncation was NOT checked</code></pre>
+    <p>Every ordinary <code>aurvet scan</code> prints the unpushed tail <em>first</em>, above the header
+      and behind no flag, because an unpushed tail invalidates the completeness of every statement below
+      it. A machine with no chain prints nothing: an absent chain is not an unpushed one.</p>
+    <p style="color:var(--muted);font-size:.9rem">Companion reading: <code>chain.LimitsText</code>
+      (what a verified chain cannot prove) and <code>docs/roadmap.html</code> &sect;P4 task 6.</p>
+  </main>
+</div>
+</body>
+</html>

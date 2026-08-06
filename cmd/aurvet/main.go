@@ -51,6 +51,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// a 400-line PKGBUILD by default teaches its operator to scroll past it.
 	showRecipe := fs.Bool("show-recipe", false,
 		"review/install: print the recipe text in full as well as the rule hits and the diff")
+	// baseline flags. Signing is a key the operator supplies: aurvet generates none.
+	keyPath := fs.String("key", "",
+		"baseline: an OpenSSH ed25519 private key file to sign with")
+	signerFP := fs.String("signer", "",
+		"baseline: the fingerprint of a key held by ssh-agent to sign with (the FIDO2 route)")
+	remote := fs.String("remote", "",
+		"baseline pushed: the remote the chain was pushed to, e.g. git@host:repo.git#refs/heads/main")
+	protectedRemote := fs.Bool("protected-remote", false,
+		"baseline pushed: assert that the remote denies force-push and protects the branch — the "+
+			"controls that make an anchor mean anything")
 
 	// Go's flag package stops parsing at the first non-flag argument, so a
 	// single fs.Parse would leave `aurvet scan --no-network` with noNet unset
@@ -74,7 +84,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if len(operands) == 0 {
 		fmt.Fprintln(stderr, "usage: aurvet [flags] <command>")
-		fmt.Fprintln(stderr, "commands: scan, review, install, snapshot, explain, doctor, version")
+		fmt.Fprintln(stderr, "commands: scan, baseline, review, install, snapshot, explain, doctor, version")
 		return exitUsage
 	}
 
@@ -184,6 +194,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 			minSeverity: *minSeverity,
 			showRecipe:  *showRecipe,
 			pkgbase:     cmdArgs[0],
+		}, stdout, stderr)
+
+	// baseline is the P4 trust chain: init, status, verify, pushed, diff. It signs,
+	// so it is the one command that needs a key, and it never generates one.
+	case "baseline":
+		return runBaseline(baselineOpts{
+			offlineRoot:     *offlineRoot,
+			noNet:           *noNet,
+			jsonOut:         *jsonOut,
+			keyPath:         *keyPath,
+			signerFP:        *signerFP,
+			remote:          *remote,
+			protectedRemote: *protectedRemote,
+			args:            cmdArgs,
 		}, stdout, stderr)
 
 	case "explain":
@@ -323,6 +347,28 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 			// code 3 means something.
 			fmt.Fprintf(stderr, "aurvet: could not persist report to %s: %v\n", stateDir, serr)
 		}
+	}
+
+	// The unpushed report, FIRST and unconditionally.
+	//
+	// It precedes the header rather than trailing the findings, and it is behind no
+	// flag, because an unpushed chain tail invalidates the completeness of every
+	// other statement below it: entries removed from the end of a chain leave one
+	// that still verifies, so nothing here detects their removal until they exist
+	// somewhere this machine cannot rewrite. A tail reported after 40 findings, or
+	// only under a flag, is a tail nobody reads.
+	//
+	// A machine with no chain prints nothing: an absent chain is not an unpushed
+	// one, and announcing on every run that `baseline init` has not been run is the
+	// noise that teaches an operator to skip the banner.
+	if stateDir != "" {
+		w := stdout
+		if opts.jsonOut {
+			// Never into the JSON document: a caller parsing stdout must get JSON
+			// and nothing else. Stderr keeps it in front of a human.
+			w = stderr
+		}
+		writeReplicationBanner(w, scanReplicationStatus(opts.offlineRoot, opts.noNet, stateDir))
 	}
 
 	view := report.FullView(res)

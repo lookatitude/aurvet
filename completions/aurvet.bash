@@ -6,11 +6,15 @@
 # completion is indistinguishable from "no match".
 
 # AURVET_COMMANDS_BEGIN
-_aurvet_commands=(scan review install snapshot explain doctor version)
+_aurvet_commands=(scan baseline review install snapshot explain doctor version)
 # AURVET_COMMANDS_END
 
 _aurvet_flags=(
 	-json
+	-key
+	-protected-remote
+	-remote
+	-signer
 	-min-severity
 	-no-network
 	-offline-root
@@ -53,6 +57,10 @@ _aurvet() {
 		mapfile -t COMPREPLY < <(compgen -d -- "$cur")
 		return
 		;;
+	-key | --key)
+		mapfile -t COMPREPLY < <(compgen -f -- "$cur")
+		return
+		;;
 	esac
 
 	if [[ $cur == -* ]]; then
@@ -67,6 +75,9 @@ _aurvet() {
 	review)
 		# A recipe directory or a pkgbase; only the directory is completable.
 		mapfile -t COMPREPLY < <(compgen -d -- "$cur")
+		;;
+	baseline)
+		mapfile -t COMPREPLY < <(compgen -W "init append status verify pushed diff" -- "$cur")
 		;;
 	*)
 		# install/snapshot/explain take a pkgbase or a fingerprint. aurvet does

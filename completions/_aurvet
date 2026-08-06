@@ -11,6 +11,7 @@ _aurvet() {
 	# AURVET_COMMANDS_BEGIN
 	commands=(
 		'scan:sweep the system and report provenance findings'
+		'baseline:the signed baseline and its trust chain'
 		'review:analyse one recipe; never builds it'
 		'install:review the dependency closure, prompt, snapshot, hand over'
 		'snapshot:capture provenance for one pkgbase'
@@ -28,6 +29,10 @@ _aurvet() {
 		'-show-recipe[review/install: print the recipe text in full]'
 		'-offline-root[examine a mounted filesystem instead of the running system]:root:_files -/'
 		'-min-severity[reporting floor]:severity:(info suspicious critical)'
+		'-key[baseline: an OpenSSH ed25519 private key file to sign with]:key:_files'
+		'-signer[baseline: fingerprint of an ssh-agent key to sign with]:fingerprint:'
+		'-remote[baseline pushed: the remote the chain was pushed to]:remote:'
+		'-protected-remote[baseline pushed: assert the remote denies force-push]'
 	)
 
 	_arguments -C \
@@ -44,6 +49,9 @@ _aurvet() {
 		review)
 			# a recipe directory or a pkgbase; only the directory is completable
 			_files -/
+			;;
+		baseline)
+			_values 'baseline subcommand' init append status verify pushed diff
 			;;
 		*)
 			# install/snapshot/explain take a pkgbase or a fingerprint. A

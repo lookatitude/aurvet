@@ -31,6 +31,12 @@
         "semantics_digest": "e9f275fb7a45823a8331d46ec9080491d111317fffaf8fdd39827e212d9d4d67"
       }
     ],
+    "baseline-drift": [
+      {
+        "epoch": 1,
+        "semantics_digest": "e4ba56803da3bed3329e5e80d22a8ea12d9f765fe64af2caee9320e06b15bc8e"
+      }
+    ],
     "correlate-coverage": [
       {
         "epoch": 1,

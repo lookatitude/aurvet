@@ -1,0 +1,24 @@
+{
+  "comment": "P4 task 11, bucket four. The reference machine cannot produce this case: 0 of its 1,410 packages predate the log window (which opens 2025-11-11T00:50:40+0000), so the log-coverage bucket is empty there and this path would never be exercised. Here, `ancient` records an %INSTALLDATE% from before the earliest pacman.log line the baseline signed, so the log NEVER covered its install: it is a coverage gap for that package, not evidence against it. `tampered` changed inside the covered window with no transaction, and stays critical -- the fixture would prove nothing if everything in it were down-rated.",
+  "manifest": {
+    "created_at": "2026-01-01T00:00:00+0100",
+    "log_earliest": "2025-11-11T00:50:40+0000",
+    "log_latest": "2025-12-31T23:00:00+0100",
+    "packages": [
+      {"name": "tampered", "version": "1.0.0-1", "mtree_sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+      {"name": "steady", "version": "2.0.0-1", "mtree_sha256": "2222222222222222222222222222222222222222222222222222222222222222"}
+    ]
+  },
+  "observed": [
+    {"name": "tampered", "version": "1.0.0-1", "mtree_sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+    {"name": "steady", "version": "2.0.0-1", "mtree_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+    {"name": "ancient", "version": "0.9.0-1", "mtree_sha256": "4444444444444444444444444444444444444444444444444444444444444444", "install_date": "2025-03-04T11:12:13+0100"}
+  ],
+  "log": {
+    "earliest": "2025-11-11T00:50:40+0000",
+    "latest": "2026-08-06T08:00:00+0200"
+  },
+  "now": "2026-08-06T09:00:00+0200",
+  "want_log_coverage_gap": 1,
+  "want_unexplained": 1
+}

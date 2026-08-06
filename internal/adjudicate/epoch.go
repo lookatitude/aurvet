@@ -328,6 +328,21 @@ var builtIn = []Semantics{
 		"sync db presence per configured repository",
 		"sync db freshness timestamp",
 	}},
+	// P4 drift. This is the third instance of the same cross-phase deadlock:
+	// a critical from a rule that declares no epoch is one the operator is told
+	// to adjudicate and then refused permission to adjudicate. Drift criticals
+	// are the ones an operator is MOST likely to need to adjudicate -- an
+	// expected out-of-band change is routine -- so leaving this undeclared
+	// would have made the adjudication route useless exactly where it matters.
+	// Declared here rather than in internal/baseline because baseline must not
+	// import adjudicate (adjudicate imports baseline).
+	{RuleID: "baseline-drift", Epoch: 1, Inputs: []string{
+		"signed baseline manifest package set (name, version, mtree sha256)",
+		"observed package set from the local pacman db",
+		"pacman.log transaction set inside the log's coverage",
+		"log coverage window versus the baseline's recorded earliest timestamp",
+		"%INSTALLDATE% per package, where present",
+	}},
 }
 
 // BuiltIn returns the compiled epoch declarations. It panics only on a

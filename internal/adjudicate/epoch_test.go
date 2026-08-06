@@ -173,6 +173,13 @@ func TestScanReachableRulesAreDeclared(t *testing.T) {
 		"surface-misc-coverage",
 		// P1-C correlation -- the only rule in that phase reaching critical
 		"correlated-cluster", "correlate-coverage",
+		// P4 drift. Not raised by `scan` itself but by `baseline diff`/`verify`,
+		// which is the same deadlock for the same reason: an operator told to
+		// adjudicate a drift critical and then refused permission to. It is
+		// listed here rather than in a second list because the property being
+		// pinned is identical, and a rule that reaches an operator as a critical
+		// is what matters -- not which subcommand printed it.
+		"baseline-drift",
 	}
 	if missing := reg.Undeclared(scanReachable); len(missing) > 0 {
 		t.Errorf("scan-reachable rules with no fingerprint epoch: %v\n"+
