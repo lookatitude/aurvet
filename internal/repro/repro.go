@@ -286,6 +286,12 @@ func prepareDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
+		// A bundle is an artefact the operator publishes, not a secret store: it
+		// exists to be tarred, attached to an issue, and read by a stranger. The
+		// whole package is built so that nothing confidential reaches it, which is
+		// the control here -- restricting the mode would protect nothing and would
+		// make the fixture awkward to extract and scan.
+		// #nosec G301 -- a published fixture root; confidentiality is enforced by what is written, not by the mode
 		return os.MkdirAll(dir, 0o755)
 	case err != nil:
 		return err
@@ -470,6 +476,9 @@ func (b *builder) emitPaths(rep *Report) {
 func (b *builder) emitSymlink(rep *Report, rel, target string) {
 	redacted, _ := b.redactHome(target)
 	dst := filepath.Join(b.dir, filepath.FromSlash(rel))
+	// Intermediate directories only; the emitted paths themselves get their real
+	// modes below and in emitDir. See prepareDir for why a bundle is 0755.
+	// #nosec G301 -- scaffolding inside a published fixture root
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		b.gap(rel, err.Error())
 		return
@@ -487,6 +496,9 @@ func (b *builder) emitSymlink(rep *Report, rel, target string) {
 
 func (b *builder) emitDir(rep *Report, rel string, mode os.FileMode) {
 	dst := filepath.Join(b.dir, filepath.FromSlash(rel))
+	// Transient: the Chmod below immediately replaces this with the source
+	// directory's real mode, which is the mode that carries evidence.
+	// #nosec G301 -- superseded by the Chmod two lines down
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		b.gap(rel, err.Error())
 		return
@@ -508,6 +520,9 @@ func (b *builder) record(rep *Report, e Entry) {
 
 func (b *builder) writeFile(rel string, content []byte, mode os.FileMode, mtime time.Time) error {
 	dst := filepath.Join(b.dir, filepath.FromSlash(rel))
+	// Intermediate directories only. The file itself is written 0600 below and
+	// then chmodded to the source's real mode, setuid bits included.
+	// #nosec G301 -- scaffolding inside a published fixture root
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -809,6 +824,9 @@ func (b *builder) emitPackages(rep *Report) {
 	// most of them, since "owned by no installed package" is what half these
 	// rules report.
 	const localDB = "var/lib/pacman/local"
+	// pacman's own local database is 0755 on a real system, and this fixture is
+	// scanned as if it were one. See prepareDir for why a bundle is not a secret.
+	// #nosec G301 -- mirrors the real local-database mode inside a published fixture
 	if err := os.MkdirAll(filepath.Join(b.dir, filepath.FromSlash(localDB)), 0o755); err != nil {
 		b.gap(localDB, err.Error())
 		return
@@ -1093,6 +1111,10 @@ func writeManifest(dir string, rep Report) error {
 	if err != nil {
 		return err
 	}
+	// The manifest exists to be read by whoever receives the bundle; it is the
+	// document that says what every other file in it is. A mode that hid it from
+	// the recipient would defeat its only purpose.
+	// #nosec G306 -- the bundle's own disclosure document, written to be read
 	return os.WriteFile(filepath.Join(dir, "MANIFEST.json"), append(blob, '\n'), 0o644)
 }
 
@@ -1165,5 +1187,6 @@ func writeReadme(dir string, in Input, rep Report) error {
 		}
 	}
 	b.WriteString("\n`MANIFEST.json` carries the same information for a machine.\n")
+	// #nosec G306 -- the bundle's own disclosure document, written to be read
 	return os.WriteFile(filepath.Join(dir, "README.md"), []byte(b.String()), 0o644)
 }
