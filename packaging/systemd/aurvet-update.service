@@ -39,9 +39,21 @@ ExecCondition=/bin/sh -c '/usr/bin/aurvet 2>&1 | grep -qw update'
 #  install anything it cannot verify against the embedded root key set.
 ExecStart=/usr/bin/aurvet update
 
-#  The bundle cache and the anti-rollback version floor live in root-only state.
+#  The anti-rollback version floor lives in root-only state, and the fetched
+#  bundle lands in the cache. BOTH directories are required, and CacheDirectory=
+#  is not optional hygiene: ProtectSystem=strict below makes the whole hierarchy
+#  read-only except /dev, /proc, /sys and the directories systemd grants here, so
+#  without it `update` fetches, verifies, and then fails to cache what it just
+#  proved -- exit 3 with "the verified bundle could not be cached".
+#
+#  This was latent for as long as `update` did not exist, because ExecCondition=
+#  above was false and the unit never ran. It became reachable the moment the
+#  subcommand shipped. packaging/systemd/units_test.go asserts both directories
+#  so it cannot go quiet again.
 StateDirectory=aurvet
 StateDirectoryMode=0700
+CacheDirectory=aurvet
+CacheDirectoryMode=0700
 
 #  ---- network-only ----------------------------------------------------------
 

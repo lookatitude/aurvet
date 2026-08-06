@@ -36,7 +36,7 @@ const (
 	// TierMeta reads no file contents at all. Each recorded path is still
 	// opened once, confined, and fstat'd -- so a missing file, a swapped
 	// symlink and a fifo are all still established from a descriptor -- but
-	// nothing is hashed. Every observation is mtime-assisted by construction.
+	// nothing is hashed. Every observation is stat-only by construction.
 	TierMeta Tier = iota
 
 	// TierTriage hashes the security-relevant subset and nothing else:
@@ -141,8 +141,39 @@ var errRecordKind = errors.New("recorded path is not a regular file")
 // specific path, which is the only way to prove containment works from outside.
 var beforeObserveForTest func(path string)
 
-// Observe joins one package's mtree records to the evidence phase 1 gathered and
-// returns what was observed, keyed by the recorded path.
+// FileLookup is all Observe needs of phase 1's evidence: given a "./"-rooted
+// path, what did the collector record for it.
+//
+// It is an interface so the join does not force a SHAPE on the evidence.
+// collect.Raw.Index satisfies it by reading the Files slice in place;
+// collect.Raw.ByPath satisfies it by copying every File into a map, which on the
+// reference system is 63 MiB of live heap that the scan then holds alongside the
+// slice it copied from. Both answer the same question, and Observe cannot tell
+// them apart -- which is the property TestObserveIsTheSameThroughAMapAndAnIndex
+// pins, because a divergence would make a verdict depend on the caller's choice
+// of index.
+type FileLookup interface {
+	Lookup(path string) (collect.File, bool)
+}
+
+// fileMap adapts a plain map to FileLookup, for Observe and for the callers that
+// have a map already.
+type fileMap map[string]collect.File
+
+func (m fileMap) Lookup(path string) (collect.File, bool) {
+	f, ok := m[path]
+	return f, ok
+}
+
+// Observe is ObserveFiles over a map of evidence. See ObserveFiles: this is the
+// same function, and the map is the caller's convenience rather than a second
+// behaviour.
+func (t Tier) Observe(entries []mtree.Entry, files map[string]collect.File, ex Exemptions) map[string]Observed {
+	return t.ObserveFiles(entries, fileMap(files), ex)
+}
+
+// ObserveFiles joins one package's mtree records to the evidence phase 1
+// gathered and returns what was observed, keyed by the recorded path.
 //
 // It performs NO I/O. Everything it reports comes from the descriptor
 // internal/collect opened once, confined, with O_NOFOLLOW, and fstat'd -- the
@@ -153,17 +184,17 @@ var beforeObserveForTest func(path string)
 // turns that into a coverage gap naming the package, which is the honest
 // statement: the scan produced no observation, so nothing can be said.
 //
-// Observe is a pure function of (entries, files, exemptions): no ambient paths,
-// no process state, no network (INV-4). It never resolves a symlink; a link
-// entry's target is compared as a string, because 4,145 legitimate targets on
-// the reference system contain "..".
-func (t Tier) Observe(entries []mtree.Entry, files map[string]collect.File, ex Exemptions) map[string]Observed {
+// ObserveFiles is a pure function of (entries, files, exemptions): no ambient
+// paths, no process state, no network (INV-4). It never resolves a symlink; a
+// link entry's target is compared as a string, because 4,145 legitimate targets
+// on the reference system contain "..".
+func (t Tier) ObserveFiles(entries []mtree.Entry, files FileLookup, ex Exemptions) map[string]Observed {
 	obs := make(map[string]Observed, len(entries))
 	for _, e := range entries {
 		if e.Type == "dir" {
 			continue
 		}
-		f, ok := files[e.Path]
+		f, ok := files.Lookup(e.Path)
 		if !ok {
 			continue
 		}
@@ -216,7 +247,7 @@ func (t Tier) observe(e mtree.Entry, f collect.File, ex Exemptions) Observed {
 		}
 		// Opened and fstat'd, never read. Any verdict resting on this rests on
 		// size and mode, both of which anyone who can write the file can set.
-		o.Kind, o.MtimeAssisted = ObsMetadataOnly, true
+		o.Kind, o.StatOnly = ObsMetadataOnly, true
 		return o
 
 	case collect.KindLink:

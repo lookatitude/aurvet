@@ -62,8 +62,8 @@ func TestDigestMismatchIsSuspiciousAndNamesBothDigests(t *testing.T) {
 	if f.Limits == "" {
 		t.Error("INV-6: digest mismatch carries no Limits")
 	}
-	if strings.Contains(ev, "mtime-assisted") {
-		t.Errorf("a fully hashed observation was marked mtime-assisted: %v", f.Evidence)
+	if strings.Contains(ev, "stat-only") {
+		t.Errorf("a fully hashed observation was marked stat-only: %v", f.Evidence)
 	}
 }
 
@@ -231,8 +231,8 @@ func TestMetadataOnlyCoverageIsGapped(t *testing.T) {
 		{Path: "./c", Type: "file", Size: 1, SHA256: digestA},
 	}
 	obs := obsMap(
-		Observed{Path: "./a", Kind: ObsMetadataOnly, Size: 1, MtimeAssisted: true},
-		Observed{Path: "./b", Kind: ObsMetadataOnly, Size: 1, MtimeAssisted: true},
+		Observed{Path: "./a", Kind: ObsMetadataOnly, Size: 1, StatOnly: true},
+		Observed{Path: "./b", Kind: ObsMetadataOnly, Size: 1, StatOnly: true},
 		Observed{Path: "./c", Kind: ObsHashed, SHA256: digestA, Size: 1},
 	)
 	res := Integrity("foo", entries, obs, Exemptions{}, TierTriage)
@@ -246,23 +246,23 @@ func TestMetadataOnlyCoverageIsGapped(t *testing.T) {
 	if g.RuleID != "integrity-coverage" || g.Subject != "foo" {
 		t.Errorf("coverage gap is not attributed to the package: %+v", g)
 	}
-	if !strings.Contains(g.Reason, "2 of 3") || !strings.Contains(g.Reason, "mtime-assisted") {
+	if !strings.Contains(g.Reason, "2 of 3") || !strings.Contains(g.Reason, "stat-only") {
 		t.Errorf("coverage gap does not quantify what was not hashed: %+v", g)
 	}
 }
 
 // A metadata-only observation that DOES disagree with the record is reported,
-// but never as an equal-strength finding: it carries the mtime-assisted marker
+// but never as an equal-strength finding: it carries the stat-only marker
 // (INV-6) because the bytes were never read.
-func TestMetadataOnlyMismatchCarriesTheMtimeAssistedMarker(t *testing.T) {
+func TestMetadataOnlyMismatchCarriesTheStatOnlyMarker(t *testing.T) {
 	entries := []mtree.Entry{{Path: "./usr/bin/foo", Type: "file", Size: 10, SHA256: digestA}}
 	res := Integrity("foo", entries, obsMap(Observed{
-		Path: "./usr/bin/foo", Kind: ObsMetadataOnly, Size: 99, MtimeAssisted: true,
+		Path: "./usr/bin/foo", Kind: ObsMetadataOnly, Size: 99, StatOnly: true,
 	}), Exemptions{}, TierTriage)
 	f := integrityFor(t, res, "integrity-digest-mismatch", "./usr/bin/foo")
 	ev := strings.Join(f.Evidence, " ")
-	if !strings.Contains(ev, "mtime-assisted") {
-		t.Errorf("a stat-derived finding is not marked mtime-assisted (INV-6): %v", f.Evidence)
+	if !strings.Contains(ev, "stat-only") {
+		t.Errorf("a stat-derived finding is not marked stat-only (INV-6): %v", f.Evidence)
 	}
 	if !strings.Contains(f.Limits, "never read") {
 		t.Errorf("Limits does not say the contents were never hashed: %q", f.Limits)
@@ -356,7 +356,7 @@ func TestNoIntegrityRuleReachesCritical(t *testing.T) {
 		Observed{Path: "./usr/bin/foo", Kind: ObsHashed, SHA256: digestB, Mode: 0o4755},
 		Observed{Path: "./usr/bin/bar", Kind: ObsLink, Link: "/tmp/elsewhere"},
 		Observed{Path: "./usr/share/doc/x", Kind: ObsMissing},
-		Observed{Path: "./etc/x.conf", Kind: ObsMetadataOnly, Size: 1, MtimeAssisted: true},
+		Observed{Path: "./etc/x.conf", Kind: ObsMetadataOnly, Size: 1, StatOnly: true},
 	)
 	res := Integrity("foo", entries, obs, Exemptions{}, TierTriage)
 	res.Findings = append(res.Findings, UnownedSUID([]SUIDFile{{Path: "./opt/x", Mode: 0o4755}}).Findings...)

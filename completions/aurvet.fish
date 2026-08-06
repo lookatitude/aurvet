@@ -9,6 +9,8 @@ complete -c aurvet -f
 # subcommands
 complete -c aurvet -n __fish_use_subcommand -a scan -d 'sweep the system and report provenance findings'
 complete -c aurvet -n __fish_use_subcommand -a baseline -d 'the signed baseline and its trust chain'
+complete -c aurvet -n __fish_use_subcommand -a adjudicate -d 'record, list or revoke a signed judgement about a finding'
+complete -c aurvet -n __fish_use_subcommand -a update -d 'fetch and verify the indicator bundle (never automatic)'
 complete -c aurvet -n __fish_use_subcommand -a review -d 'analyse one recipe; never builds it'
 complete -c aurvet -n __fish_use_subcommand -a install -d 'review the dependency closure, prompt, snapshot, hand over'
 complete -c aurvet -n __fish_use_subcommand -a snapshot -d 'capture provenance for one pkgbase'
@@ -30,10 +32,21 @@ complete -c aurvet -l key -o key -r -F -d 'baseline: an OpenSSH ed25519 private 
 complete -c aurvet -l signer -o signer -x -d 'baseline: fingerprint of an ssh-agent key to sign with'
 complete -c aurvet -l remote -o remote -x -d 'baseline pushed: the remote the chain was pushed to'
 complete -c aurvet -l protected-remote -o protected-remote -d 'baseline pushed: assert the remote denies force-push'
+
+complete -c aurvet -l reason -o reason -x -d 'adjudicate: why this finding is acceptable -- mandatory and recorded'
+complete -c aurvet -l scope -o scope -x -a 'pin subject rule' -d 'adjudicate: blast radius of the judgement'
+complete -c aurvet -l expiry-days -o expiry-days -x -d 'adjudicate: days the judgement lasts (default 180, max 365)'
+complete -c aurvet -l force-rule-scope -o force-rule-scope -d 'adjudicate: the explicit force -scope rule requires'
+complete -c aurvet -l bundle-url -o bundle-url -x -d 'update: the indicator bundle origin to fetch from'
+complete -c aurvet -l version -o version -d 'print build identity, root fingerprints, delegation expiry, cached bundle version'
 # AURVET_FLAGS_END
 
 # baseline subcommands
 complete -c aurvet -n '__fish_seen_subcommand_from baseline' -a 'init append status verify pushed diff'
+
+# adjudicate subcommands; the third form takes a finding fingerprint, which
+# nothing local can enumerate without running a scan
+complete -c aurvet -n '__fish_seen_subcommand_from adjudicate' -a 'list revoke'
 
 # review takes a directory or a pkgbase; only the directory is completable
 complete -c aurvet -n '__fish_seen_subcommand_from review' -F

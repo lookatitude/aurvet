@@ -22,7 +22,6 @@ import (
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/aur"
 	"github.com/lookatitude/aurvet/internal/baseline"
-	"github.com/lookatitude/aurvet/internal/buildinfo"
 	"github.com/lookatitude/aurvet/internal/check"
 	"github.com/lookatitude/aurvet/internal/collect"
 	"github.com/lookatitude/aurvet/internal/config"
@@ -85,6 +84,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"baseline pushed: assert that the remote denies force-push and protects the branch — the "+
 			"controls that make an anchor mean anything")
 
+	// adjudicate. A judgement is recorded, signed and dated, so every input it
+	// needs is explicit: there is no flag here that means "ignore this".
+	reason := fs.String("reason", "",
+		"adjudicate: why this finding is acceptable — mandatory, and stored inside the signed record")
+	scope := fs.String("scope", "",
+		"adjudicate: pin (this evidence only, the default), subject (this rule for this subject), "+
+			"rule (THIS CHECK OFF EVERYWHERE)")
+	expiryDays := fs.Int("expiry-days", 0,
+		"adjudicate: how many days the judgement lasts (default 180, maximum 365; there is no "+
+			"non-expiring suppression)")
+	forceRuleScope := fs.Bool("force-rule-scope", false,
+		"adjudicate: the explicit force -scope rule requires, because turning a check off "+
+			"everywhere is a standing property of the host")
+
+	// update. The origin is compiled in; naming another one is a deliberate act.
+	bundleURL := fs.String("bundle-url", "",
+		"update: the indicator bundle origin to fetch from (default "+DefaultBundleURL+")")
+
+	// --version is the same output as the `version` subcommand: build identity,
+	// root key fingerprints, delegation expiry and the cached bundle version.
+	// Both spellings exist because both are typed.
+	versionFlag := fs.Bool("version", false,
+		"print build identity, root key fingerprints, delegation expiry and the cached bundle version")
+
 	// Go's flag package stops parsing at the first non-flag argument, so a
 	// single fs.Parse would leave `aurvet scan --no-network` with noNet unset
 	// and "--no-network" sitting in Args() as a positional -- the tool would
@@ -105,9 +128,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 		rem = rest[1:]
 	}
 
+	// --version before the operand check: `aurvet --version` has no operands, and
+	// answering it with a usage error would be answering the one question that is
+	// always legitimate with a complaint about the invocation.
+	if *versionFlag {
+		if len(operands) != 0 {
+			fmt.Fprintf(stderr, "aurvet: --version takes no command (got %q)\n", operands)
+			return exitUsage
+		}
+		writeVersion(stdout, versionFacts{})
+		return exitClean
+	}
+
 	if len(operands) == 0 {
 		fmt.Fprintln(stderr, "usage: aurvet [flags] <command>")
-		fmt.Fprintln(stderr, "commands: scan, baseline, review, install, snapshot, explain, doctor, version")
+		// One source line, deliberately: completions_test.go reads this literal to
+		// check that every dispatched subcommand is discoverable, and a wrapped
+		// string would hide half of them from the check.
+		fmt.Fprintln(stderr, "commands: scan, baseline, adjudicate, update, review, install, snapshot, explain, doctor, version")
 		return exitUsage
 	}
 
@@ -138,18 +176,57 @@ func run(args []string, stdout, stderr io.Writer) int {
 	cmd, cmdArgs := operands[0], operands[1:]
 
 	switch cmd {
-	// version resolves no config and touches no filesystem, deliberately. It
-	// is dispatched before every other command for that reason: the moment
-	// someone asks which build they are running is usually the moment the
-	// system is broken, and a `version` that needed a readable pacman DB would
-	// be unavailable exactly when it is needed to report a bug.
+	// version is dispatched before every other command because the moment someone
+	// asks which build they are running is usually the moment the system is
+	// broken: a `version` that needed a readable pacman DB would be unavailable
+	// exactly when it is needed to report a bug.
+	//
+	// It now reads the bundle cache and the root-only floor as well, to print the
+	// three facts that decide whether this build's indicator data can be trusted
+	// (P5 task 7). That does not cost the property above: the build identity is
+	// printed first and unconditionally, and every failure below it renders as a
+	// line rather than an error. See writeVersion.
 	case "version":
 		if len(cmdArgs) != 0 {
 			fmt.Fprintf(stderr, "aurvet: version takes no arguments (got %q)\n", cmdArgs)
 			return exitUsage
 		}
-		fmt.Fprintln(stdout, buildinfo.String())
+		writeVersion(stdout, versionFacts{})
 		return exitClean
+
+	// update is the ONLY path that fetches indicator data, and it runs only when
+	// asked. Nothing else in this binary reaches the network for a bundle: no
+	// update-on-scan, no background refresh, no "check for updates" side effect.
+	case "update":
+		if len(cmdArgs) != 0 {
+			fmt.Fprintf(stderr, "aurvet: update takes no arguments (got %q)\n", cmdArgs)
+			return exitUsage
+		}
+		return runUpdate(updateOpts{
+			offlineRoot: *offlineRoot,
+			jsonOut:     *jsonOut,
+			baseURL:     *bundleURL,
+		}, stdout, stderr)
+
+	// adjudicate is what `baseline init`'s refusal tells the operator to run. It
+	// signs, so like baseline it needs a key the operator supplies, and it never
+	// generates one.
+	case "adjudicate":
+		return runAdjudicate(adjudicateOpts{
+			baselineOpts: baselineOpts{
+				offlineRoot: *offlineRoot,
+				noNet:       *noNet,
+				jsonOut:     *jsonOut,
+				keyPath:     *keyPath,
+				signerFP:    *signerFP,
+				tier:        *tier,
+				args:        cmdArgs,
+			},
+			reason:         *reason,
+			scope:          *scope,
+			expiryDays:     *expiryDays,
+			forceRuleScope: *forceRuleScope,
+		}, stdout, stderr)
 
 	case "doctor":
 		cfg, err := config.Resolve(*offlineRoot, os.Geteuid())
@@ -889,7 +966,7 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 	// privileged phase is over, and NOTHING below reads the filesystem for
 	// integrity: every digest, mode and link target compared here came off the
 	// descriptor collect opened once.
-	observed := raw.ByPath()
+	observed := raw.Index()
 	ires := verifyPackages(p.tier, raw.Packages, observed, ex, &out)
 	res.Findings = append(res.Findings, ires.Findings...)
 	res.Gaps = append(res.Gaps, ires.Gaps...)
@@ -994,6 +1071,20 @@ func dbRel(cfg config.Config) string {
 	return rel
 }
 
+// maxVerifyWorkers caps the mtree parses running at once, and it is a MEMORY
+// bound rather than a throughput one.
+//
+// Each in-flight parse holds a decompressed mtree and the []Entry it produces,
+// and profiling put 24 concurrent parses -- one per core on the reference
+// machine -- at ~130 MiB of live heap, the second-largest single contributor to
+// peak RSS. Verification is not the bottleneck: the wall time is in hashing,
+// which internal/collect parallelises separately, so capping this costs nothing
+// measurable and removes two thirds of the in-flight parse memory. Measured at
+// 8: no wall-time change at any tier, RSS down ~13 %. On a machine with fewer
+// than 8 cores this is a no-op, which is the right shape -- the cap exists to
+// stop a high core count turning into a memory bill.
+const maxVerifyWorkers = 8
+
 // verifyPackages parses each buffered mtree, verifies the paths it records
 // against the filesystem at the requested tier, and compares the two.
 //
@@ -1001,7 +1092,7 @@ func dbRel(cfg config.Config) string {
 // contained: one crafted mtree costs one coverage gap, not the other 1,409. Each
 // worker goroutine carries its own recover, because a panic in a goroutine
 // cannot be recovered by the goroutine that started it (INV-9).
-func verifyPackages(t check.Tier, pkgs []collect.Package, observed map[string]collect.File, ex check.Exemptions, out *scanRun) finding.Result {
+func verifyPackages(t check.Tier, pkgs []collect.Package, observed collect.Index, ex check.Exemptions, out *scanRun) finding.Result {
 	var (
 		mu  sync.Mutex
 		res finding.Result
@@ -1029,7 +1120,7 @@ func verifyPackages(t check.Tier, pkgs []collect.Package, observed map[string]co
 
 	var next atomic.Int64
 	var wg sync.WaitGroup
-	workers := min(max(runtime.NumCPU(), 1), len(pkgs))
+	workers := min(max(runtime.NumCPU(), 1), maxVerifyWorkers, len(pkgs))
 	for w := range workers {
 		wg.Add(1)
 		go func(worker int) {
@@ -1084,7 +1175,7 @@ type obsCounts struct {
 // verifyOne handles one package: parse, join, compare. The bool reports
 // whether this package was verified at all, so a package that never got past its
 // mtree is not counted as covered.
-func verifyOne(t check.Tier, name string, pkg collect.Package, observed map[string]collect.File, ex check.Exemptions) (finding.Result, obsCounts, bool) {
+func verifyOne(t check.Tier, name string, pkg collect.Package, observed collect.Index, ex check.Exemptions) (finding.Result, obsCounts, bool) {
 	if len(pkg.MTree) == 0 {
 		// collect already gapped the read that failed. A second gap for the same
 		// shortfall teaches an operator to skim.
@@ -1101,7 +1192,7 @@ func verifyOne(t check.Tier, name string, pkg collect.Package, observed map[stri
 	if beforeVerifyForTest != nil {
 		beforeVerifyForTest()
 	}
-	obs := t.Observe(entries, observed, ex)
+	obs := t.ObserveFiles(entries, observed, ex)
 
 	var c obsCounts
 	for _, o := range obs {

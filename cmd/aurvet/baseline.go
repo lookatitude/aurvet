@@ -321,14 +321,10 @@ func baselineWrite(env baselineEnv, opts baselineOpts, first bool, stdout, stder
 	// The signing key must already be in the trust set. Adding it here would mean
 	// whoever runs init chooses what this host trusts forever after, which is a
 	// decision that belongs to a human with the key's fingerprint in front of them.
-	if !trusts(env.trusted, signer.PublicKey()) {
-		fmt.Fprintf(stderr, "aurvet: the signing key is not in %s, so a baseline signed with it "+
-			"would not verify on the next run (%s)\n", filepath.Join(env.stateDir, trustedKeysFile),
-			env.trustReason)
-		fmt.Fprintf(stderr, "  add it deliberately, after checking the fingerprint (%s):\n",
-			signer.PublicKey().Fingerprint())
-		fmt.Fprintf(stderr, "    install -Dm600 /dev/stdin %s <<'EOF'\n    %s\n    EOF\n",
-			filepath.Join(env.stateDir, trustedKeysFile), signer.PublicKey().AuthorizedKey())
+	// The refusal is shared with `adjudicate` (reportUntrustedSigner): both write a
+	// signed document that this host has to be able to read back, and two spellings
+	// of the same refusal would eventually give two different answers.
+	if !reportUntrustedSigner(env, signer, "baseline", stderr) {
 		return exitUsage
 	}
 

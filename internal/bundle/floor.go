@@ -52,6 +52,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/lookatitude/aurvet/internal/baseline"
+	"github.com/lookatitude/aurvet/internal/fsx"
 )
 
 // FloorSchema versions the on-disk floor document.
@@ -234,15 +235,45 @@ func validateFloor(f Floor) error {
 	return nil
 }
 
+// FloorLockFile is the advisory lock guarding Save's read-modify-write.
+const FloorLockFile = ".bundle-floor.lock"
+
 // Save writes the floor, refusing any decrease.
 //
 // Monotonicity is enforced here rather than trusted to the caller. A caller that
 // has been talked into accepting an old bundle would otherwise also write an old
 // floor, and the next run would have no record that anything went backwards.
+//
+// # What the lock is and is not for
+//
+// The whole write is taken under fsx.Lock, the same advisory lock internal/chain
+// uses, because `aurvet update` can now be started by a systemd timer and by a
+// human at the same time (packaging/systemd/aurvet-update.timer).
+//
+// Do not read more into it than it does. Without the lock the floor could
+// neither be CORRUPTED (writeAtomic gives every reader old-or-new, never half)
+// nor LOWERED (the monotonicity check below is re-read under the lock). What a
+// lost race costs is that the losing writer's IndicatorCount and AcceptedAt
+// persist instead of the winner's. That is metadata: it can misreport how many
+// indicators the accepted bundle carried, and so mis-scale the "the count
+// dropped" gap on a later run. The anti-rollback property does not depend on
+// this lock, and claiming it did would overstate the fix.
 func (s *FloorStore) Save(f Floor) error {
+	// INV-5 before anything is created: taking a lock means creating a file, and
+	// a refusal to write inside the examined tree must not itself write inside
+	// the examined tree.
 	if err := s.checkOfflineRoot(); err != nil {
 		return err
 	}
+	release, err := fsx.Lock(filepath.Join(s.dir, FloorLockFile), fsx.DefaultLockTimeout)
+	if err != nil {
+		if errors.Is(err, fsx.ErrBusy) {
+			return fmt.Errorf("%w: another aurvet process is writing it; nothing was written", ErrFloor)
+		}
+		return fmt.Errorf("%w: %v", ErrFloor, err)
+	}
+	defer func() { _ = release() }()
+
 	f.Schema = FloorSchema
 	if err := validateFloor(f); err != nil {
 		return err

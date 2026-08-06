@@ -31,14 +31,17 @@
 package collect
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -326,12 +329,127 @@ type Raw struct {
 // records, so the analyse phase joins evidence to records without rewriting
 // either. One path yields one File: the collector already deduplicates its
 // leaves, so a duplicate here would be a bug rather than a shape to merge.
+//
+// It COPIES every File into the map, which is what Index exists to avoid: on
+// the reference system that copy is 63 MiB of live heap for 392,343 records,
+// second only to Files itself. Prefer Index; this remains for callers that want
+// a plain map and for the tests that pin Index's contract to it.
 func (r Raw) ByPath() map[string]File {
 	m := make(map[string]File, len(r.Files))
 	for _, f := range r.Files {
 		m[f.Path] = f
 	}
 	return m
+}
+
+// Index answers ByPath's question -- what did phase 1 record for this
+// "./"-rooted path -- without a second copy of the evidence.
+//
+// It is a side table of slice positions over Files, so the per-path cost is one
+// machine word instead of a whole File plus a map entry: 6.3 MiB instead of 63
+// MiB on the reference system. That matters more than it sounds, because peak
+// RSS tracks LIVE heap at roughly 2:1 under the default GOGC -- measured, not
+// assumed -- so a MiB not retained is about two MiB the process never asks the
+// kernel for.
+//
+// The hash is seeded per Index rather than fixed. Paths come from the
+// filesystem being examined and from packages' own `files` lists, both
+// attacker-controlled on a compromised host, and a fixed hash over
+// attacker-chosen keys is a collision-flooding primitive that would turn one
+// lookup into a linear scan. runtime maps are seeded for exactly this reason and
+// nothing here may be weaker than the map it replaces.
+//
+// Index does not copy Files and does not own it. A caller that mutates Files
+// afterwards changes what Lookup answers, which is the same relationship a slice
+// has with a subslice; Collect hands out evidence it has already closed, so no
+// production caller is in that position.
+type Index struct {
+	files   []File
+	slots   []int32 // position in files, plus one; zero means empty
+	mask    uint64
+	seed    maphash.Seed
+	entries int
+}
+
+// indexSlotLimit is the largest population Index will build a side table for.
+// Above it a slot cannot address the slice in an int32, which is a silently
+// wrong answer rather than a slow one, so Index falls back to a linear scan and
+// says so here rather than truncating. Config.MaxFiles is 4Mi, so nothing a
+// collector produces comes near it.
+const indexSlotLimit = 1 << 30
+
+// Index builds the lookup. It is O(len(Files)) and allocates one slot table.
+func (r Raw) Index() Index {
+	ix := Index{files: r.Files, seed: maphash.MakeSeed(), entries: len(r.Files)}
+	if len(r.Files) == 0 || len(r.Files) > indexSlotLimit {
+		ix.entries = distinctPaths(r.Files)
+		return ix
+	}
+	// Load factor 0.5, so a lookup terminates within a few probes even when the
+	// table is full of near-collisions.
+	n := 1
+	for n < 2*len(r.Files) {
+		n <<= 1
+	}
+	ix.slots = make([]int32, n)
+	ix.mask = uint64(n - 1)
+	ix.entries = 0
+	for i := range r.Files {
+		p := r.Files[i].Path
+		h := maphash.String(ix.seed, p) & ix.mask
+		for {
+			switch s := ix.slots[h]; {
+			case s == 0:
+				ix.slots[h] = int32(i) + 1
+				ix.entries++
+			case r.Files[s-1].Path == p:
+				// Last writer wins, which is what a map assignment does. A
+				// duplicate is a collector bug either way; the two lookups
+				// disagreeing about which File it meant would be worse.
+				ix.slots[h] = int32(i) + 1
+			default:
+				h = (h + 1) & ix.mask
+				continue
+			}
+			break
+		}
+	}
+	return ix
+}
+
+// Lookup returns the evidence phase 1 recorded for a "./"-rooted path.
+func (ix Index) Lookup(path string) (File, bool) {
+	if len(ix.slots) == 0 {
+		for i := range ix.files {
+			if ix.files[i].Path == path {
+				return ix.files[i], true
+			}
+		}
+		return File{}, false
+	}
+	for h := maphash.String(ix.seed, path) & ix.mask; ; h = (h + 1) & ix.mask {
+		s := ix.slots[h]
+		if s == 0 {
+			return File{}, false
+		}
+		if f := &ix.files[s-1]; f.Path == path {
+			return *f, true
+		}
+	}
+}
+
+// Len is the number of distinct paths the index answers for, so a caller can
+// compare it against what it expected to be examined.
+func (ix Index) Len() int { return ix.entries }
+
+// distinctPaths counts distinct paths the slow way, for the population Index
+// refuses to build a slot table for.
+func distinctPaths(files []File) int {
+	seen := make(map[string]struct{}, len(files))
+	for i := range files {
+		seen[files[i].Path] = struct{}{}
+	}
+	return len(seen)
 }
 
 // Complete reports whether every subject was examined. It mirrors
@@ -903,6 +1021,7 @@ func (c *collector) appendRecorded(leaves []leaf) []leaf {
 			continue
 		}
 		paths, bad := recordedPaths(pkg.FileList)
+		leaves = slices.Grow(leaves, len(paths))
 		for _, b := range bad {
 			// Measured on the reference system: zero recorded paths are
 			// absolute, contain a ".." component, or carry a NUL. There is no
@@ -911,8 +1030,7 @@ func (c *collector) appendRecorded(leaves []leaf) []leaf {
 			c.gap("collect-recorded", pkg.Dir,
 				"the package records the path %q, which is not a safe relative path; it was not examined", b)
 		}
-		for _, p := range paths {
-			rel := display(p)
+		for _, rel := range paths {
 			if i, ok := seen[rel]; ok {
 				if i >= 0 && leaves[i].policy < policy {
 					leaves[i].policy = policy
@@ -921,14 +1039,20 @@ func (c *collector) appendRecorded(leaves []leaf) []leaf {
 				continue
 			}
 			seen[rel] = len(leaves)
-			leaves = append(leaves, leaf{rel: rel, open: p, policy: policy, recorded: true})
+			// open is a substring of rel rather than a second string. The two
+			// forms of one path differ by a two-byte prefix, and holding them
+			// separately cost 24 MiB on the reference system -- of which the
+			// worse half was invisible: the un-rooted form used to be a slice of
+			// the whole `files` blob, so one leaf pinned the entire buffer.
+			leaves = append(leaves, leaf{rel: rel, open: rel[2:], policy: policy, recorded: true})
 		}
 	}
 	return leaves
 }
 
 // recordedPaths extracts the non-directory paths one package's plain-text
-// `files` records, and the ones it refuses.
+// `files` records, in the "./"-rooted form mtree uses, and the ones it refuses
+// verbatim.
 //
 // This is a newline split and a prefix test, NOT a parser -- see RecordedPolicy
 // for why that distinction is the one spec §11.1 draws. The %FILES% section is a
@@ -937,30 +1061,44 @@ func (c *collector) appendRecorded(leaves []leaf) []leaf {
 // read here, because the exemption they feed is derived from parsed hooks in
 // phase 2 anyway. A line is refused, never repaired: a path that needs fixing
 // before it can be opened is a path whose meaning this phase would be inventing.
+//
+// It walks the buffer a line at a time instead of calling strings.Split on a
+// copy of it. Split allocated the whole `files` blob as a string and a header
+// per line -- 113 MB of garbage across 1,410 packages on the reference system --
+// and, worse, returned SUBSLICES of that copy, so a single retained path kept
+// the blob alive. Each accepted path is one fresh allocation carrying both forms
+// the collector needs; the caller takes the un-rooted one as paths[i][2:].
 func recordedPaths(b []byte) (paths, bad []string) {
 	inFiles := false
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSuffix(line, "\r")
-		if line == "" {
+	for len(b) > 0 {
+		line := b
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			line, b = b[:i], b[i+1:]
+		} else {
+			b = nil
+		}
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		if len(line) == 0 {
 			continue
 		}
-		if strings.HasPrefix(line, "%") && strings.HasSuffix(line, "%") {
-			inFiles = line == "%FILES%"
+		if line[0] == '%' && line[len(line)-1] == '%' {
+			inFiles = string(line) == "%FILES%"
 			continue
 		}
 		if !inFiles {
 			continue
 		}
-		if strings.HasSuffix(line, "/") {
+		if line[len(line)-1] == '/' {
 			// A directory. It carries no digest and no target, so there is
 			// nothing to open it for.
 			continue
 		}
-		if !safeRecordedPath(line) {
-			bad = append(bad, line)
+		rooted := "./" + string(line)
+		if !safeRecordedPath(rooted[2:]) {
+			bad = append(bad, rooted[2:])
 			continue
 		}
-		paths = append(paths, line)
+		paths = append(paths, rooted)
 	}
 	return paths, bad
 }
@@ -998,6 +1136,19 @@ func (c *collector) hashAll(leaves []leaf) {
 	if len(leaves) == 0 {
 		return
 	}
+	// One allocation for the evidence instead of eighteen doublings. Growing
+	// Files by append cost 266 MB of copying on the reference system, and at the
+	// last doubling the old and new backing arrays are both live -- an 81 MiB
+	// spike for 54 MiB of evidence, paid at the point the heap is already at its
+	// largest. Every leaf yields at most one File, so this cannot over-reserve.
+	c.mu.Lock()
+	if need := len(c.raw.Files) + len(leaves); cap(c.raw.Files) < need {
+		grown := make([]File, len(c.raw.Files), need)
+		copy(grown, c.raw.Files)
+		c.raw.Files = grown
+	}
+	c.mu.Unlock()
+
 	answered := make([]bool, len(leaves))
 
 	var (

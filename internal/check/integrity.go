@@ -47,7 +47,7 @@ const (
 
 	// ObsMetadataOnly: the descriptor was opened and fstat'd, and nothing was
 	// read. Size and Mode are from that fstat. Any verdict resting on this is
-	// mtime-assisted and must say so.
+	// stat-only and must say so.
 	ObsMetadataOnly
 
 	// ObsLink: the path is a symlink and Link is its recorded-form target,
@@ -78,10 +78,21 @@ type Observed struct {
 	Link   string
 	Err    error
 
-	// MtimeAssisted records that stat participated in the decision of what to
-	// examine, so a finding derived from this observation can say so (INV-6).
-	// The triage tier sets it; full and paranoid never do.
-	MtimeAssisted bool
+	// StatOnly records that this path was opened and fstat'd but never read, so
+	// a finding derived from it can say what it does and does not rest on
+	// (INV-6). The triage and meta tiers set it; full and paranoid never do.
+	//
+	// It was called MtimeAssisted, after spec §13's description of triage as a
+	// "stat prefilter" that hashes only mismatches -- a design in which mtime
+	// decided what to read. Triage is no longer that: its hash set is decided in
+	// phase 1 from the descriptor's own mode, because after the capability drop
+	// the process cannot read a root-only file at all. **Nothing in this tree
+	// consults mtime in any decision.** The old name, and the limits text that
+	// went with it, told an operator a verdict rested on a timestamp that was
+	// never looked at -- which is the manufactured confidence this project
+	// exists to refuse, in the one place whose whole job is stating limits
+	// honestly.
+	StatOnly bool
 
 	// Gapped records that phase 1 already raised a coverage gap naming this
 	// path. Integrity then consumes that gap instead of raising a second one:
@@ -105,8 +116,9 @@ const (
 		"home, root, media, mnt, tmp, var/tmp and var/cache. A setuid binary planted in /tmp or in a user's home " +
 		"is invisible to this rule at every tier, including paranoid. It also runs at tier paranoid only, so a " +
 		"scan at any other tier says nothing at all about unowned setuid files."
-	limitMtimeAssisted = "The contents were never read: this rests on size and mtime from the descriptor's own " +
-		"fstat, both of which an attacker who can write the file can also set. Re-run at tier full to hash it."
+	limitStatOnly = "The contents were never read: this rests on the size and mode from the descriptor's own " +
+		"fstat, both of which anyone who can write the file can also set, and a change that preserves both is " +
+		"invisible here. No timestamp was consulted. Re-run at tier full to hash it."
 )
 
 // Integrity compares one package's mtree records against the observations
@@ -244,8 +256,8 @@ func Integrity(pkg string, entries []mtree.Entry, obs map[string]Observed, ex Ex
 
 	if notHashed > 0 {
 		reason := fmt.Sprintf("%d of %d recorded paths were verified by metadata only and never hashed "+
-			"(mtime-assisted, tier %s); mtime and size are both writable by anyone who can write the "+
-			"file, so those paths are not covered by this run", notHashed, checkable, t)
+			"(stat-only, tier %s); size and mode are both writable by anyone who can write the file, so "+
+			"those paths are not covered by this run", notHashed, checkable, t)
 		if t == TierTriage {
 			// The tier's limit stated where the operator meets it. A limit that
 			// only appears in the source is a limit they never meet, and this
@@ -332,9 +344,11 @@ func digestFinding(pkg string, e mtree.Entry, o Observed, ex Exemptions, t Tier)
 			fmt.Sprintf("recorded size=%d observed size=%d", e.Size, o.Size),
 			"contents not hashed")
 	}
-	if o.MtimeAssisted {
-		f.Evidence = append(f.Evidence, "mtime-assisted")
-		f.Limits = limitMtimeAssisted + " " + f.Limits
+	if o.StatOnly {
+		// A terse marker; limitStatOnly carries what it means. The evidence list
+		// is scanned by eye and by grep, so the token stays short and stable.
+		f.Evidence = append(f.Evidence, "stat-only")
+		f.Limits = limitStatOnly + " " + f.Limits
 	}
 	// Paranoid re-examines exempt paths. Such a mismatch is expected by
 	// construction -- pacman regenerates the file -- so it is reported at info

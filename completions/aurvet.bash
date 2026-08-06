@@ -6,7 +6,7 @@
 # completion is indistinguishable from "no match".
 
 # AURVET_COMMANDS_BEGIN
-_aurvet_commands=(scan baseline review install snapshot explain doctor version)
+_aurvet_commands=(scan baseline adjudicate update review install snapshot explain doctor version)
 # AURVET_COMMANDS_END
 
 # AURVET_FLAGS_BEGIN
@@ -22,6 +22,12 @@ _aurvet_flags=(
 	-show-recipe
 	-since-last
 	-tier
+	-reason
+	-scope
+	-expiry-days
+	-force-rule-scope
+	-bundle-url
+	-version
 )
 # AURVET_FLAGS_END
 
@@ -41,6 +47,8 @@ _aurvet() {
 		case ${COMP_WORDS[i - 1]} in
 		-min-severity | --min-severity | -offline-root | --offline-root) continue ;;
 		-tier | --tier | -key | --key | -signer | --signer | -remote | --remote) continue ;;
+		-reason | --reason | -scope | --scope | -expiry-days | --expiry-days) continue ;;
+		-bundle-url | --bundle-url) continue ;;
 		esac
 		local c
 		for c in "${_aurvet_commands[@]}"; do
@@ -61,6 +69,18 @@ _aurvet() {
 		# Values only; the tier a run REPORTS is derived from the work it did,
 		# so there is nothing here that asserts coverage.
 		mapfile -t COMPREPLY < <(compgen -W "meta triage full paranoid" -- "$cur")
+		return
+		;;
+	-scope | --scope)
+		# pin is the narrowest and the default. rule turns a check off
+		# everywhere and additionally needs -force-rule-scope.
+		mapfile -t COMPREPLY < <(compgen -W "pin subject rule" -- "$cur")
+		return
+		;;
+	-reason | --reason | -expiry-days | --expiry-days | -bundle-url | --bundle-url)
+		# Free text, a number and a URL. Nothing to offer, and a completion must
+		# not invent a reason for an operator.
+		COMPREPLY=()
 		return
 		;;
 	-offline-root | --offline-root)
@@ -88,6 +108,14 @@ _aurvet() {
 		;;
 	baseline)
 		mapfile -t COMPREPLY < <(compgen -W "init append status verify pushed diff" -- "$cur")
+		;;
+	adjudicate)
+		# list and revoke, plus a finding fingerprint nothing local can enumerate.
+		mapfile -t COMPREPLY < <(compgen -W "list revoke" -- "$cur")
+		;;
+	update)
+		# takes no arguments: an update is the whole command.
+		COMPREPLY=()
 		;;
 	*)
 		# install/snapshot/explain take a pkgbase or a fingerprint. aurvet does

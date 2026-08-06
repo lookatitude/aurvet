@@ -634,7 +634,11 @@ func TestRecordedPathsIsANameListAndNothingMore(t *testing.T) {
 		"usr/bin/second\n"
 
 	paths, bad := recordedPaths([]byte(list))
-	want := []string{"usr/bin/hello", "usr/share/doc/read me.txt", "usr/bin/second"}
+	// The paths come back "./"-rooted, which is the form mtree records and the
+	// form the evidence carries. The un-rooted form the open needs is the same
+	// allocation minus its first two bytes; asserting both here is what keeps
+	// that sharing from silently becoming two strings again.
+	want := []string{"./usr/bin/hello", "./usr/share/doc/read me.txt", "./usr/bin/second"}
 	if strings.Join(paths, "|") != strings.Join(want, "|") {
 		t.Errorf("paths = %q, want %q", paths, want)
 	}
@@ -647,6 +651,9 @@ func TestRecordedPathsIsANameListAndNothingMore(t *testing.T) {
 	for _, p := range paths {
 		if strings.Contains(p, "\t") {
 			t.Errorf("a %%BACKUP%% line was read as a path: %q", p)
+		}
+		if !strings.HasPrefix(p, "./") {
+			t.Errorf("path %q is not \"./\"-rooted, so leaf.open would be cut from the wrong offset", p)
 		}
 	}
 }
@@ -925,5 +932,123 @@ func TestAHostileRecordedPathIsAGapAgainstItsPackage(t *testing.T) {
 	// coverage gap, not the package (INV-9).
 	if got := fileFor(t, raw, "./usr/bin/hello").SHA256; got != payloadSHA256 {
 		t.Errorf("a hostile record cost the rest of the package: sha256=%q", got)
+	}
+}
+
+// ------------------------------------------------------------------- index ----
+
+// Index is the evidence lookup phase 2 joins mtree records against. It exists
+// because ByPath's map COPIES every File out of Raw.Files: measured on the
+// reference system that second copy is 63 MiB of live heap for 392,343 records,
+// and peak RSS tracks live heap at roughly 2:1 under the default GOGC. Index
+// answers the same question from the slice that is already there.
+//
+// The contract it has to hold is exactly ByPath's, so it is asserted against
+// ByPath rather than against a hand-written expectation.
+func TestIndexAnswersEveryQuestionByPathAnswers(t *testing.T) {
+	root, _ := fixtureRoot(t)
+	raw := mustCollect(t, recordedConfig(root, RecordedAll))
+	if len(raw.Files) == 0 {
+		t.Fatal("the fixture produced no evidence to index")
+	}
+
+	byPath := raw.ByPath()
+	ix := raw.Index()
+	for path, want := range byPath {
+		got, ok := ix.Lookup(path)
+		if !ok {
+			t.Errorf("Index dropped %q, which ByPath answers", path)
+			continue
+		}
+		if got != want {
+			t.Errorf("%q: Index = %+v, ByPath = %+v", path, got, want)
+		}
+	}
+	if n := ix.Len(); n != len(byPath) {
+		t.Errorf("Index.Len = %d, ByPath has %d entries", n, len(byPath))
+	}
+	for _, absent := range []string{"./usr/bin/nothing", "usr/bin/hello", "", "."} {
+		if _, ok := ix.Lookup(absent); ok && byPath[absent] == (File{}) {
+			t.Errorf("Index invented an answer for %q", absent)
+		}
+	}
+}
+
+// The point of Index is that it does NOT copy, so this asserts the absence of
+// the copy directly: a write to Raw.Files is visible through a lookup. A map
+// would have snapshotted the value and this would pass silently.
+func TestIndexReadsThroughTheFileSliceRatherThanACopy(t *testing.T) {
+	raw := Raw{Files: []File{
+		{Path: "./a", Kind: KindFile, SHA256: "aaa"},
+		{Path: "./b", Kind: KindFile, SHA256: "bbb"},
+	}}
+	ix := raw.Index()
+	raw.Files[1].SHA256 = "changed"
+
+	got, ok := ix.Lookup("./b")
+	if !ok {
+		t.Fatal("./b was not indexed")
+	}
+	if got.SHA256 != "changed" {
+		t.Errorf("SHA256 = %q, want %q: Index copied the slice instead of reading through it", got.SHA256, "changed")
+	}
+}
+
+// A duplicate path is a collector bug rather than a shape to merge, but the two
+// lookups must not disagree about which File it means -- a divergence here would
+// make a finding depend on which index a caller happened to build.
+func TestIndexAndByPathAgreeOnADuplicatePath(t *testing.T) {
+	raw := Raw{Files: []File{
+		{Path: "./dup", Kind: KindFile, SHA256: "first"},
+		{Path: "./dup", Kind: KindFile, SHA256: "second"},
+	}}
+	got, ok := raw.Index().Lookup("./dup")
+	if !ok {
+		t.Fatal("./dup was not indexed")
+	}
+	if want := raw.ByPath()["./dup"]; got != want {
+		t.Errorf("Index = %+v, ByPath = %+v", got, want)
+	}
+}
+
+// An empty Raw must answer nothing rather than panic: a scan whose collector
+// refused its configuration hands exactly this shape to phase 2.
+func TestIndexOfNoEvidenceFindsNothing(t *testing.T) {
+	ix := Raw{}.Index()
+	if ix.Len() != 0 {
+		t.Errorf("Len = %d, want 0", ix.Len())
+	}
+	if f, ok := ix.Lookup("./anything"); ok {
+		t.Errorf("an empty index answered: %+v", f)
+	}
+}
+
+// Every kind phase 1 can record survives the index intact. The Unread reason is
+// singled out because it is the field with no second source: the collector's gap
+// names the subject, but only this string says WHY the path could not be
+// examined, and check.Tier.observe turns it into the observation's error.
+func TestIndexPreservesEveryKindAndTheUnreadReason(t *testing.T) {
+	raw := Raw{Files: []File{
+		{Path: "./absent", Kind: KindAbsent},
+		{Path: "./dir", Kind: KindDir, Mode: 0o755},
+		{Path: "./file", Kind: KindFile, SHA256: "d", Size: 3, Mode: 0o644},
+		{Path: "./link", Kind: KindLink, Link: "../../elsewhere"},
+		{Path: "./other", Kind: KindOther},
+		{Path: "./unread", Kind: KindUnread, Unread: "mutated during scan"},
+	}}
+	ix := raw.Index()
+	for _, want := range raw.Files {
+		got, ok := ix.Lookup(want.Path)
+		if !ok {
+			t.Errorf("%q was dropped by the index", want.Path)
+			continue
+		}
+		if got != want {
+			t.Errorf("%q: got %+v, want %+v", want.Path, got, want)
+		}
+	}
+	u, _ := ix.Lookup("./unread")
+	if u.Unread != "mutated during scan" {
+		t.Errorf("Unread = %q: the reason a path could not be examined was lost", u.Unread)
 	}
 }

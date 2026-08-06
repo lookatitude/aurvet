@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -114,7 +115,10 @@ func phase1(t *testing.T, dir string, tier Tier, entries []mtree.Entry) collect.
 func observeRaw(t *testing.T, dir string, tier Tier, entries []mtree.Entry, ex Exemptions) (map[string]Observed, collect.Raw) {
 	t.Helper()
 	raw := phase1(t, dir, tier, entries)
-	return tier.Observe(entries, raw.ByPath(), ex), raw
+	// The index rather than the map, because that is the join a scan runs; the
+	// map path is pinned to this one by
+	// TestObserveIsTheSameThroughAMapAndAnIndex.
+	return tier.ObserveFiles(entries, raw.Index(), ex), raw
 }
 
 func observe(t *testing.T, dir string, tier Tier, entries []mtree.Entry, ex Exemptions) map[string]Observed {
@@ -178,8 +182,8 @@ func TestVerifyFullHashesTheFileItOpened(t *testing.T) {
 	if o.Size != 5 || o.Mode != 0o755 {
 		t.Errorf("size/mode from the descriptor's fstat = %d/%o", o.Size, o.Mode)
 	}
-	if o.MtimeAssisted {
-		t.Error("tier full marked an observation mtime-assisted")
+	if o.StatOnly {
+		t.Error("tier full marked an observation stat-only")
 	}
 	if res := Integrity("foo", entries, obs, Exemptions{}, TierFull); len(res.Findings) != 0 || len(res.Gaps) != 0 {
 		t.Fatalf("clean root produced output: %+v %+v", res.Findings, res.Gaps)
@@ -322,8 +326,8 @@ func TestMetaTierNeverHashes(t *testing.T) {
 	if o.SHA256 != "" {
 		t.Errorf("tier meta computed a digest: %s", o.SHA256)
 	}
-	if !o.MtimeAssisted {
-		t.Error("tier meta did not mark its observation mtime-assisted (INV-6)")
+	if !o.StatOnly {
+		t.Error("tier meta did not mark its observation stat-only (INV-6)")
 	}
 	res := Integrity("foo", entries, obs, Exemptions{}, TierMeta)
 	if len(res.Findings) != 0 {
@@ -361,8 +365,8 @@ func TestTriageAlwaysHashesTheSecurityRelevantSubset(t *testing.T) {
 		t.Errorf("a quiet non-executable was hashed at tier triage (kind=%v); the prefilter bought nothing",
 			quietObs.Kind)
 	}
-	if !quietObs.MtimeAssisted {
-		t.Error("the skipped file is not marked mtime-assisted")
+	if !quietObs.StatOnly {
+		t.Error("the skipped file is not marked stat-only")
 	}
 
 	exeObs := obs["./usr/bin/foo"]
@@ -370,8 +374,8 @@ func TestTriageAlwaysHashesTheSecurityRelevantSubset(t *testing.T) {
 		t.Fatalf("an executable was NOT hashed at tier triage (kind=%v): mtime decided what to look at, "+
 			"which is the attacker's decision to make", exeObs.Kind)
 	}
-	if exeObs.MtimeAssisted {
-		t.Error("an unconditionally hashed observation was marked mtime-assisted")
+	if exeObs.StatOnly {
+		t.Error("an unconditionally hashed observation was marked stat-only")
 	}
 
 	res := Integrity("foo", entries, obs, Exemptions{}, TierTriage)
@@ -407,12 +411,12 @@ func TestTriageDoesNotHashOutsideTheSubsetAndStatesTheLoss(t *testing.T) {
 		t.Fatalf("kind = %v, want ObsMetadataOnly: a stat disagreement must not make triage read a "+
 			"file it could not have decided to read while it still held the capability", o.Kind)
 	}
-	if !o.MtimeAssisted {
-		t.Error("a metadata-only observation is not marked mtime-assisted (INV-6)")
+	if !o.StatOnly {
+		t.Error("a metadata-only observation is not marked stat-only (INV-6)")
 	}
 	res := Integrity("foo", entries, obs, Exemptions{}, TierTriage)
 	f := integrityFor(t, res, "integrity-digest-mismatch", "./usr/share/foo.dat")
-	if !containsString(f.Evidence, "mtime-assisted") {
+	if !containsString(f.Evidence, "stat-only") {
 		t.Errorf("finding does not carry the marker: %v", f.Evidence)
 	}
 	if !containsString(f.Evidence, "contents not hashed") {
@@ -465,8 +469,8 @@ func TestTriageHashesWatchedPathsWhateverTheirMode(t *testing.T) {
 		t.Fatalf("a non-executable unit file was not hashed at tier triage (kind=%v); its contents "+
 			"decide what runs and its mode says nothing about that", o.Kind)
 	}
-	if o.MtimeAssisted {
-		t.Error("an unconditionally hashed observation was marked mtime-assisted")
+	if o.StatOnly {
+		t.Error("an unconditionally hashed observation was marked stat-only")
 	}
 	res := Integrity("foo", entries, obs, Exemptions{}, TierTriage)
 	if _, ok := findingForSubject(res, "integrity-digest-mismatch", "./usr/lib/systemd/system/foo.service"); !ok {
@@ -743,4 +747,123 @@ func containsString(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// --------------------------------------------------------- evidence lookup ----
+
+// Observe's two entry points must be the same function. ObserveFiles is what a
+// scan runs -- it reads phase 1's evidence in place rather than through a copy
+// of it -- and Observe is the map-shaped convenience over the top; a divergence
+// between them would make a verdict depend on which index the caller happened to
+// build, which is not a property anyone would think to check when reading a
+// finding.
+func TestObserveIsTheSameThroughAMapAndAnIndex(t *testing.T) {
+	root, dir := tierRoot(t)
+	_ = root
+	p := writeAt(t, dir, "usr/bin/tool", "payload", 0o755)
+	writeAt(t, dir, "usr/share/doc/readme", "docs", 0o644)
+	if err := os.MkdirAll(filepath.Join(dir, "usr/lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../elsewhere", filepath.Join(dir, "usr/lib/liba.so")); err != nil {
+		t.Fatal(err)
+	}
+	entries := []mtree.Entry{
+		{Path: "./usr/bin/tool", Type: "file", SHA256: sha256Of("payload"), Size: 7, Time: mtimeOf(t, p)},
+		{Path: "./usr/share/doc/readme", Type: "file", SHA256: sha256Of("docs"), Size: 4},
+		{Path: "./usr/lib/liba.so", Type: "link", Link: "../../elsewhere"},
+		{Path: "./usr/bin/gone", Type: "file", SHA256: sha256Of("x"), Size: 1},
+		{Path: "./usr", Type: "dir"},
+	}
+	raw := phase1(t, dir, TierFull, entries)
+
+	viaMap := TierFull.Observe(entries, raw.ByPath(), Exemptions{})
+	viaIndex := TierFull.ObserveFiles(entries, raw.Index(), Exemptions{})
+
+	if len(viaMap) != len(viaIndex) {
+		t.Fatalf("%d observations through the map, %d through the index: one of them dropped a path\nmap=%v\nindex=%v",
+			len(viaMap), len(viaIndex), keysOf(viaMap), keysOf(viaIndex))
+	}
+	for path, want := range viaMap {
+		got, ok := viaIndex[path]
+		if !ok {
+			t.Errorf("%q was observed through the map and not through the index", path)
+			continue
+		}
+		if got.Kind != want.Kind || got.SHA256 != want.SHA256 || got.Link != want.Link ||
+			got.Size != want.Size || got.Mode != want.Mode || got.Gapped != want.Gapped ||
+			got.StatOnly != want.StatOnly || errText(got.Err) != errText(want.Err) {
+			t.Errorf("%q: index = %+v, map = %+v", path, got, want)
+		}
+	}
+}
+
+// A path phase 1 could not examine carries the ONLY statement of why. If the
+// lookup loses Unread, the observation degrades from "refused because X" to a
+// bare unreadable, the gap stops naming the cause, and Gapped stops merging the
+// double gap -- three regressions from one dropped string, none of which changes
+// a count.
+func TestTheUnreadReasonSurvivesTheEvidenceLookup(t *testing.T) {
+	raw := collect.Raw{Files: []collect.File{
+		{Path: "./usr/bin/locked", Kind: collect.KindUnread, Unread: "mutated during scan"},
+	}}
+	entries := []mtree.Entry{{Path: "./usr/bin/locked", Type: "file", SHA256: sha256Of("x"), Size: 1}}
+
+	obs := TierFull.ObserveFiles(entries, raw.Index(), Exemptions{})
+	o, ok := obs["./usr/bin/locked"]
+	if !ok {
+		t.Fatal("the recorded path produced no observation")
+	}
+	if o.Kind != ObsUnreadable {
+		t.Fatalf("Kind = %v, want ObsUnreadable", o.Kind)
+	}
+	if !o.Gapped {
+		t.Error("Gapped is false: integrity will raise a second gap for a shortfall phase 1 already reported")
+	}
+	if o.Err == nil || o.Err.Error() != "mutated during scan" {
+		t.Errorf("Err = %v, want the collector's reason verbatim", o.Err)
+	}
+}
+
+// Every recorded path a package names must reach the comparison. A lookup that
+// silently answered "not found" for some of them would turn a verified file into
+// an unobserved one -- which Integrity does report as a gap, so the loss is
+// visible, but the package would stop being covered without anything having gone
+// wrong on the filesystem.
+func TestEveryRecordedPathReachesTheComparison(t *testing.T) {
+	const n = 512
+	var files []collect.File
+	var entries []mtree.Entry
+	for i := range n {
+		p := fmt.Sprintf("./usr/lib/pkg/%04d.so", i)
+		files = append(files, collect.File{Path: p, Kind: collect.KindFile, SHA256: sha256Of(p), Size: 3})
+		entries = append(entries, mtree.Entry{Path: p, Type: "file", SHA256: sha256Of(p), Size: 3})
+	}
+	raw := collect.Raw{Files: files}
+
+	obs := TierFull.ObserveFiles(entries, raw.Index(), Exemptions{})
+	if len(obs) != n {
+		t.Fatalf("%d observations for %d recorded paths: the lookup dropped %d", len(obs), n, n-len(obs))
+	}
+	res := Integrity("pkg", entries, obs, Exemptions{}, TierFull)
+	if len(res.Findings) != 0 || len(res.Gaps) != 0 {
+		t.Errorf("a package whose every path matches produced %d finding(s) and %d gap(s): %+v %+v",
+			len(res.Findings), len(res.Gaps), res.Findings, res.Gaps)
+	}
+}
+
+func keysOf(m map[string]Observed) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

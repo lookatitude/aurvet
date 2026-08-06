@@ -38,7 +38,7 @@ import (
 	"time"
 
 	"github.com/lookatitude/aurvet/internal/finding"
-	"golang.org/x/sys/unix"
+	"github.com/lookatitude/aurvet/internal/fsx"
 )
 
 // DBLockRel is where pacman's transaction lock lives, relative to a root.
@@ -134,42 +134,23 @@ func (d DBLock) GuardAppend() error {
 
 // lock takes aurvet's advisory lock on the chain directory.
 //
-// flock, not a lock FILE whose existence means "held": a lock taken by
-// existence leaks when the holder is killed, and the recovery for that is a
-// manual delete that people learn to do reflexively. flock is released by the
-// kernel when the process dies.
-//
-// Non-blocking with a bounded retry, so a stuck holder produces ErrBusy with an
-// explanation rather than a run that never returns.
+// The flock loop itself lives in internal/fsx (fsx.Lock), because the
+// anti-rollback floor in internal/bundle needs the same one and two
+// implementations of a lock over trust-bearing state would eventually disagree
+// about their own semantics. What stays here is the part that is about the
+// chain: the error a chain caller tests against, and the sentence that says
+// nothing was written.
 func (s *Store) lock(timeout time.Duration) (func() error, error) {
 	if timeout <= 0 {
 		timeout = defaultLockTimeout
 	}
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return nil, fmt.Errorf("chain: %w", err)
-	}
 	path := filepath.Join(s.dir, lockFileName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
+	release, err := fsx.Lock(path, timeout)
+	switch {
+	case errors.Is(err, fsx.ErrBusy):
+		return nil, fmt.Errorf("%w: %s is held; nothing was written", ErrBusy, path)
+	case err != nil:
 		return nil, fmt.Errorf("chain: %w", err)
 	}
-	deadline := time.Now().Add(timeout)
-	for {
-		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return func() error {
-				_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
-				return f.Close()
-			}, nil
-		}
-		if !errors.Is(err, unix.EWOULDBLOCK) {
-			f.Close()
-			return nil, fmt.Errorf("chain: flock %s: %w", path, err)
-		}
-		if time.Now().After(deadline) {
-			f.Close()
-			return nil, fmt.Errorf("%w: %s is held; nothing was written", ErrBusy, path)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	return release, nil
 }

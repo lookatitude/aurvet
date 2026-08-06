@@ -201,6 +201,39 @@ func TestScanUnitFilesystemHardening(t *testing.T) {
 	}
 }
 
+// TestUpdateUnitCanWriteBothDirectoriesItNeeds pins the two writable paths
+// `aurvet update` requires under ProtectSystem=strict.
+//
+// The floor is root-only STATE and the fetched bundle is CACHE, and they are
+// deliberately different directories -- bundle.OpenFloor refuses at construction
+// if the floor lives inside the cache, because "do not put the anti-rollback
+// floor somewhere the fetcher can write" is a property worth enforcing rather
+// than documenting.
+//
+// This test exists because the omission actually happened and was invisible:
+// the unit had StateDirectory= and no CacheDirectory=, so `update` would fetch a
+// bundle, verify it, and then fail to cache what it had just proved. Nothing
+// caught it for as long as ExecCondition= was false because `update` did not
+// exist -- a latent packaging bug that becomes live on the commit that ships a
+// subcommand, which is the worst time to discover it.
+func TestUpdateUnitCanWriteBothDirectoriesItNeeds(t *testing.T) {
+	ds := parseUnit(t, updateService)
+	if got := one(t, updateService, ds, "ProtectSystem"); got != "strict" {
+		t.Fatalf("%s: ProtectSystem=%q, want strict -- the rest of this test assumes it",
+			updateService, got)
+	}
+	for _, want := range []struct{ key, val string }{
+		{"StateDirectory", "aurvet"},
+		{"CacheDirectory", "aurvet"},
+	} {
+		if got := one(t, updateService, ds, want.key); got != want.val {
+			t.Errorf("%s: %s=%q, want %q. Under ProtectSystem=strict every writable path needs an "+
+				"explicit grant; without this one `update` verifies a bundle and then cannot store it.",
+				updateService, want.key, got, want.val)
+		}
+	}
+}
+
 // TestBoundingSetMatchesPrivdrop reads the capability internal/privdrop keeps
 // and asserts the unit names the same one. The unit and the process must agree:
 // a bounding set that omitted CAP_DAC_READ_SEARCH would not harden anything, it

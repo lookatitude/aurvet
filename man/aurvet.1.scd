@@ -9,6 +9,8 @@ tampered with
 
 *aurvet* [_flags_] *scan*++
 *aurvet* [_flags_] *baseline* *init*|*append*|*status*|*verify*|*pushed*|*diff*++
+*aurvet* [_flags_] *adjudicate* _fingerprint_|*list*|*revoke* _fingerprint_++
+*aurvet* [_flags_] *update*++
 *aurvet* [_flags_] *review* _dir_|_pkgbase_++
 *aurvet* [_flags_] *install* _pkgbase_++
 *aurvet* [_flags_] *snapshot* _pkgbase_++
@@ -68,6 +70,62 @@ spellings are accepted, as is _-flag=value_.
 	necessarily live on the monitored machine, so the host being watched can
 	write to the record of what happened on it.
 
+*adjudicate* _fingerprint_|*list*|*revoke* _fingerprint_
+	Record, list or withdraw a signed judgement about one finding: "I looked at
+	this, here is why it is acceptable, and here is when that has to be decided
+	again". This is what *baseline* *init*'s refusal tells you to run.
+
+	*-reason* is mandatory and is stored inside the signed document -- and, once
+	*baseline* *init* runs, inside the signed manifest. A suppression with no
+	stated reason cannot be re-evaluated by anyone, including whoever made it, so
+	there is no way to record one.
+
+	Every judgement EXPIRES: 180 days by default, 365 at most, *-expiry-days* to
+	choose. There is no non-expiring form, because a permanent suppression is
+	indistinguishable a year later from a check that was never written.
+
+	Three scopes, and they are not interchangeable. *pin* (the default) covers
+	this exact evidence and is spent by any change to it. *subject* covers this
+	rule for this one package or path, across upgrades. *rule* turns the check
+	off *everywhere*, needs *-force-rule-scope*, and is echoed on every later run.
+
+	*list* shows what is being suppressed and, more importantly, what is not:
+	a record whose rule's matching semantics have moved reads *stale*, is
+	preserved verbatim, and suppresses nothing until re-adjudicated. It exits *1*
+	when any record needs attention (stale, expired, spent or dead) and *3* when
+	a record could not be read at all.
+
+	*revoke* withdraws a judgement, by either the record's own fingerprint or
+	the finding id that created it. Anything it was hiding is reported in full
+	from the next run on.
+
+	A coverage *gap* can never be adjudicated (INV-3): adjudicating "I could not
+	examine this" would turn unexamined into clean. Signing needs a key you
+	supply, the same as *baseline*.
+
+*update*
+	Fetch and verify the indicator bundle. *Never automatic* -- nothing else in
+	aurvet reaches the network for indicator data, and the shipped timer is not
+	enabled by the package.
+
+	The bundle's signature is verified over the raw bytes *before* anything
+	parses them, against a short-lived online key named by a delegation that the
+	offline 2-of-3 root key set signed. A bundle can never introduce a key. A
+	version below the anti-rollback floor recorded in root-only state is refused,
+	as is a bundle whose *prev_digest* names the wrong predecessor. Size cap,
+	timeout, and no cross-host redirects.
+
+	It fails closed and it never reports clean: an expired bundle degrades the
+	run to coverage-incomplete (exit *3*) while still matching its indicators,
+	because stale data still finds known-bad things; a retired root key set
+	refuses with the publisher's upgrade message; and the *active indicator
+	count* is printed in every state, because a signed bundle that *removes*
+	detections is an attack rather than an update.
+
+	Nothing that failed verification is ever cached, and *-offline-root* is a
+	usage error rather than a silent no-op: an update writes, and INV-5 forbids
+	writing under the examined tree.
+
 *review* _dir_|_pkgbase_
 	Analyse one recipe and never build it. Leads with the rule hits and the
 	diff against the last approved recipe for that pkgbase, so what changed
@@ -101,12 +159,35 @@ spellings are accepted, as is _-flag=value_.
 	network.
 
 *version*
-	Print build identity (version, commit, toolchain) and exit. Resolves no
-	configuration and reads no files, deliberately: the moment you need to
-	know which build you are running is usually the moment the system is
-	broken.
+	Print build identity (version, commit, toolchain), followed by the
+	indicator bundle trust facts: the embedded root key fingerprints, the
+	delegation expiry, and the cached bundle version with its active
+	indicator count. Identical to *-version*.
+
+	The build identity is printed first and unconditionally, and every
+	failure below it renders as a line rather than an error -- the moment you
+	need to know which build you are running is usually the moment the system
+	is broken, so an unreadable cache produces a sentence and not a non-zero
+	exit. A build with no embedded root keys prints that *refusal*, because a
+	blank where a fingerprint should be is indistinguishable from a
+	fingerprint that failed to load.
 
 # FLAGS
+
+*-bundle-url* _url_
+	*update* only: the indicator bundle origin to fetch from. The default origin
+	is compiled in; the signature, not the URL, is what makes a bundle
+	trustworthy, so naming another origin is legitimate and deliberate.
+
+*-expiry-days* _n_
+	*adjudicate* only: how many days the judgement lasts. Default 180, maximum
+	365. There is no value meaning never.
+
+*-force-rule-scope*
+	*adjudicate* only: the explicit force *-scope rule* requires. A rule-scope
+	judgement turns a whole check off for every package and path on the host,
+	which is a standing property of the system rather than a detail of one
+	finding.
 
 *-json*
 	Emit machine-readable JSON on stdout instead of text. Exactly one JSON
@@ -143,10 +224,19 @@ spellings are accepted, as is _-flag=value_.
 	unprotected and truncation of the chain remains possible from the very
 	machine being watched.
 
+*-reason* _text_
+	*adjudicate* only: why the finding is acceptable. Mandatory, and recorded
+	inside the signed document rather than printed and forgotten. Whitespace and
+	tokens too short to re-evaluate ("ok", "n/a") are refused.
+
 *-remote* _url_
 	*baseline pushed* only: the remote the chain was pushed to, e.g.
 	_git@host:repo.git#refs/heads/main_. Recording a push is what makes
 	truncation detectable; aurvet performs no push and holds no credentials.
+
+*-scope* _pin_|_subject_|_rule_
+	*adjudicate* only: the blast radius of the judgement. Defaults to *pin*, the
+	narrowest. See *adjudicate* above.
 
 *-show-recipe*
 	*review*/*install* only: print the recipe text in full in addition to the
@@ -163,6 +253,15 @@ spellings are accepted, as is _-flag=value_.
 	*scan* only: list only findings that are new since the previous stored
 	scan. The exit code still reflects the full result, not the filtered
 	view.
+
+*-version*
+	Print build identity, the embedded root key fingerprints, the delegation
+	expiry and the cached bundle version, then exit *0*. Identical to the
+	*version* subcommand. Compare the fingerprints against a source an attacker
+	does not control: they are the only thing that distinguishes two builds on
+	the property that decides whether indicator data can be trusted at all. A
+	build with no embedded root keys prints that *refusal* rather than a blank,
+	because a blank is indistinguishable from keys that failed to load.
 
 *-tier* _meta_|_triage_|_full_|_paranoid_
 	How much of each file a verification pass examines. Defaults to *full*.

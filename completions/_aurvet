@@ -12,6 +12,8 @@ _aurvet() {
 	commands=(
 		'scan:sweep the system and report provenance findings'
 		'baseline:the signed baseline and its trust chain'
+		'adjudicate:record, list or revoke a signed judgement about a finding'
+		'update:fetch and verify the indicator bundle (never automatic)'
 		'review:analyse one recipe; never builds it'
 		'install:review the dependency closure, prompt, snapshot, hand over'
 		'snapshot:capture provenance for one pkgbase'
@@ -35,6 +37,12 @@ _aurvet() {
 		'-remote[baseline pushed: the remote the chain was pushed to]:remote:'
 		'-protected-remote[baseline pushed: assert the remote denies force-push]'
 		'-tier[verification tier: how much of each file is examined]:tier:(meta triage full paranoid)'
+		'-reason[adjudicate: why this finding is acceptable -- mandatory and recorded]:reason:'
+		'-scope[adjudicate: blast radius of the judgement]:scope:(pin subject rule)'
+		'-expiry-days[adjudicate: days the judgement lasts (default 180, max 365)]:days:'
+		'-force-rule-scope[adjudicate: the explicit force -scope rule requires]'
+		'-bundle-url[update: the indicator bundle origin to fetch from]:url:'
+		'-version[print build identity, root key fingerprints, delegation expiry and cached bundle version]'
 	)
 	# AURVET_FLAGS_END
 
@@ -55,6 +63,14 @@ _aurvet() {
 			;;
 		baseline)
 			_values 'baseline subcommand' init append status verify pushed diff
+			;;
+		adjudicate)
+			# list and revoke; the third form takes a finding fingerprint, which
+			# nothing local can enumerate without running a scan.
+			_values 'adjudicate subcommand' list revoke
+			;;
+		update)
+			_message 'update takes no arguments'
 			;;
 		*)
 			# install/snapshot/explain take a pkgbase or a fingerprint. A
