@@ -6,11 +6,23 @@
 # completions/completions_test.go. A new subcommand that is not added here fails
 # that test by name.
 
+# Installed package names for -pkg, from the local database directory. No network
+# and no `pacman` execution: a completion reads, like the rest of the tool (INV-2).
+_aurvet_packages() {
+	local -a pkgs
+	local d
+	for d in /var/lib/pacman/local/*(/N); do
+		pkgs+=("${${d:t}%-*-*}")
+	done
+	_describe -t packages 'installed package' pkgs
+}
+
 _aurvet() {
 	local -a commands
 	# AURVET_COMMANDS_BEGIN
 	commands=(
 		'scan:sweep the system and report provenance findings'
+		'diff:classify drift against the signed baseline (= baseline diff)'
 		'baseline:the signed baseline and its trust chain'
 		'adjudicate:record, list or revoke a signed judgement about a finding'
 		'update:fetch and verify the indicator bundle (never automatic)'
@@ -37,11 +49,14 @@ _aurvet() {
 		'-remote[baseline pushed: the remote the chain was pushed to]:remote:'
 		'-protected-remote[baseline pushed: assert the remote denies force-push]'
 		'-tier[verification tier: how much of each file is examined]:tier:(meta triage full paranoid)'
+		'-allow-degraded[scan: proceed unprivileged; the report is stamped DEGRADED and cannot exit 0]'
+		\*'-pkg[scan: analyse only this package (repeatable)]:package:_aurvet_packages'
 		'-reason[adjudicate: why this finding is acceptable -- mandatory and recorded]:reason:'
 		'-scope[adjudicate: blast radius of the judgement]:scope:(pin subject rule)'
 		'-expiry-days[adjudicate: days the judgement lasts (default 180, max 365)]:days:'
 		'-force-rule-scope[adjudicate: the explicit force -scope rule requires]'
 		'-bundle-url[update: the indicator bundle origin to fetch from]:url:'
+		'-check[update: report what an update would do; writes no cache and no floor]'
 		'-version[print build identity, root key fingerprints, delegation expiry and cached bundle version]'
 	)
 	# AURVET_FLAGS_END
@@ -62,7 +77,7 @@ _aurvet() {
 			_files -/
 			;;
 		baseline)
-			_values 'baseline subcommand' init append status verify pushed diff
+			_values 'baseline subcommand' init append status show verify pushed diff
 			;;
 		adjudicate)
 			# list and revoke; the third form takes a finding fingerprint, which
@@ -70,7 +85,10 @@ _aurvet() {
 			_values 'adjudicate subcommand' list revoke
 			;;
 		update)
-			_message 'update takes no arguments'
+			_message 'update takes no arguments (--check is a flag)'
+			;;
+		diff)
+			_message 'diff takes no arguments; it is `aurvet baseline diff`'
 			;;
 		*)
 			# install/snapshot/explain take a pkgbase or a fingerprint. A

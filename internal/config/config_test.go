@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 // INV-4: every path derives from an explicit root, so a collector never reads
 // an ambient location. This is what makes --offline-root a parameter rather
@@ -269,4 +272,47 @@ func TestDoctorWarnsOnlyOnUnwritableStateDir(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestResolveMakesARelativeRootAbsolute pins the fix for a defect the whole
+// suite was structurally unable to see.
+//
+// internal/collect refuses a relative Root -- correctly, since resolving one
+// would mean trusting whatever cwd the caller had (INV-4). But nothing made the
+// root absolute before it got there, so `aurvet scan --offline-root ./suspect`
+// reached the collector, was refused, and surfaced as "the local package
+// database could not be listed": a message about the database when the problem
+// was the path.
+//
+// It was invisible because every test in this repository builds its root with
+// t.TempDir(), which is already absolute. A relative path is what a person
+// types and what no test used.
+func TestResolveMakesARelativeRootAbsolute(t *testing.T) {
+	for _, rel := range []string{".", "testdata", "./testdata", "testdata/../testdata"} {
+		cfg, err := Resolve(rel, 1000)
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", rel, err)
+		}
+		if !filepath.IsAbs(cfg.Root) {
+			t.Errorf("Resolve(%q).Root = %q, want an absolute path: internal/collect refuses a "+
+				"relative root, so passing one through produces a failure about the database "+
+				"rather than about the path", rel, cfg.Root)
+		}
+		for _, p := range []struct{ key, val string }{
+			{"DBPath", cfg.DBPath}, {"SyncPath", cfg.SyncPath}, {"StateDir", cfg.StateDir},
+		} {
+			if !filepath.IsAbs(p.val) {
+				t.Errorf("Resolve(%q).%s = %q, want absolute", rel, p.key, p.val)
+			}
+		}
+	}
+	// "/" must survive untouched: it is the live-system case and the state
+	// directory resolution branches on it being exactly "/".
+	cfg, err := Resolve("/", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Root != "/" {
+		t.Errorf("Resolve(\"/\").Root = %q, want \"/\" -- resolveStateDir compares against it", cfg.Root)
+	}
 }

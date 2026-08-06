@@ -68,6 +68,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// that actually happened -- see fullScan.
 	tier := fs.String("tier", "",
 		"verification tier: meta, triage, full (default), paranoid -- how much of each file is examined")
+	// The privilege policy (spec §11). Unprivileged `scan` REFUSES without this
+	// flag; with it, the report is stamped and the run cannot exit 0. See
+	// privilege.go for the measurement the policy rests on.
+	allowDegraded := fs.Bool("allow-degraded", false,
+		"scan: proceed unprivileged -- the report is stamped DEGRADED, every refused read is a "+
+			"coverage gap, and the run can never exit 0")
+	// --pkg is repeatable (§14's `[--pkg N]...`). An unknown name is a usage
+	// error, never an empty result: see pkgselect.go.
+	var only pkgList
+	fs.Var(&only, "pkg",
+		"scan: analyse only this package (repeatable); an unknown name is a usage error, not an "+
+			"empty result")
 	// review/install lead with rule hits and a diff against the last approved
 	// recipe. The full text is available on request, because a gate that prints
 	// a 400-line PKGBUILD by default teaches its operator to scroll past it.
@@ -101,6 +113,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// update. The origin is compiled in; naming another one is a deliberate act.
 	bundleURL := fs.String("bundle-url", "",
 		"update: the indicator bundle origin to fetch from (default "+DefaultBundleURL+")")
+	// `update --check` (§14). internal/bundle already separates deciding from
+	// persisting -- Verify performs no I/O and reads no clock -- so this suppresses
+	// the two writes and nothing else: the verdict is reached in full.
+	checkOnly := fs.Bool("check", false,
+		"update: report what an update would do without caching anything or advancing the "+
+			"anti-rollback floor")
 
 	// --version is the same output as the `version` subcommand: build identity,
 	// root key fingerprints, delegation expiry and the cached bundle version.
@@ -145,7 +163,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// One source line, deliberately: completions_test.go reads this literal to
 		// check that every dispatched subcommand is discoverable, and a wrapped
 		// string would hide half of them from the check.
-		fmt.Fprintln(stderr, "commands: scan, baseline, adjudicate, update, review, install, snapshot, explain, doctor, version")
+		fmt.Fprintln(stderr, "commands: scan, diff, baseline, adjudicate, update, review, install, snapshot, explain, doctor, version")
 		return exitUsage
 	}
 
@@ -206,6 +224,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			offlineRoot: *offlineRoot,
 			jsonOut:     *jsonOut,
 			baseURL:     *bundleURL,
+			check:       *checkOnly,
 		}, stdout, stderr)
 
 	// adjudicate is what `baseline init`'s refusal tells the operator to run. It
@@ -252,12 +271,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return exitUsage
 		}
 		return runScan(scanOpts{
-			offlineRoot: *offlineRoot,
-			noNet:       *noNet,
-			jsonOut:     *jsonOut,
-			sinceLast:   *sinceLast,
-			minSeverity: *minSeverity,
-			tier:        *tier,
+			offlineRoot:   *offlineRoot,
+			noNet:         *noNet,
+			jsonOut:       *jsonOut,
+			sinceLast:     *sinceLast,
+			minSeverity:   *minSeverity,
+			tier:          *tier,
+			allowDegraded: *allowDegraded,
+			only:          only,
 		}, stdout, stderr)
 
 	// snapshot captures provenance for ONE pkgbase. Not a package name, and not
@@ -306,8 +327,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 			pkgbase:     cmdArgs[0],
 		}, stdout, stderr)
 
-	// baseline is the P4 trust chain: init, status, verify, pushed, diff. It signs,
-	// so it is the one command that needs a key, and it never generates one.
+	// diff is top-level because spec §14 and §1 both put it there: §1 names it as
+	// one of the four verbs the product IS ("`scan` compares live state to
+	// expectation, `diff` to recorded state"), so a user who read the spec types
+	// `aurvet diff`. It is the same code as `aurvet baseline diff`, reached by
+	// prepending the subcommand rather than by a second implementation -- two
+	// spellings of one behaviour must not be two behaviours.
+	case "diff":
+		return runBaseline(baselineOpts{
+			offlineRoot:     *offlineRoot,
+			noNet:           *noNet,
+			jsonOut:         *jsonOut,
+			keyPath:         *keyPath,
+			signerFP:        *signerFP,
+			remote:          *remote,
+			protectedRemote: *protectedRemote,
+			tier:            *tier,
+			args:            append([]string{"diff"}, cmdArgs...),
+		}, stdout, stderr)
+
+	// baseline is the P4 trust chain: init, status/show, verify, pushed, diff. It
+	// signs, so it is the one command that needs a key, and it never generates one.
 	case "baseline":
 		return runBaseline(baselineOpts{
 			offlineRoot:     *offlineRoot,
@@ -353,6 +393,14 @@ type scanOpts struct {
 	// which is a different value and lives on scanRun.
 	tier string
 
+	// allowDegraded is spec §11's opt-in: an unprivileged live scan refuses
+	// without it, and stamps itself and forbids exit 0 with it. See privilege.go.
+	allowDegraded bool
+
+	// only restricts the analysis to the named packages (--pkg, repeatable). See
+	// pkgselect.go for what is restricted and what is not.
+	only []string
+
 	// stateDir overrides where reports are persisted. "" means "decide from
 	// config", which is what run() always passes.
 	stateDir string
@@ -395,6 +443,17 @@ const reportStamp = "20060102T150405.000000000Z"
 // --report-dir does not exist in P1-A, so there is no correct destination yet
 // and the honest move is to skip and say so.
 func scanStateDir(cfg config.Config, opts scanOpts, euid int) (string, string) {
+	// A --pkg run is not this system's report, and it must not become the
+	// --since-last baseline. The reasoning is the one runScan gives for never
+	// saving a FILTERED view: a stored result covering two packages would truncate
+	// the next run's baseline, so every finding on the system would re-report as
+	// new on the run after that. First, before the stateDir seam, because a test
+	// that supplies a state directory must not be able to reintroduce it.
+	if len(opts.only) > 0 {
+		return "", "--pkg: report not persisted (it covers the named packages only, and a scoped " +
+			"report stored as this system's baseline would make every other finding read as new on " +
+			"the next --since-last)"
+	}
 	if opts.stateDir != "" {
 		return opts.stateDir, ""
 	}
@@ -429,6 +488,19 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 	if opts.euid != nil {
 		euid = *opts.euid
 	}
+
+	// The privilege policy FIRST, before anything is resolved or read: a refusal
+	// means no analysis was attempted, and a refusal that had already opened the
+	// package database would be a refusal that did some of the work it declined to
+	// do. Exit 2, because what is wrong is the invocation (spec §11).
+	priv := privilegePolicy(euid, opts.offlineRoot, opts.allowDegraded)
+	if priv.Refuse {
+		for _, line := range priv.Refusal {
+			fmt.Fprintln(stderr, line)
+		}
+		return exitUsage
+	}
+
 	cfg, err := config.Resolve(opts.offlineRoot, euid)
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
@@ -452,7 +524,7 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 	}
 
 	run, err := fullScan(context.Background(), pipeline{
-		cfg: cfg, tier: want, noNet: opts.noNet, cl: opts.cl, euid: euid,
+		cfg: cfg, tier: want, noNet: opts.noNet, cl: opts.cl, euid: euid, only: opts.only,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
@@ -464,6 +536,17 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	res, summary := run.Result, run.Summary
+
+	// The degradation, as a coverage GAP and therefore as part of the result:
+	// stamping the output alone would leave the exit code, the JSON document and
+	// the stored report all claiming complete coverage. It is appended before the
+	// report is persisted, so the baseline the next --since-last diffs against
+	// carries it too. -min-severity cannot reach it (INV-3).
+	if priv.Degraded {
+		res.Gaps = append(res.Gaps, finding.Gap{
+			RuleID: rulePrivilegeCoverage, Subject: "process", Reason: priv.Gap,
+		})
+	}
 
 	// ORDERING IS LOAD-BEARING. Persist the FULL result here, before the
 	// --since-last block below derives anything from it, and never move this
@@ -510,6 +593,19 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 			w = stderr
 		}
 		writeReplicationBanner(w, scanReplicationStatus(opts.offlineRoot, opts.noNet, stateDir))
+	}
+
+	// The degradation stamp and the --pkg scope, above the findings and above the
+	// tier line. Both bound what every statement below them means -- one by
+	// permissions, one by subject -- and a caveat printed under 40 findings is a
+	// caveat nobody reads. Stderr under -json for the same reason the tier line
+	// goes there: stdout must be JSON and nothing else.
+	stampOut := stdout
+	if opts.jsonOut {
+		stampOut = stderr
+	}
+	for _, line := range append(append([]string{}, priv.Stamp...), scopeLine(opts.only)...) {
+		fmt.Fprintln(stampOut, line)
 	}
 
 	// The tier, before the findings and unconditionally: every verdict below is
@@ -888,6 +984,13 @@ type pipeline struct {
 	// costs a second pass over the unit and hook directories, so `scan`, which
 	// has no use for it, does not pay.
 	inventory bool
+
+	// only restricts the analysed package set to these package names (--pkg).
+	// Empty means the whole system. A name the database does not carry aborts the
+	// run with errUnknownPackage rather than yielding an empty scope; the
+	// system-wide passes do not run at all under a restriction, because the
+	// ownership oracle is then partial by construction. See pkgselect.go.
+	only []string
 }
 
 // scanRun is what one full scan produced.
@@ -975,6 +1078,18 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 		_ = dropAll()
 		return scanRun{}, err
 	}
+
+	// --pkg, applied between phase 1 and every analyser: the package set and the
+	// buffers are narrowed together, so nothing is verified that was not asked
+	// about and nothing asked about goes unverified.
+	if len(p.only) > 0 {
+		var rerr error
+		if d, raw, rerr = restrictPackages(d, raw, p.only); rerr != nil {
+			_ = dropAll()
+			return scanRun{}, rerr
+		}
+	}
+
 	res, summary := sweepWith(ctx, p.cfg, d, p.noNet, p.cl)
 	out.Summary = summary
 	if cerr != nil {
@@ -1032,9 +1147,16 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 
 	// The unowned setuid sweep, which has input only at paranoid because only
 	// paranoid asks collect for the metadata sweep those files live in.
-	sres := check.UnownedSUID(suidFiles(raw, owners))
-	res.Findings = append(res.Findings, sres.Findings...)
-	res.Gaps = append(res.Gaps, sres.Gaps...)
+	//
+	// Skipped entirely under --pkg: `owners` is then built from the named packages
+	// alone, so every setuid binary on the system would resolve to "owned by
+	// nobody" and be accused. A restricted oracle may narrow a question, never
+	// widen an accusation.
+	if len(p.only) == 0 {
+		sres := check.UnownedSUID(suidFiles(raw, owners))
+		res.Findings = append(res.Findings, sres.Findings...)
+		res.Gaps = append(res.Gaps, sres.Gaps...)
+	}
 
 	// A tier is a claim about work, so it is derived from the work.
 	//
@@ -1056,12 +1178,20 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 
 	// Surfaces and correlation. Correlate returns the surface checks' own
 	// findings unchanged plus the clusters they earn; nothing here re-rates them.
-	cres := correlate.Correlate(root, correlate.Config{
-		Owners: owners, Pkgs: d.pkgs, SyncNames: d.syncNames,
-		Transactions: p.txs, DBPath: dbRel(p.cfg),
-	})
-	res.Findings = append(res.Findings, cres.Findings...)
-	res.Gaps = append(res.Gaps, cres.Gaps...)
+	//
+	// Skipped under --pkg, for the reason the setuid sweep above is: these checks
+	// ask "does any package own this unit / hook / preload entry", and under a
+	// restriction the answer is no for everything, which would report a stock
+	// system as entirely unowned. The scope line says so above the findings rather
+	// than the omission being silent.
+	if len(p.only) == 0 {
+		cres := correlate.Correlate(root, correlate.Config{
+			Owners: owners, Pkgs: d.pkgs, SyncNames: d.syncNames,
+			Transactions: p.txs, DBPath: dbRel(p.cfg),
+		})
+		res.Findings = append(res.Findings, cres.Findings...)
+		res.Gaps = append(res.Gaps, cres.Gaps...)
+	}
 
 	if p.inventory {
 		out.Packages, out.Observed = packageEvidence(raw, d)

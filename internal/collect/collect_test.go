@@ -377,15 +377,15 @@ func TestCollectReportsMidScanMutationAsAGap(t *testing.T) {
 
 	cfg := testConfig(root)
 	cfg.Workers = 1
-	beforeHashForTest = func(rel string) {
+	setBeforeHashForTest(func(rel string) {
 		if rel != "./usr/bin/hello" {
 			return
 		}
 		if err := os.WriteFile(target, []byte("REWRITTEN UNDER THE DESCRIPTOR\n"), 0o755); err != nil {
 			t.Errorf("mutating fixture: %v", err)
 		}
-	}
-	t.Cleanup(func() { beforeHashForTest = nil })
+	})
+	t.Cleanup(func() { setBeforeHashForTest(nil) })
 
 	raw := mustCollect(t, cfg)
 	g, ok := gapFor(raw, "./usr/bin/hello")
@@ -410,12 +410,12 @@ func TestCollectContainsAPanicInAWorkerGoroutine(t *testing.T) {
 	root, _ := fixtureRoot(t)
 	cfg := testConfig(root)
 	cfg.Workers = 4
-	beforeHashForTest = func(rel string) {
+	setBeforeHashForTest(func(rel string) {
 		if rel == "./usr/bin/hello" {
 			panic("crafted metadata")
 		}
-	}
-	t.Cleanup(func() { beforeHashForTest = nil })
+	})
+	t.Cleanup(func() { setBeforeHashForTest(nil) })
 
 	raw := mustCollect(t, cfg)
 
@@ -451,12 +451,12 @@ func TestCollectBoundsAHangingSubject(t *testing.T) {
 
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	beforeHashForTest = func(rel string) {
+	setBeforeHashForTest(func(rel string) {
 		if rel == "./usr/bin/hello" {
 			<-release
 		}
-	}
-	t.Cleanup(func() { beforeHashForTest = nil })
+	})
+	t.Cleanup(func() { setBeforeHashForTest(nil) })
 
 	start := time.Now()
 	raw := mustCollect(t, cfg)

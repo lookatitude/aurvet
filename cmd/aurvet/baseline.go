@@ -142,13 +142,25 @@ func runBaseline(opts baselineOpts, stdout, stderr io.Writer) int {
 		return baselineWrite(env, opts, true, stdout, stderr)
 	case "append":
 		return baselineWrite(env, opts, false, stdout, stderr)
-	case "status":
+	// `show` is spec §14's spelling ("baseline init | append | verify | show") and
+	// `status` is the one the binary shipped with. Both dispatch here rather than
+	// one of them being wrong: the spec is not edited to match an implementation
+	// detail, and an operator who typed the documented word does not get exit 2.
+	case "status", "show":
 		return baselineStatus(env, stdout, stderr)
 	case "verify":
 		return baselineVerify(env, stdout, stderr)
 	case "pushed":
 		return baselinePushed(env, opts, stdout, stderr)
 	case "diff":
+		// No positional argument: §14 spells it `diff [--since ENTRY]`. Accepting
+		// and ignoring one would let `aurvet diff HEAD~1` look like it honoured a
+		// selector it does not implement.
+		if len(opts.args) != 1 {
+			fmt.Fprintf(stderr, "aurvet: diff takes no arguments (got %q)\n", opts.args[1:])
+			baselineUsage(stderr)
+			return exitUsage
+		}
 		return baselineDiff(env, opts, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "aurvet: unknown baseline subcommand %q\n", opts.args[0])
@@ -158,15 +170,16 @@ func runBaseline(opts baselineOpts, stdout, stderr io.Writer) int {
 }
 
 func baselineUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: aurvet baseline <init|append|status|verify|pushed|diff> [flags]")
+	fmt.Fprintln(w, "usage: aurvet baseline <init|append|status|show|verify|pushed|diff> [flags]")
 	fmt.Fprintln(w, "  init    run a scan and, if nothing refuses, sign the first baseline")
 	fmt.Fprintln(w, "  append  the same, for a later entry: it refuses on the same conditions, and")
 	fmt.Fprintln(w, "          additionally refuses while db.lck exists (a scan of a database")
 	fmt.Fprintln(w, "          mid-transaction would sign spurious findings into the chain)")
 	fmt.Fprintln(w, "  status  the chain, the unpushed tail, and what was not checked")
+	fmt.Fprintln(w, "  show    the same; spec §14's spelling of it")
 	fmt.Fprintln(w, "  verify  verify the chain against the last confirmed push")
 	fmt.Fprintln(w, "  pushed  record that the chain has been pushed (-remote, -protected-remote)")
-	fmt.Fprintln(w, "  diff    classify drift against the signed baseline")
+	fmt.Fprintln(w, "  diff    classify drift against the signed baseline (also `aurvet diff`)")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "signing: -key <openssh private key> or -signer <ssh-agent key fingerprint>")
 	fmt.Fprintln(w, "  aurvet never generates a signing key: `ssh-keygen -t ed25519` (or -t ed25519-sk")

@@ -6,7 +6,7 @@
 # completion is indistinguishable from "no match".
 
 # AURVET_COMMANDS_BEGIN
-_aurvet_commands=(scan baseline adjudicate update review install snapshot explain doctor version)
+_aurvet_commands=(scan diff baseline adjudicate update review install snapshot explain doctor version)
 # AURVET_COMMANDS_END
 
 # AURVET_FLAGS_BEGIN
@@ -27,6 +27,9 @@ _aurvet_flags=(
 	-expiry-days
 	-force-rule-scope
 	-bundle-url
+	-check
+	-allow-degraded
+	-pkg
 	-version
 )
 # AURVET_FLAGS_END
@@ -48,7 +51,7 @@ _aurvet() {
 		-min-severity | --min-severity | -offline-root | --offline-root) continue ;;
 		-tier | --tier | -key | --key | -signer | --signer | -remote | --remote) continue ;;
 		-reason | --reason | -scope | --scope | -expiry-days | --expiry-days) continue ;;
-		-bundle-url | --bundle-url) continue ;;
+		-bundle-url | --bundle-url | -pkg | --pkg) continue ;;
 		esac
 		local c
 		for c in "${_aurvet_commands[@]}"; do
@@ -87,6 +90,22 @@ _aurvet() {
 		mapfile -t COMPREPLY < <(compgen -d -- "$cur")
 		return
 		;;
+	-pkg | --pkg)
+		# Installed package names, from the local database's directory listing.
+		# No network, and no `pacman` execution: a completion reads, like the rest
+		# of this tool (INV-2).
+		local d n
+		COMPREPLY=()
+		for d in /var/lib/pacman/local/*/; do
+			[[ -d $d ]] || continue
+			n=${d%/}
+			n=${n##*/}
+			n=${n%-*}
+			n=${n%-*}
+			[[ $n == "$cur"* ]] && COMPREPLY+=("$n")
+		done
+		return
+		;;
 	-key | --key)
 		mapfile -t COMPREPLY < <(compgen -f -- "$cur")
 		return
@@ -107,14 +126,19 @@ _aurvet() {
 		mapfile -t COMPREPLY < <(compgen -d -- "$cur")
 		;;
 	baseline)
-		mapfile -t COMPREPLY < <(compgen -W "init append status verify pushed diff" -- "$cur")
+		mapfile -t COMPREPLY < <(compgen -W "init append status show verify pushed diff" -- "$cur")
 		;;
 	adjudicate)
 		# list and revoke, plus a finding fingerprint nothing local can enumerate.
 		mapfile -t COMPREPLY < <(compgen -W "list revoke" -- "$cur")
 		;;
 	update)
-		# takes no arguments: an update is the whole command.
+		# takes no arguments: an update is the whole command. --check is a flag and
+		# is offered by the flag branch above.
+		COMPREPLY=()
+		;;
+	diff)
+		# `aurvet diff` is `aurvet baseline diff` and takes no argument either.
 		COMPREPLY=()
 		;;
 	*)

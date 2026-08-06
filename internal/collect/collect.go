@@ -129,7 +129,26 @@ var ErrConfig = errors.New("collect: invalid configuration")
 // windows a test cannot open from outside -- a panic mid-subject, a hang
 // mid-subject, and a rewrite between the open and the re-fstat. Same device as
 // fsx's afterHashForTest, for the same reason.
-var beforeHashForTest func(rel string)
+//
+// It is an atomic pointer rather than a plain func var, and that is REQUIRED
+// rather than tidy. safe.RunTimeout bounds a hung subject by ABANDONING its
+// goroutine -- it cannot kill one -- so the hang test's goroutine is still
+// parked at the call below when the test's Cleanup clears the seam. A plain
+// assignment there is a write racing a read, which the race detector caught
+// about one run in six: not a flake, a real unsynchronised access that happened
+// to be harmless. Storing a pointer makes both sides ordered, and the cost on
+// the hot path is one atomic load per file.
+var beforeHashForTest atomic.Pointer[func(rel string)]
+
+// setBeforeHashForTest installs (or with nil, clears) the seam. Tests call it
+// instead of assigning, so there is one place the ordering is guaranteed.
+func setBeforeHashForTest(fn func(rel string)) {
+	if fn == nil {
+		beforeHashForTest.Store(nil)
+		return
+	}
+	beforeHashForTest.Store(&fn)
+}
 
 // Config is the collector's whole input. Collect is a pure function of it
 // (INV-4): no ambient paths, no dependence on the working directory, and
@@ -1227,8 +1246,8 @@ func (c *collector) examine(l leaf) error {
 	}
 	defer f.Close()
 
-	if beforeHashForTest != nil {
-		beforeHashForTest(l.rel)
+	if fn := beforeHashForTest.Load(); fn != nil {
+		(*fn)(l.rel)
 	}
 
 	if !hashWanted(l.policy, l.rel, st) {

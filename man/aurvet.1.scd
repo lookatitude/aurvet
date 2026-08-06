@@ -7,10 +7,11 @@ tampered with
 
 # SYNOPSIS
 
-*aurvet* [_flags_] *scan*++
-*aurvet* [_flags_] *baseline* *init*|*append*|*status*|*verify*|*pushed*|*diff*++
+*aurvet* [_flags_] *scan* [*-pkg* _name_]... [*-allow-degraded*]++
+*aurvet* [_flags_] *diff*++
+*aurvet* [_flags_] *baseline* *init*|*append*|*status*|*show*|*verify*|*pushed*|*diff*++
 *aurvet* [_flags_] *adjudicate* _fingerprint_|*list*|*revoke* _fingerprint_++
-*aurvet* [_flags_] *update*++
+*aurvet* [_flags_] *update* [*-check*]++
 *aurvet* [_flags_] *review* _dir_|_pkgbase_++
 *aurvet* [_flags_] *install* _pkgbase_++
 *aurvet* [_flags_] *snapshot* _pkgbase_++
@@ -33,9 +34,26 @@ spellings are accepted, as is _-flag=value_.
 *scan*
 	Sweep the whole system: load the local and sync package databases,
 	establish provenance for every foreign (non-repository) package, and
-	report findings and coverage gaps. Takes no arguments.
+	report findings and coverage gaps. Takes no positional arguments.
 
-*baseline* *init*|*append*|*status*|*verify*|*pushed*|*diff*
+	*It requires root, and refuses to run unprivileged unless
+	*-allow-degraded* is passed.* The reason is measured rather than
+	stylistic: 25 of this system's package-owned files cannot be opened by an
+	ordinary user, and an unprivileged *-tier full* run produces 32
+	permission-denied coverage gaps -- so under INV-3 it could never exit
+	*0*, and an exit code that is always *3* teaches its reader that *3*
+	means nothing. *-offline-root* is exempt; see *-allow-degraded*.
+
+	*-pkg* restricts the run to named packages. A *-pkg* run is a question
+	about packages and not about the system: the whole-system passes do not
+	run, and its report is not persisted as this host's baseline.
+
+*diff*
+	Classify drift against the signed baseline into corroborated,
+	adjudicated, unexplained and log-coverage-gap. Identical to *baseline*
+	*diff*; both spellings exist because both are typed. Takes no arguments.
+
+*baseline* *init*|*append*|*status*|*show*|*verify*|*pushed*|*diff*
 	The signed baseline and its append-only trust chain.
 
 	*init* runs a scan and signs the first baseline -- but refuses while any
@@ -52,12 +70,14 @@ spellings are accepted, as is _-flag=value_.
 	database mid-transaction produces spurious findings, and here they would
 	be signed.
 
-	*status* prints the chain, the unpushed tail and what was not checked.
+	*status* prints the chain, the unpushed tail and what was not checked;
+	*show* is the same command under the name the specification uses.
 	*verify* verifies the chain against the last confirmed push and exits *3*
 	when no anchor exists, because truncation is then unchecked. *pushed*
 	*-remote* _url_ records that the chain has been pushed; it runs no *git*
 	and holds no credentials. *diff* classifies drift against the baseline
-	into corroborated, adjudicated, unexplained and log-coverage-gap.
+	into corroborated, adjudicated, unexplained and log-coverage-gap, and is
+	also spelled *aurvet diff*.
 
 	Signing needs a key you supply: *-key* _file_ or *-signer* _fingerprint_
 	(an *ssh-agent* key, which is also the FIDO2 route). aurvet generates no
@@ -124,7 +144,8 @@ spellings are accepted, as is _-flag=value_.
 
 	Nothing that failed verification is ever cached, and *-offline-root* is a
 	usage error rather than a silent no-op: an update writes, and INV-5 forbids
-	writing under the examined tree.
+	writing under the examined tree. *-check* reaches the same verdict and
+	writes neither the cache nor the floor.
 
 *review* _dir_|_pkgbase_
 	Analyse one recipe and never build it. Leads with the rule hits and the
@@ -174,10 +195,35 @@ spellings are accepted, as is _-flag=value_.
 
 # FLAGS
 
+*-allow-degraded*
+	*scan* only: proceed unprivileged. The report is stamped *DEGRADED* above
+	the findings, the shortfall is recorded as a *privilege-coverage* coverage
+	gap, and the run therefore cannot exit *0* even when nothing else is
+	missing -- "I could not look everywhere" is the finding. Without it, an
+	unprivileged live *scan* is a refusal (exit *2*) that names both ways
+	forward.
+
+	*-offline-root* is exempt from the refusal and needs no flag. The
+	measurement behind the policy is a property of a live root whose sensitive
+	files belong to uid 0 while the process does not; a mounted or extracted
+	tree is readable to the extent its ownership allows, and an unprivileged
+	scan of a user-owned offline root produces zero permission-denied gaps, so
+	exit *0* stays reachable there and exit *3* keeps its meaning. Passing
+	*-allow-degraded* with *-offline-root* is still honoured, for a mount that
+	does preserve root-only modes.
+
 *-bundle-url* _url_
 	*update* only: the indicator bundle origin to fetch from. The default origin
 	is compiled in; the signature, not the URL, is what makes a bundle
 	trustworthy, so naming another origin is legitimate and deliberate.
+
+*-check*
+	*update* only: report what an update would do and write nothing -- no
+	cached bundle, no advance of the anti-rollback floor. The delegation and
+	the bundle are still fetched, authenticated and judged in full, because a
+	preview that reported less than the real verdict could not be acted on;
+	*internal/bundle* separates deciding from persisting, so this suppresses
+	the two writes and nothing else.
 
 *-expiry-days* _n_
 	*adjudicate* only: how many days the judgement lasts. Default 180, maximum
@@ -215,6 +261,22 @@ spellings are accepted, as is _-flag=value_.
 	inspecting a machine from a rescue environment. Nothing is written under
 	_path_ (INV-5): the report is not persisted and *-since-last* is
 	therefore unavailable in this mode.
+
+*-pkg* _name_
+	*scan* only, repeatable: analyse only the named package. A name the local
+	database does not carry is a *usage error* naming it, never an empty
+	result -- a typo that scanned nothing and exited *0* would be a false
+	clean produced by a keystroke.
+
+	Two consequences are stated in the report above its findings rather than
+	left to be discovered. The whole-system passes -- surface enumeration,
+	correlation and the unowned-setuid sweep -- do *not* run, because the
+	ownership oracle is built from the named packages alone and every other
+	file on the system would read as owned by nobody; and the report is *not*
+	persisted, because a scoped result stored as this host's baseline would
+	make every other finding read as new on the next *-since-last*. Collection
+	is not narrowed either: the same paths are read, so *-pkg* costs what a
+	full scan costs and buys scope rather than speed.
 
 *-protected-remote*
 	*baseline pushed* only: assert that the remote named by *-remote* denies

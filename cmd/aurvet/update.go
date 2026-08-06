@@ -63,6 +63,15 @@ type updateOpts struct {
 	jsonOut     bool
 	baseURL     string
 
+	// check is `update --check` (§14): decide, report, write nothing. It is a
+	// suppression of the two writes and of nothing else -- the delegation and the
+	// bundle are still fetched, authenticated and judged, because a --check that
+	// reported anything less than the real verdict would be a --check nobody could
+	// act on. internal/bundle makes this possible rather than approximate: Verify
+	// performs no I/O and reads no clock, so the deciding half is already separate
+	// from the persisting half.
+	check bool
+
 	// Seams. Their zero values select production behaviour.
 	//
 	// roots overrides bundle.EmbeddedRoots. THIS IS THE MARKED SEAM for the
@@ -183,15 +192,21 @@ func runUpdate(opts updateOpts, stdout, stderr io.Writer) int {
 	// the cache is untrusted storage, but writing something we have just judged
 	// hostile into it would turn every later run into a re-refusal and hide the
 	// last artefact that did verify.
+	//
+	// Under --check neither write happens. What WOULD have happened is recorded
+	// instead, so the report can state it: "nothing was written" and "there was
+	// nothing to write" are different answers, and an operator deciding whether to
+	// run the real update needs the first one to be distinguishable.
+	wouldStore, wouldAdvance := st.State.UsableIndicators(), st.FloorAdvances
 	stored := false
-	if st.State.UsableIndicators() {
+	if wouldStore && !opts.check {
 		if err := bundle.OpenCache(cacheDir).Store(arts); err != nil {
 			return refuseUpdate(stderr, "the verified bundle could not be cached: %v", err)
 		}
 		stored = true
 	}
 	floorSaved := false
-	if st.FloorAdvances {
+	if st.FloorAdvances && !opts.check {
 		if err := fs.Save(st.NextFloor); err != nil {
 			fmt.Fprintln(stderr, "aurvet: the bundle verified, but this host has no record that it "+
 				"did, so an older bundle would not be recognised as a replay on the next run.")
@@ -200,10 +215,14 @@ func runUpdate(opts updateOpts, stdout, stderr io.Writer) int {
 		floorSaved = true
 	}
 
-	if opts.jsonOut {
-		return jsonOr(stdout, stderr, updateDoc(st, base, cacheDir, fs.Path(), stored, floorSaved, gaps))
+	outcome := updateOutcome{
+		stored: stored, floorSaved: floorSaved, softSigs: gaps,
+		check: opts.check, wouldStore: wouldStore, wouldAdvance: wouldAdvance,
 	}
-	writeUpdateReport(stdout, stderr, st, base, cacheDir, stored, floorSaved, gaps)
+	if opts.jsonOut {
+		return jsonOr(stdout, stderr, updateDoc(st, base, cacheDir, fs.Path(), outcome))
+	}
+	writeUpdateReport(stdout, stderr, st, base, cacheDir, outcome)
 	return updateExit(st, gaps)
 }
 
@@ -309,8 +328,22 @@ func bundleCacheDir(euid int) string {
 
 // -- output -------------------------------------------------------------------
 
-func writeUpdateReport(stdout, stderr io.Writer, st bundle.Status, base, cacheDir string,
-	stored, floorSaved bool, softSigs int) {
+// updateOutcome is what this run did to durable state, and -- under --check --
+// what it would have done. It is a struct because the two halves must travel
+// together: a report that printed "cached" without saying whether the write
+// happened is the report a --check would be misread from.
+type updateOutcome struct {
+	stored     bool
+	floorSaved bool
+	softSigs   int
+
+	check        bool
+	wouldStore   bool
+	wouldAdvance bool
+}
+
+func writeUpdateReport(stdout, stderr io.Writer, st bundle.Status, base, cacheDir string, o updateOutcome) {
+	stored, floorSaved, softSigs := o.stored, o.floorSaved, o.softSigs
 
 	// The refusal goes to stderr and leads, because it is the one line that
 	// invalidates everything else the run might say.
@@ -339,6 +372,25 @@ func writeUpdateReport(stdout, stderr io.Writer, st bundle.Status, base, cacheDi
 	fmt.Fprintf(stdout, "  root set:    generation %d, %s\n", st.RootGeneration,
 		strings.Join(st.RootFingerprints, ", "))
 	switch {
+	case o.check:
+		// The --check lines say what WOULD happen, and say which run they came
+		// from: an output that read like a real update would have an operator
+		// believing the cache was current.
+		fmt.Fprintf(stdout, "  cached:      nothing was written to %s (--check)\n", cacheDir)
+		if o.wouldStore {
+			fmt.Fprintln(stdout, "  would cache: yes -- a real `aurvet update` would store these "+
+				"authenticated bytes")
+		} else {
+			fmt.Fprintln(stdout, "  would cache: no -- these bytes are not usable, so a real "+
+				"`aurvet update` would store nothing either")
+		}
+		if o.wouldAdvance {
+			fmt.Fprintln(stdout, "  would floor: yes -- a real `aurvet update` would advance the "+
+				"anti-rollback floor to this bundle")
+		} else {
+			fmt.Fprintln(stdout, "  would floor: no -- the anti-rollback floor already stands at or "+
+				"above this bundle")
+		}
 	case stored:
 		fmt.Fprintf(stdout, "  cached:      %s\n", cacheDir)
 	default:
@@ -362,8 +414,8 @@ func writeUpdateReport(stdout, stderr io.Writer, st bundle.Status, base, cacheDi
 	fmt.Fprintf(stdout, "\nlimits: %s\n", st.Limits)
 }
 
-func updateDoc(st bundle.Status, base, cacheDir, floorPath string,
-	stored, floorSaved bool, softSigs int) map[string]any {
+func updateDoc(st bundle.Status, base, cacheDir, floorPath string, o updateOutcome) map[string]any {
+	stored, floorSaved, softSigs := o.stored, o.floorSaved, o.softSigs
 
 	gaps := make([]map[string]string, 0, len(st.Gaps))
 	for _, g := range st.Gaps {
@@ -376,23 +428,29 @@ func updateDoc(st bundle.Status, base, cacheDir, floorPath string,
 		// the two: an active bundle can still carry coverage statements -- a
 		// software root key, an inert indicator, a dropped count -- and each of
 		// those is a reason this run may not be read as complete.
-		"coverage_complete":                st.State.CoverageComplete(),
-		"reports_clean":                    st.State.CoverageComplete() && len(st.Gaps) == 0 && softSigs == 0,
-		"refusal":                          st.Refusal,
-		"upgrade_message":                  st.UpgradeMessage,
-		"origin":                           base,
-		"bundle_version":                   st.BundleVersion,
-		"digest":                           st.Digest,
-		"indicators_active":                st.Coverage.Active,
-		"indicators_inert":                 st.Coverage.Inert,
-		"delegation_serial":                st.DelegationSerial,
-		"delegation_expiry":                st.DelegationExpiry,
-		"root_generation":                  st.RootGeneration,
-		"root_fingerprints":                st.RootFingerprints,
-		"cache_dir":                        cacheDir,
-		"cached":                           stored,
-		"floor":                            floorPath,
+		"coverage_complete": st.State.CoverageComplete(),
+		"reports_clean":     st.State.CoverageComplete() && len(st.Gaps) == 0 && softSigs == 0,
+		"refusal":           st.Refusal,
+		"upgrade_message":   st.UpgradeMessage,
+		"origin":            base,
+		"bundle_version":    st.BundleVersion,
+		"digest":            st.Digest,
+		"indicators_active": st.Coverage.Active,
+		"indicators_inert":  st.Coverage.Inert,
+		"delegation_serial": st.DelegationSerial,
+		"delegation_expiry": st.DelegationExpiry,
+		"root_generation":   st.RootGeneration,
+		"root_fingerprints": st.RootFingerprints,
+		"cache_dir":         cacheDir,
+		"cached":            stored,
+		"floor":             floorPath,
+		// floor_advanced and cached are what HAPPENED; would_* are what a real
+		// update would do. A caller automating `--check` reads the second pair and
+		// must not have to infer it from the first.
 		"floor_advanced":                   floorSaved,
+		"check_only":                       o.check,
+		"would_cache":                      o.wouldStore,
+		"would_advance_floor":              o.wouldAdvance,
 		"optional_root_signatures_missing": softSigs,
 		"gaps":                             gaps,
 		"limits":                           st.Limits,

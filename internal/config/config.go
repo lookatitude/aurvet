@@ -6,6 +6,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -78,6 +79,32 @@ func Resolve(root string, euid int) (Config, error) {
 	if root == "" {
 		root = "/"
 	}
+
+	// The root is made ABSOLUTE here, and here only.
+	//
+	// internal/collect refuses a relative Root outright, and it is right to: a
+	// collector that resolved one would be resolving against whatever cwd its
+	// caller happened to have, which is the ambient-path dependency INV-4 exists
+	// to forbid, and a privileged process trusting whoever set its cwd.
+	//
+	// But `--offline-root ./suspect` is an ordinary thing to type, and refusing it
+	// buys nothing: the operator's own shell supplied the path on the operator's
+	// own command line. Resolving it in ONE place, before any privileged read and
+	// before any consumer sees the Config, is the difference that matters -- every
+	// downstream package then receives the same absolute root and none of them
+	// resolves anything.
+	//
+	// This defect was live and hidden: a relative --offline-root reached collect,
+	// was refused there, and the scan reported "the local package database could
+	// not be listed" -- a message about the database when the problem was the
+	// path. It was invisible to the whole suite because every test builds its root
+	// with t.TempDir(), which is already absolute.
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	} else {
+		return Config{}, fmt.Errorf("resolving root %q: %w", root, err)
+	}
+	root = filepath.Clean(root)
 
 	state, source := resolveStateDir(root, euid)
 
