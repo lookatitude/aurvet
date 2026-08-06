@@ -3,21 +3,39 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/aur"
+	"github.com/lookatitude/aurvet/internal/baseline"
 	"github.com/lookatitude/aurvet/internal/buildinfo"
 	"github.com/lookatitude/aurvet/internal/check"
+	"github.com/lookatitude/aurvet/internal/collect"
 	"github.com/lookatitude/aurvet/internal/config"
+	"github.com/lookatitude/aurvet/internal/correlate"
 	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/fsx"
+	"github.com/lookatitude/aurvet/internal/hook"
+	"github.com/lookatitude/aurvet/internal/mtree"
+	"github.com/lookatitude/aurvet/internal/own"
+	"github.com/lookatitude/aurvet/internal/privdrop"
 	"github.com/lookatitude/aurvet/internal/report"
+	"github.com/lookatitude/aurvet/internal/safe"
+	"github.com/lookatitude/aurvet/internal/surfaces"
 )
 
 // Exit codes are contractual (spec §14). They are the machine-readable result
@@ -46,6 +64,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"list only findings new since the previous scan; the exit code still reflects the full result")
 	minSeverity := fs.String("min-severity", "",
 		"reporting floor: info, suspicious, critical (default from config)")
+	// The verification tier. It selects how much work the scan DOES; it is never
+	// an assertion about what it did. What a run reports is derived from the work
+	// that actually happened -- see fullScan.
+	tier := fs.String("tier", "",
+		"verification tier: meta, triage, full (default), paranoid -- how much of each file is examined")
 	// review/install lead with rule hits and a diff against the last approved
 	// recipe. The full text is available on request, because a gate that prints
 	// a 400-line PKGBUILD by default teaches its operator to scroll past it.
@@ -102,6 +125,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return exitUsage
 		}
 	}
+	// The tier, on the same terms and for the same reason. check.ParseTier
+	// refuses an unknown name rather than defaulting to one: a typo in a systemd
+	// unit or a cron line must not quietly downgrade verification, and it must
+	// not do so on `doctor` either -- a wrapper that smoke-tests its flags
+	// against a cheap subcommand would otherwise pass with a tier `scan` rejects.
+	if _, err := check.ParseTier(*tier); err != nil {
+		fmt.Fprintf(stderr, "aurvet: %v\n", err)
+		return exitUsage
+	}
 
 	cmd, cmdArgs := operands[0], operands[1:]
 
@@ -148,6 +180,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			jsonOut:     *jsonOut,
 			sinceLast:   *sinceLast,
 			minSeverity: *minSeverity,
+			tier:        *tier,
 		}, stdout, stderr)
 
 	// snapshot captures provenance for ONE pkgbase. Not a package name, and not
@@ -207,6 +240,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			signerFP:        *signerFP,
 			remote:          *remote,
 			protectedRemote: *protectedRemote,
+			tier:            *tier,
 			args:            cmdArgs,
 		}, stdout, stderr)
 
@@ -215,7 +249,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "usage: aurvet explain <fingerprint>")
 			return exitUsage
 		}
-		return runExplain(*offlineRoot, *noNet, cmdArgs[0], stdout, stderr)
+		return runExplain(*offlineRoot, *noNet, *tier, cmdArgs[0], stdout, stderr)
 
 	default:
 		fmt.Fprintf(stderr, "aurvet: unknown command %q\n", cmd)
@@ -234,9 +268,22 @@ type scanOpts struct {
 	sinceLast   bool
 	minSeverity string
 
+	// tier is the verification tier ASKED FOR, as the flag spelled it. It is a
+	// string rather than a check.Tier so that the ZERO VALUE is the default tier
+	// and not TierMeta: a caller that forgot the field would otherwise silently
+	// run the shallowest scan there is, which is the one failure mode this
+	// lane's flag exists to prevent. What the scan REPORTS is what it executed,
+	// which is a different value and lives on scanRun.
+	tier string
+
 	// stateDir overrides where reports are persisted. "" means "decide from
 	// config", which is what run() always passes.
 	stateDir string
+
+	// euid overrides the effective uid the privilege staging decides from. nil
+	// means "ask the kernel", which is what run() always passes; a test uses it
+	// to reach the privileged path without being root.
+	euid *int
 	// cl is the aur.Client seam sweep already documents. nil means "build the
 	// real HTTP client".
 	cl aur.Client
@@ -297,11 +344,14 @@ func scanStateDir(cfg config.Config, opts scanOpts, euid int) (string, string) {
 	return cfg.StateDir, ""
 }
 
-// runScan resolves config, runs the provenance sweep, persists the result,
-// renders the report and returns report.ExitCode(verdict, floor) -- and nothing
-// else -- on the success path (spec §14).
+// runScan resolves config, runs the full scan, persists the result, renders the
+// report and returns report.ExitCode(verdict, floor) -- and nothing else -- on
+// the success path (spec §14).
 func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 	euid := os.Geteuid()
+	if opts.euid != nil {
+		euid = *opts.euid
+	}
 	cfg, err := config.Resolve(opts.offlineRoot, euid)
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
@@ -318,11 +368,25 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	res, summary, err := sweep(context.Background(), cfg, opts.noNet, opts.cl)
+	want, err := check.ParseTier(opts.tier)
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
 		return exitUsage
 	}
+
+	run, err := fullScan(context.Background(), pipeline{
+		cfg: cfg, tier: want, noNet: opts.noNet, cl: opts.cl, euid: euid,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "aurvet: %v\n", err)
+		// A scan that could not be staged never ran, so it covered nothing:
+		// that is exit 3, not "your command line was wrong".
+		if errors.Is(err, errPrivilegeStaging) {
+			return exitIncomplete
+		}
+		return exitUsage
+	}
+	res, summary := run.Result, run.Summary
 
 	// ORDERING IS LOAD-BEARING. Persist the FULL result here, before the
 	// --since-last block below derives anything from it, and never move this
@@ -370,6 +434,21 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 		}
 		writeReplicationBanner(w, scanReplicationStatus(opts.offlineRoot, opts.noNet, stateDir))
 	}
+
+	// The tier, before the findings and unconditionally: every verdict below is
+	// qualified by it, and a scan that degraded says so here rather than leaving
+	// the reader to assume the flag was honoured. After the replication banner,
+	// which stays first for the reason its own comment gives. Stderr under -json,
+	// so a caller parsing stdout still gets JSON and nothing else.
+	tierOut := stdout
+	if opts.jsonOut {
+		tierOut = stderr
+	}
+	fmt.Fprintln(tierOut, run.TierLine())
+	// The wall time on stderr, never in the report: a scan of a whole system at
+	// tier full reads tens of gigabytes, and an operator deciding whether to run
+	// it hourly needs the number.
+	fmt.Fprintf(stderr, "aurvet: scan completed in %s\n", run.Elapsed.Round(time.Millisecond))
 
 	view := report.FullView(res)
 	if opts.sinceLast {
@@ -421,18 +500,29 @@ func runScan(opts scanOpts, stdout, stderr io.Writer) int {
 // one finding. A successful explain always returns exitClean: it is a query
 // against the sweep's findings, not a verdict on the sweep itself, so it must
 // not be "fixed" later to return the scan's own exit code.
-func runExplain(offlineRoot string, noNet bool, fingerprint string, stdout, stderr io.Writer) int {
-	cfg, err := config.Resolve(offlineRoot, os.Geteuid())
+func runExplain(offlineRoot string, noNet bool, tier, fingerprint string, stdout, stderr io.Writer) int {
+	euid := os.Geteuid()
+	cfg, err := config.Resolve(offlineRoot, euid)
+	if err != nil {
+		fmt.Fprintf(stderr, "aurvet: %v\n", err)
+		return exitUsage
+	}
+	want, err := check.ParseTier(tier)
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
 		return exitUsage
 	}
 
-	res, _, err := sweep(context.Background(), cfg, noNet, nil)
+	// The SAME scan, deliberately: explain must be able to resolve the
+	// fingerprint of any finding scan produced, and a cheaper re-run here would
+	// make the integrity and correlation findings unexplainable -- the tool would
+	// print a finding and then deny knowing it.
+	run, err := fullScan(context.Background(), pipeline{cfg: cfg, tier: want, noNet: noNet, euid: euid})
 	if err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
 		return exitUsage
 	}
+	res := run.Result
 
 	if err := report.Explain(stdout, res, fingerprint); err != nil {
 		fmt.Fprintf(stderr, "aurvet: %v\n", err)
@@ -452,10 +542,41 @@ func runExplain(offlineRoot string, noNet bool, fingerprint string, stdout, stde
 // sweep hardcoded aur.NewHTTP with no way to inject aur.Fake, which is why two
 // exit-0 criticals (report-sec findings 1 and 4) survived task 9's own suite.
 func sweep(ctx context.Context, cfg config.Config, noNet bool, cl aur.Client) (finding.Result, report.Summary, error) {
-	pkgs, localGaps, err := alpm.LoadLocalDB(cfg.DBPath)
+	d, err := loadDBs(cfg)
 	if err != nil {
 		return finding.Result{}, report.Summary{}, err
 	}
+	res, summary := sweepWith(ctx, cfg, d, noNet, cl)
+	return res, summary, nil
+}
+
+// dbs is the two databases every analyser in a scan needs, loaded once.
+//
+// It exists because the full pipeline needs the PARSED package set -- for the
+// ownership oracle, the derived exemptions and correlation's attribution -- and
+// re-reading a 59 MB local database per analyser would spend a second of I/O to
+// produce a second copy of data the first read already had, with the two copies
+// able to disagree if the database changes underneath.
+type dbs struct {
+	pkgs      []alpm.Package
+	syncNames map[string]bool
+
+	// syncGaps are the unreadable sync databases, in the shape
+	// check.SyncCoverageGaps wants; gaps are the load's own coverage gaps.
+	syncGaps []string
+	gaps     []finding.Gap
+
+	dbPath string
+}
+
+// loadDBs reads the local and sync databases and states what it could not read.
+func loadDBs(cfg config.Config) (dbs, error) {
+	d := dbs{dbPath: cfg.DBPath}
+	pkgs, localGaps, err := alpm.LoadLocalDB(cfg.DBPath)
+	if err != nil {
+		return dbs{}, err
+	}
+	d.pkgs = pkgs
 
 	var extraGaps []finding.Gap
 	for _, g := range localGaps {
@@ -477,8 +598,9 @@ func sweep(ctx context.Context, cfg config.Config, noNet bool, cl aur.Client) (f
 
 	syncNames, syncGaps, err := alpm.LoadSyncNames(cfg.SyncPath)
 	if err != nil {
-		return finding.Result{}, report.Summary{}, err
+		return dbs{}, err
 	}
+	d.syncNames, d.syncGaps = syncNames, syncGaps
 	if len(syncNames) == 0 {
 		// Foreignness is !syncNames[name], so an empty oracle silently
 		// reclassifies every installed package as foreign and reports it as
@@ -494,14 +616,20 @@ func sweep(ctx context.Context, cfg config.Config, noNet bool, cl aur.Client) (f
 				"treated as foreign, so every foreignness verdict in this run is unreliable",
 		})
 	}
+	d.gaps = extraGaps
+	return d, nil
+}
 
+// sweepWith is sweep's analysis half, over databases the caller already loaded.
+func sweepWith(ctx context.Context, cfg config.Config, d dbs, noNet bool, cl aur.Client) (finding.Result, report.Summary) {
 	network := cfg.Network && !noNet
 	if network && cl == nil {
 		cl = aur.NewHTTP("https://aur.archlinux.org", &http.Client{Timeout: 20 * time.Second})
 	}
 
-	res := check.Provenance(ctx, pkgs, syncNames, syncGaps, cl, network)
-	res.Gaps = append(res.Gaps, extraGaps...)
+	pkgs, syncNames := d.pkgs, d.syncNames
+	res := check.Provenance(ctx, pkgs, syncNames, d.syncGaps, cl, network)
+	res.Gaps = append(res.Gaps, d.gaps...)
 
 	if !network {
 		// P1-A success criterion 4: --no-network must never exit 0.
@@ -523,5 +651,557 @@ func sweep(ctx context.Context, cfg config.Config, noNet bool, cl aur.Client) (f
 		}
 	}
 
-	return res, report.Summary{Total: len(pkgs), Foreign: foreign}, nil
+	return res, report.Summary{Total: len(pkgs), Foreign: foreign}
+}
+
+// ---------------------------------------------------------------------------
+// The full scan
+//
+// Four analysers run here, and merging them is where the invariants are easiest
+// to lose:
+//
+//   - provenance (P1-A): the package database and the AUR.
+//   - integrity (P1-B): the mtree digests, verified against file contents.
+//   - surfaces and correlation (P1-C): units, enablement links, hooks, the
+//     remaining execution surfaces, and the clusters they form.
+//
+// Their gaps are merged, so exit 3 outranks exit 1 across all of them (INV-3),
+// and no analyser's Limits text is rewritten on the way through (INV-6): this
+// code appends findings and never edits one.
+//
+// WHAT THIS PIPELINE DOES NOT DO, stated because the omissions are real:
+//
+//   - It does not walk the whole filesystem. The walk collect performs is scoped
+//     to the local database, because content verification is Tier.Verify's job
+//     over the paths an mtree RECORDS, and a second full-tree walk would read
+//     every file twice. The consequence is that check.UnownedSUID has no input
+//     and is not wired: a setuid file owned by no package is not reported by this
+//     build. That is a missing check, not a silent pass -- it is named here and
+//     in the handoff rather than papered over with a gap that would block every
+//     baseline on every machine.
+//   - It does not read pacman.log. Correlation's temporal key therefore rests on
+//     mtree time= against %INSTALLDATE% only; `baseline init` supplies the
+//     transaction times as well, so its correlation is strictly stronger than
+//     `scan`'s on the same machine.
+// ---------------------------------------------------------------------------
+
+// errPrivilegeStaging reports that the staged-privilege model could not be
+// established. It is distinguished from every other scan failure because the
+// exit code differs: a scan that refused to run covered nothing (exit 3), which
+// is not the same statement as "your invocation was wrong" (exit 2).
+var errPrivilegeStaging = errors.New("privileges could not be staged for the scan")
+
+// privReduceToRead and privDropAll are seams over internal/privdrop. Production
+// leaves them alone; the ordering test replaces them, because the real calls
+// cannot be exercised without root and a test that asserted only "the call
+// exists" would not notice a reduction that happened after the first read.
+var (
+	privReduceToRead = privdrop.ReduceToRead
+	privDropAll      = privdrop.DropAll
+)
+
+// beforeVerifyForTest runs immediately before each package's contents are read.
+// Production leaves it nil; the ordering test uses it to place the reads in
+// sequence against the privilege transitions.
+var beforeVerifyForTest func()
+
+// stagePrivilege reduces the process to CAP_DAC_READ_SEARCH before the first
+// read and returns the function that destroys what is left of its privilege
+// afterwards.
+//
+// Unprivileged it does NOTHING, deliberately: there is nothing to reduce, and an
+// unprivileged scan does not silently do less either -- every read it is refused
+// becomes a coverage gap (INV-9), which is what makes `baseline init`'s
+// unprivileged refusal a true statement rather than a decorative one.
+func stagePrivilege(euid int) (func() error, error) {
+	if euid != 0 {
+		return func() error { return nil }, nil
+	}
+	if err := privReduceToRead(); err != nil {
+		return nil, fmt.Errorf("%w: %v", errPrivilegeStaging, err)
+	}
+	return privDropAll, nil
+}
+
+// pipeline is one full scan's whole input. It is a struct because the fields are
+// what INV-4 requires: a scan is a pure function of (root, config), and
+// everything ambient it would otherwise reach for is named here.
+type pipeline struct {
+	cfg   config.Config
+	tier  check.Tier
+	noNet bool
+	cl    aur.Client
+	euid  int
+
+	// txs are pacman.log transaction times for correlation's temporal key. nil
+	// means the log was not read, which weakens attribution and is never a
+	// finding.
+	txs []correlate.Transaction
+
+	// inventory asks for the surfaces inventory a signed baseline commits to. It
+	// costs a second pass over the unit and hook directories, so `scan`, which
+	// has no use for it, does not pay.
+	inventory bool
+}
+
+// scanRun is what one full scan produced.
+type scanRun struct {
+	Result  finding.Result
+	Summary report.Summary
+
+	// Tier is the tier the scan ACTUALLY EXECUTED, derived from whether contents
+	// were read at all. Requested is what was asked for. They differ when a scan
+	// degrades, and the difference is a gap rather than a relabelling: there is
+	// no way for a flag to make a shallower scan report as a deeper one.
+	Tier      check.Tier
+	Requested check.Tier
+
+	// Packages and Surfaces are the evidence a baseline commits to. Both are
+	// empty unless pipeline.inventory asked for them.
+	Packages []baseline.PackageInput
+	Observed []baseline.ObservedPackage
+	Surfaces []baseline.SurfaceInput
+
+	// Hashed and HashedBytes are what verification actually read, so a report can
+	// state coverage as a measured quantity rather than as an intention.
+	// MetadataOnly counts the paths whose verdict rests on stat alone, which is
+	// what distinguishes "nothing needed hashing" from "nothing was hashed".
+	Hashed       int
+	HashedBytes  int64
+	MetadataOnly int
+	Verified     int
+	Elapsed      time.Duration
+}
+
+// TierLine is the one-line statement of what this run actually did. A degraded
+// run says so on the same line, because the reader who needs that fact is
+// reading this line and not the gap list.
+//
+// It carries no timing, deliberately: this line is part of the report, and two
+// scans of the same unchanged root must produce the same report. The wall time is
+// operational and goes to stderr.
+func (r scanRun) TierLine() string {
+	s := fmt.Sprintf("scan ran at tier %s: %d package(s) verified, %d path(s) hashed (%.1f MiB)",
+		r.Tier, r.Verified, r.Hashed, float64(r.HashedBytes)/(1<<20))
+	if r.Tier != r.Requested {
+		s += fmt.Sprintf("\n  ! tier %s was requested and NOT achieved; the difference is a coverage gap, not a relabelling",
+			r.Requested)
+	}
+	return s
+}
+
+// fullScan runs every analyser over one root and merges what they found.
+//
+// The order is not arbitrary. Privilege is staged before the first read and
+// destroyed after the last one; the database is buffered by internal/collect
+// while the capability is held and PARSED afterwards, so a parser bug in the
+// mtree reader is an unprivileged bug (spec §11.1).
+func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
+	start := time.Now()
+	out := scanRun{Requested: p.tier, Tier: p.tier}
+
+	dropAll, err := stagePrivilege(p.euid)
+	if err != nil {
+		return scanRun{}, err
+	}
+
+	d, err := loadDBs(p.cfg)
+	if err != nil {
+		// The database could not be read at all: nothing below has an oracle to
+		// work from, and a scan of a system whose package set is unknown would be
+		// a scan with no notion of what is supposed to be there.
+		_ = dropAll()
+		return scanRun{}, err
+	}
+	res, summary := sweepWith(ctx, p.cfg, d, p.noNet, p.cl)
+	out.Summary = summary
+
+	root, rerr := os.OpenRoot(p.cfg.Root)
+	if rerr != nil {
+		// No confined root means no confined I/O, and there is no unconfined
+		// fallback: the whole point of internal/fsx is that a path is resolved
+		// once. The scan reports the tier it achieved -- meta, having hashed
+		// nothing -- and gaps the difference.
+		out.Tier = check.TierMeta
+		res.Gaps = append(res.Gaps, finding.Gap{
+			RuleID: "integrity-coverage", Subject: p.cfg.Root,
+			Reason: fmt.Sprintf("the scanned root could not be opened (%v), so no file contents were "+
+				"verified and no persistence surface was examined; this run reached tier %s",
+				rerr, check.TierMeta),
+		})
+		out.Result = res
+		out.Elapsed = time.Since(start)
+		finishPrivilege(&out.Result, dropAll)
+		return out, nil
+	}
+	defer root.Close()
+
+	// Phase 1: buffer the database bytes through confined opens, while the read
+	// capability is held. Nothing here parses.
+	raw, cerr := collect.Collect(collectConfig(p.cfg))
+	if cerr != nil {
+		res.Gaps = append(res.Gaps, finding.Gap{
+			RuleID: "collect-db", Subject: p.cfg.DBPath,
+			Reason: fmt.Sprintf("the collector refused this configuration (%v); no package metadata was "+
+				"buffered, so nothing was verified", cerr),
+		})
+	}
+	res.Gaps = append(res.Gaps, raw.Gaps...)
+
+	owners := own.IndexIn(root, d.pkgs)
+
+	// The exemption set, derived from the hooks pacman would actually run plus
+	// %BACKUP%. ScanHooks' own findings and gaps are NOT taken here: correlate
+	// runs the same scan below and reports them once. Its report is reused for
+	// the inventory for the same reason.
+	hookRep, _ := surfaces.ScanHooks(root, owners)
+	active := make([]hook.Hook, 0, len(hookRep.Hooks))
+	for _, h := range hookRep.ActiveHooks() {
+		if h.Parsed {
+			active = append(active, h.Hook)
+		}
+	}
+	ex := check.DeriveExemptions(active, d.pkgs)
+
+	// Phase 2: parse, verify, compare. Parsing happens here, on buffered bytes,
+	// after the privileged buffering is over.
+	ires := verifyPackages(p.tier, root, raw.Packages, ex, &out)
+	res.Findings = append(res.Findings, ires.Findings...)
+	res.Gaps = append(res.Gaps, ires.Gaps...)
+
+	// A tier is a claim about work, so it is derived from the work.
+	//
+	// Two cases degrade, and the distinction is load-bearing: no package was
+	// verified at all (an unreadable or unparseable database), or paths were
+	// examined by metadata alone. A run that hashed nothing because every path it
+	// found was exempt, absent or a symlink did execute at the tier it was asked
+	// for -- there was simply nothing there to hash -- and calling that meta would
+	// report a degradation that did not happen.
+	if p.tier != check.TierMeta && out.Hashed == 0 && (out.Verified == 0 || out.MetadataOnly > 0) {
+		out.Tier = check.TierMeta
+		res.Gaps = append(res.Gaps, finding.Gap{
+			RuleID: "integrity-coverage", Subject: "files",
+			Reason: fmt.Sprintf("tier %s was requested but no file contents were verified in this run, "+
+				"so it reached tier %s: every integrity verdict here rests on metadata that anyone who "+
+				"can write a file can also set", p.tier, check.TierMeta),
+		})
+	}
+
+	// Surfaces and correlation. Correlate returns the surface checks' own
+	// findings unchanged plus the clusters they earn; nothing here re-rates them.
+	cres := correlate.Correlate(root, correlate.Config{
+		Owners: owners, Pkgs: d.pkgs, SyncNames: d.syncNames,
+		Transactions: p.txs, DBPath: dbRel(p.cfg),
+	})
+	res.Findings = append(res.Findings, cres.Findings...)
+	res.Gaps = append(res.Gaps, cres.Gaps...)
+
+	if p.inventory {
+		out.Packages, out.Observed = packageEvidence(raw, d)
+		out.Surfaces = surfaceInventory(root, owners, hookRep)
+	}
+
+	res.Gaps = dedupeGaps(res.Gaps)
+	out.Result = res
+	out.Elapsed = time.Since(start)
+	finishPrivilege(&out.Result, dropAll)
+	return out, nil
+}
+
+// finishPrivilege destroys what is left of the process's privilege and records a
+// failure as a coverage gap.
+//
+// A failed drop is not cosmetic: the report is then rendered, and the state
+// directory written, by a process still holding read capability over the whole
+// filesystem. That is not what this build promises, so the run says so and
+// cannot exit 0.
+func finishPrivilege(res *finding.Result, dropAll func() error) {
+	if err := dropAll(); err != nil {
+		res.Gaps = append(res.Gaps, finding.Gap{
+			RuleID: "privdrop", Subject: "process",
+			Reason: fmt.Sprintf("privileges could not be dropped after the scan (%v); everything after "+
+				"the scan ran with more privilege than this build promises", err),
+		})
+	}
+}
+
+// collectConfig is the collector's configuration for a scan.
+//
+// The walk is scoped to the local database on purpose. collect's contract is to
+// hash what it walks, and Tier.Verify hashes what the mtrees RECORD; a full-tree
+// walk here would read every packaged file twice for one answer. See the block
+// comment above for what that costs.
+func collectConfig(cfg config.Config) collect.Config {
+	cc := collect.DefaultConfig(cfg.Root)
+	cc.DBPath = cfg.DBPath
+	cc.Walk = []string{dbRel(cfg)}
+	return cc
+}
+
+// dbRel is the local database's path relative to the scanned root.
+func dbRel(cfg config.Config) string {
+	rel, err := filepath.Rel(cfg.Root, cfg.DBPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		// Outside the root: collect refuses it, and correlate's default is the
+		// only honest answer left.
+		return "var/lib/pacman/local"
+	}
+	return rel
+}
+
+// verifyPackages parses each buffered mtree, verifies the paths it records
+// against the filesystem at the requested tier, and compares the two.
+//
+// The parse is bounded by internal/mtree's own limits, and every package is
+// contained: one crafted mtree costs one coverage gap, not the other 1,409. Each
+// worker goroutine carries its own recover, because a panic in a goroutine
+// cannot be recovered by the goroutine that started it (INV-9).
+func verifyPackages(t check.Tier, root *os.Root, pkgs []collect.Package, ex check.Exemptions, out *scanRun) finding.Result {
+	var (
+		mu  sync.Mutex
+		res finding.Result
+	)
+	// The result is merged whatever happened -- an unparseable mtree yields a gap
+	// and no observations, and dropping it would turn the one package nobody could
+	// verify into silence. Only the COUNT of verified packages is conditional.
+	add := func(r finding.Result, o obsCounts, verified bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		res.Findings = append(res.Findings, r.Findings...)
+		res.Gaps = append(res.Gaps, r.Gaps...)
+		out.Hashed += o.hashed
+		out.HashedBytes += o.bytes
+		out.MetadataOnly += o.metadataOnly
+		if verified {
+			out.Verified++
+		}
+	}
+	gap := func(g finding.Gap) {
+		mu.Lock()
+		defer mu.Unlock()
+		res.Gaps = append(res.Gaps, g)
+	}
+
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	workers := min(max(runtime.NumCPU(), 1), len(pkgs))
+	for w := range workers {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			// The recover that keeps the process alive has to be here, in the
+			// goroutine's own top-level body.
+			err, _ := safe.Run(fmt.Sprintf("verify-worker-%d", worker), func() error {
+				for {
+					i := int(next.Add(1)) - 1
+					if i >= len(pkgs) {
+						return nil
+					}
+					pkg := pkgs[i]
+					name := pkgNameFromDir(pkg.Dir)
+					perr, panicked := safe.Run(pkg.Dir, func() error {
+						add(verifyOne(t, root, name, pkg, ex))
+						return nil
+					})
+					if perr != nil {
+						reason := fmt.Sprintf("%v; its recorded paths were not verified", perr)
+						if panicked {
+							reason = fmt.Sprintf("%v; the failure is in aurvet, not necessarily in the "+
+								"package, and its recorded paths were not verified", perr)
+						}
+						gap(finding.Gap{RuleID: "integrity-coverage", Subject: name, Reason: reason})
+					}
+				}
+			})
+			if err != nil {
+				gap(finding.Gap{
+					RuleID: "integrity-coverage", Subject: fmt.Sprintf("verify-worker-%d", worker),
+					Reason: fmt.Sprintf("%v; the packages it had not yet reached were not verified", err),
+				})
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	sort.SliceStable(res.Findings, func(i, j int) bool { return res.Findings[i].Subject < res.Findings[j].Subject })
+	sort.SliceStable(res.Gaps, func(i, j int) bool { return res.Gaps[i].Subject < res.Gaps[j].Subject })
+	return res
+}
+
+// obsCounts is what one package's observations amounted to, in the terms the
+// achieved tier is derived from.
+type obsCounts struct {
+	hashed       int
+	metadataOnly int
+	bytes        int64
+}
+
+// verifyOne handles one package: parse, observe, compare. The bool reports
+// whether this package was verified at all, so a package that never got past its
+// mtree is not counted as covered.
+func verifyOne(t check.Tier, root *os.Root, name string, pkg collect.Package, ex check.Exemptions) (finding.Result, obsCounts, bool) {
+	if len(pkg.MTree) == 0 {
+		// collect already gapped the read that failed. A second gap for the same
+		// shortfall teaches an operator to skim.
+		return finding.Result{}, obsCounts{}, false
+	}
+	entries, err := mtree.ParseGzip(bytes.NewReader(pkg.MTree))
+	if err != nil {
+		return finding.Result{Gaps: []finding.Gap{{
+			RuleID: "integrity-mtree", Subject: name,
+			Reason: fmt.Sprintf("the package's mtree could not be parsed (%v); none of its recorded "+
+				"paths were verified, so this package is not covered by this run", err),
+		}}}, obsCounts{}, false
+	}
+	if beforeVerifyForTest != nil {
+		beforeVerifyForTest()
+	}
+	obs := t.Verify(root, entries, ex)
+
+	var c obsCounts
+	for _, o := range obs {
+		switch o.Kind {
+		case check.ObsHashed:
+			c.hashed++
+			c.bytes += o.Size
+		case check.ObsMetadataOnly:
+			c.metadataOnly++
+		}
+	}
+	return check.Integrity(name, entries, obs, ex, t), c, true
+}
+
+// pkgNameFromDir recovers a package name from its local-database directory,
+// whose layout is name-version-release. Splitting on the last two hyphens is
+// pacman's own rule; a directory that does not have two is returned unchanged
+// rather than guessed at, because the name is only ever used as a subject.
+func pkgNameFromDir(dir string) string {
+	i := strings.LastIndex(dir, "-")
+	if i <= 0 {
+		return dir
+	}
+	j := strings.LastIndex(dir[:i], "-")
+	if j <= 0 {
+		return dir
+	}
+	return dir[:j]
+}
+
+// packageEvidence is the per-package evidence a baseline commits to: the version,
+// the foreignness verdict, and the digest of the mtree ITSELF.
+//
+// The mtree digest is the one genuinely new capability in this half of the tool.
+// `pacman -Qkk` verifies files against these digests and cannot detect a change
+// to the record it verifies against; a signed baseline over the mtree digests
+// can. The digest is taken from the bytes the collector buffered, so it describes
+// the same read that verification used.
+func packageEvidence(raw collect.Raw, d dbs) ([]baseline.PackageInput, []baseline.ObservedPackage) {
+	byDir := make(map[string]collect.Package, len(raw.Packages))
+	for _, p := range raw.Packages {
+		byDir[p.Dir] = p
+	}
+	var (
+		pins []baseline.PackageInput
+		obs  []baseline.ObservedPackage
+	)
+	for _, p := range d.pkgs {
+		pin := baseline.PackageInput{
+			Name: p.Name, Version: p.Version, Foreign: alpm.IsForeign(p, d.syncNames),
+		}
+		o := baseline.ObservedPackage{Name: p.Name, Version: p.Version, InstallDate: p.InstallDate}
+		cp, ok := byDir[p.Name+"-"+p.Version]
+		switch {
+		case !ok || len(cp.MTree) == 0:
+			pin.MtreeUnread = "the package's mtree was not buffered by the collector"
+			o.MtreeUnread = pin.MtreeUnread
+		default:
+			sum, n, err := baseline.MtreeDigest(bytes.NewReader(cp.MTree))
+			if err != nil {
+				pin.MtreeUnread = fmt.Sprintf("the package's mtree could not be digested: %v", err)
+				o.MtreeUnread = pin.MtreeUnread
+				break
+			}
+			pin.MtreeSHA256, pin.MtreeBytes = baseline.Hex(sum[:]), n
+			o.MtreeSHA256 = pin.MtreeSHA256
+		}
+		pins = append(pins, pin)
+		obs = append(obs, o)
+	}
+	return pins, obs
+}
+
+// surfaceInventory records the execution surfaces a baseline commits to: every
+// hook pacman would read, every unit file, and every enablement link.
+//
+// WHAT IT DOES NOT COVER, and the reason is structural rather than an oversight:
+// internal/surfaces exposes an enumerable inventory for hooks, units and
+// enablement links (HookReport, LoadUnits, WantsSurvey) but not for the remaining
+// surfaces -- ld.so.preload, generator directories, profile.d and autostart are
+// reachable only through Misc's FINDINGS, which are the unowned subset. So those
+// four families appear in a baseline only where a check already had something to
+// say about them, and a baseline diff cannot notice a package-owned generator
+// being replaced except through its package's digest.
+func surfaceInventory(root *os.Root, owners *own.Owners, rep surfaces.HookReport) []baseline.SurfaceInput {
+	var out []baseline.SurfaceInput
+	add := func(kind, rel, pkg string, st own.State) {
+		out = append(out, baseline.SurfaceInput{
+			Kind: kind, Path: "/" + strings.TrimPrefix(rel, "/"), Owner: pkg,
+			State: st.String(), SHA256: surfaceDigest(root, rel),
+		})
+	}
+	for _, h := range rep.Hooks {
+		add("hook", h.Path, h.Pkg, h.State)
+	}
+	units, _ := surfaces.LoadUnits(root, surfaces.DefaultUnitDirs)
+	for _, u := range units {
+		pkg, st, _ := owners.Resolve(u.Path)
+		add("unit", u.Path, pkg, st)
+	}
+	survey, _ := surfaces.SurveyWants(root, owners, surfaces.DefaultUnitDirs)
+	for _, e := range append(append([]surfaces.WantsEntry{}, survey.Subjects...), survey.OwnedTargets...) {
+		add("enablement", e.Path, e.Pkg, e.State)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
+// surfaceDigest is the digest of one surface file, read through the same confined
+// open every other read uses. An empty result means "not established" and is
+// never a claim about content: baseline.Manifest treats an empty digest as absent.
+func surfaceDigest(root *os.Root, rel string) string {
+	f, st, err := fsx.OpenConfined(root, strings.TrimPrefix(rel, "/"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sum, _, err := fsx.Digest(f, st)
+	if err != nil {
+		return ""
+	}
+	return sum
+}
+
+// dedupeGaps collapses gaps that are identical in rule, subject and reason.
+//
+// They arise because two analysers legitimately read the same directory: the
+// hook scan that derives the exemptions and the one correlation runs are the same
+// scan, and a directory neither could list is one shortfall, not two. Only exact
+// triples are collapsed, so a gap that says anything different survives.
+func dedupeGaps(gaps []finding.Gap) []finding.Gap {
+	seen := make(map[[3]string]bool, len(gaps))
+	out := make([]finding.Gap, 0, len(gaps))
+	for _, g := range gaps {
+		k := [3]string{g.RuleID, g.Subject, g.Reason}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, g)
+	}
+	return out
 }

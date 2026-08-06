@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -313,7 +316,15 @@ func writeSyncDB(t *testing.T, syncPath, repo string, pkgs map[string]string) {
 	}
 }
 
-// writeLocalPkg writes one readable local-DB package entry.
+// writeLocalPkg writes one readable local-DB package entry: desc, files, the
+// mtree, and the one file that mtree records, matching.
+//
+// The mtree and the file are not decoration. `aurvet scan` verifies file contents
+// against the recorded digests, so a package directory with no mtree is a coverage
+// gap and a recorded path that is not on disk is a finding -- either of which
+// would change the exit code of every test below for a reason that has nothing to
+// do with what it asserts. dbPath is <root>/var/lib/pacman/local, which is where
+// the root is recovered from.
 func writeLocalPkg(t *testing.T, dbPath, dir, name, base string) string {
 	t.Helper()
 	full := filepath.Join(dbPath, dir)
@@ -324,7 +335,41 @@ func writeLocalPkg(t *testing.T, dbPath, dir, name, base string) string {
 	if err := os.WriteFile(filepath.Join(full, "desc"), []byte(desc), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(full, "files"), []byte("%FILES%\nusr/bin/"+name+"\n\n"), 0o644); err != nil {
+	rel := "usr/bin/" + name
+	if err := os.WriteFile(filepath.Join(full, "files"), []byte("%FILES%\n"+rel+"\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(dbPath))))
+	body := "packaged " + name + "\n"
+	if err := os.MkdirAll(filepath.Join(root, "usr/bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	mt := fmt.Sprintf("#mtree\n/set type=file uid=0 gid=0 mode=755\n./%s time=1700000000.0 size=%d sha256digest=%s\n",
+		rel, len(body), hex.EncodeToString(sum[:]))
+	var gzbuf bytes.Buffer
+	zw := gzip.NewWriter(&gzbuf)
+	if _, err := zw.Write([]byte(mt)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(full, "mtree"), gzbuf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The account list, for the same reason: without it the per-user surface scan
+	// cannot enumerate accounts and reports a coverage gap.
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc/passwd"),
+		[]byte("root:x:0:0::/root:/usr/bin/bash\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return full

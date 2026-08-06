@@ -4,18 +4,15 @@
 //
 // # What is wired here and what is not
 //
-// `baseline init` must stand on a FULL scan (P4 task 7), and this build has no
-// full-scan pipeline in cmd: internal/check's integrity verification is not called
-// from any command, so the deepest scan `aurvet` currently performs is the
-// provenance sweep, which reads no file contents. That is reported as tier "meta",
-// which the bootstrap refusal then rejects -- correctly, and on every machine.
-//
-// This is deliberate and is the honest state of the tree, not a stub: the tier is
-// DERIVED from what the code actually did, and there is no flag to assert a
-// different one. A `--tier full` that only relabelled a metadata scan would be a
-// way to sign a baseline over unverified contents, which is the exact failure the
-// refusal exists to prevent. The seam is baselineOpts.scan, which tests use to
-// exercise the permitted path hermetically.
+// `baseline init` must stand on a FULL scan (P4 task 7). The scan it runs is
+// fullScan in main.go: the provenance sweep, integrity verification against the
+// mtree digests, the persistence surfaces and correlation. The tier recorded in
+// the manifest is the tier that scan EXECUTED, taken from scanRun.Tier, and there
+// is still no flag that can assert a deeper one -- `--tier full` selects work,
+// and a run that hashed nothing reports meta whatever was asked for. A relabelled
+// metadata scan would be a way to sign a baseline over unverified contents, which
+// is the exact failure the refusal exists to prevent. The seam is
+// baselineOpts.scan, which tests use to exercise the permitted path hermetically.
 //
 // # No key is ever generated here
 //
@@ -38,11 +35,11 @@ import (
 	"time"
 
 	"github.com/lookatitude/aurvet/internal/adjudicate"
-	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/baseline"
 	"github.com/lookatitude/aurvet/internal/chain"
 	"github.com/lookatitude/aurvet/internal/check"
 	"github.com/lookatitude/aurvet/internal/config"
+	"github.com/lookatitude/aurvet/internal/correlate"
 	"github.com/lookatitude/aurvet/internal/finding"
 	"github.com/lookatitude/aurvet/internal/pacmanlog"
 	"github.com/lookatitude/aurvet/internal/report"
@@ -81,6 +78,11 @@ type baselineOpts struct {
 	// remote and protectedRemote are `baseline pushed`.
 	remote          string
 	protectedRemote bool
+
+	// tier is the verification tier asked for, as the flag spelled it. The empty
+	// string is the default tier; the tier the manifest RECORDS is the one the
+	// scan executed, which the bootstrap refusal then judges.
+	tier string
 
 	args []string
 
@@ -797,62 +799,52 @@ func runBaselineScan(env baselineEnv, opts baselineOpts) (scanEvidence, error) {
 	if opts.scan != nil {
 		return opts.scan(env)
 	}
-	return liveEvidence(env)
+	tier, err := check.ParseTier(opts.tier)
+	if err != nil {
+		return scanEvidence{}, err
+	}
+	return liveEvidence(env, tier)
 }
 
-// liveEvidence assembles what this build can actually measure.
+// liveEvidence runs the full scan and assembles what the baseline commits to.
 //
-// The tier it reports is check.TierMeta, because nothing here verifies file
-// contents: the provenance sweep reads package metadata and the AUR, and the mtree
-// digests below commit to what pacman recorded rather than to what is on disk. That
-// is exactly what the bootstrap refusal rejects, and relabelling it would be the
-// weakening the refusal exists to prevent.
-func liveEvidence(env baselineEnv) (scanEvidence, error) {
-	ev := scanEvidence{Tier: check.TierMeta.String()}
+// The tier it reports is the tier the scan achieved, not the one requested: a run
+// that verified no contents reports meta and the bootstrap refusal rejects it,
+// which is the behaviour that makes `--tier full` mean something.
+//
+// pacman.log is read HERE rather than inside the pipeline because the baseline
+// needs the log window itself, and its transactions are handed to correlation as
+// the third temporal input. `aurvet scan` does not read the log, so its
+// correlation is weaker than this one's on the same machine -- stated because it
+// means `scan` can be quieter than the scan `baseline init` runs.
+func liveEvidence(env baselineEnv, tier check.Tier) (scanEvidence, error) {
+	var ev scanEvidence
 
-	res, summary, err := sweep(context.Background(), env.cfg, env.noNet, nil)
-	if err != nil {
-		return scanEvidence{}, err
+	lg, logErr := pacmanlog.Read(pacmanlog.Config{Root: env.cfg.Root})
+	var txs []correlate.Transaction
+	if logErr == nil {
+		for _, tx := range lg.Entries {
+			txs = append(txs, correlate.Transaction{Time: tx.Time, Op: tx.Op, Pkg: tx.Pkg})
+		}
 	}
-	ev.Result, ev.Summary = res, summary
 
-	pkgs, dbGaps, err := alpm.LoadLocalDB(env.cfg.DBPath)
+	run, err := fullScan(context.Background(), pipeline{
+		cfg: env.cfg, tier: tier, noNet: env.noNet, euid: env.euid,
+		txs: txs, inventory: true,
+	})
 	if err != nil {
 		return scanEvidence{}, err
 	}
-	for _, g := range dbGaps {
-		ev.Result.Gaps = append(ev.Result.Gaps, finding.Gap{
-			RuleID: "local-db", Subject: g, Reason: "package database entry could not be read",
-		})
-	}
-	syncNames, _, err := alpm.LoadSyncNames(env.cfg.SyncPath)
-	if err != nil {
-		return scanEvidence{}, err
-	}
-	for _, p := range pkgs {
-		pin := baseline.PackageInput{
-			Name: p.Name, Version: p.Version, Foreign: alpm.IsForeign(p, syncNames),
-		}
-		obs := baseline.ObservedPackage{Name: p.Name, Version: p.Version, InstallDate: p.InstallDate}
-		d, n, derr := mtreeDigestFor(env.cfg.DBPath, p)
-		if derr != nil {
-			pin.MtreeUnread = derr.Error()
-			obs.MtreeUnread = derr.Error()
-		} else {
-			pin.MtreeSHA256, pin.MtreeBytes = d, n
-			obs.MtreeSHA256 = d
-		}
-		ev.Packages = append(ev.Packages, pin)
-		ev.Observed = append(ev.Observed, obs)
-	}
+	ev.Tier = run.Tier.String()
+	ev.Result, ev.Summary = run.Result, run.Summary
+	ev.Packages, ev.Observed, ev.Surfaces = run.Packages, run.Observed, run.Surfaces
 
 	// pacman.log: the earliest timestamp is the field that makes later truncation
 	// detectable, so it is read even though nothing else here needs it.
-	lg, err := pacmanlog.Read(pacmanlog.Config{Root: env.cfg.Root})
-	if err != nil {
+	if logErr != nil {
 		ev.Result.Gaps = append(ev.Result.Gaps, finding.Gap{
 			RuleID: pacmanlog.RuleAbsent, Subject: "pacman-log",
-			Reason: fmt.Sprintf("pacman.log could not be read: %v", err),
+			Reason: fmt.Sprintf("pacman.log could not be read: %v", logErr),
 		})
 	} else {
 		ev.Result.Findings = append(ev.Result.Findings, lg.Findings...)
@@ -894,41 +886,10 @@ func liveEvidence(env baselineEnv) (scanEvidence, error) {
 		})
 	}
 
-	// The surfaces inventory is NOT collected here, and that is a blocking gap
-	// rather than an omission: a manifest missing its surfaces inventory would
-	// commit to a system whose execution surfaces were never recorded, and nothing
-	// in the signed document would say so.
-	ev.Result.Gaps = append(ev.Result.Gaps, finding.Gap{
-		RuleID:  "baseline-surfaces-not-collected",
-		Subject: "surfaces",
-		Reason: "no surfaces inventory was collected: internal/surfaces is not wired into any " +
-			"command in this build, so hooks, units, generators, preload and autostart entries " +
-			"would be absent from the signed manifest with nothing in it to say they are missing",
-	})
-	// And the tier, stated as a gap as well as through the refusal, so the reason
-	// survives into any report derived from this evidence.
-	ev.Result.Gaps = append(ev.Result.Gaps, finding.Gap{
-		RuleID:  "integrity-coverage",
-		Subject: "files",
-		Reason: "no file contents were verified: this build performs the provenance sweep only, so " +
-			"the mtree digests recorded here commit to what pacman recorded and not to what is on " +
-			"disk. A baseline must stand on a full-tier scan",
-	})
+	// No wholesale "surfaces were not collected" or "nothing was verified" gap is
+	// added here any more: both are now statements about work that happened, and
+	// the pipeline gaps whatever it could not reach, per subject.
 	return ev, nil
-}
-
-func mtreeDigestFor(dbPath string, p alpm.Package) (string, int64, error) {
-	dir := filepath.Join(dbPath, p.Name+"-"+p.Version)
-	f, err := os.Open(filepath.Join(dir, "mtree"))
-	if err != nil {
-		return "", 0, fmt.Errorf("the package's mtree could not be opened: %v", err)
-	}
-	defer f.Close()
-	d, n, err := baseline.MtreeDigest(f)
-	if err != nil {
-		return "", 0, fmt.Errorf("the package's mtree could not be digested: %v", err)
-	}
-	return baseline.Hex(d[:]), n, nil
 }
 
 func logPaths(r pacmanlog.Result) []string {
