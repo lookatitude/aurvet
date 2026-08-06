@@ -190,11 +190,20 @@ check() {
   # Assert the identity that was injected is the identity recorded above. This
   # is the check that keeps _commit honest: without it a stale value ships a
   # binary that lies about which source built it.
+  #
+  # The FIRST LINE only. `version` also reports the indicator-bundle trust state
+  # (root fingerprints, delegation expiry, cached bundle version) because those
+  # are the facts that decide whether the tool's data can be trusted, and they
+  # belong where a person already looks. Comparing the whole output against a
+  # one-line identity broke this gate the moment that block shipped, and the
+  # failure was needlessly hard to read: want and got were byte-identical on
+  # their own line, with the difference several lines further down.
   local want got
   want="aurvet $pkgver (commit ${_commit:0:12})"
-  got="$(./aurvet version)"
+  got="$(./aurvet version | head -n 1)"
   if [[ "$got" != "$want" ]]; then
-    printf 'version identity mismatch:\n  want: %s\n  got:  %s\n' "$want" "$got" >&2
+    printf 'version identity mismatch (first line of `aurvet version`):\n  want: %s\n  got:  %s\n' \
+      "$want" "$got" >&2
     return 1
   fi
 

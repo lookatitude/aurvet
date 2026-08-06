@@ -124,6 +124,49 @@ func TestVersionSubcommandAdmitsUninjectedBuild(t *testing.T) {
 	}
 }
 
+// TestVersionFirstLineIsTheIdentityAndNothingElse pins the contract the
+// PKGBUILD's check() depends on.
+//
+// That check asserts the injected identity matches the recorded _commit -- it is
+// what keeps a stale _commit from shipping a binary that lies about its source --
+// and it reads the identity off `aurvet version`. When `version` grew the
+// indicator-bundle trust block (P5 task 7), a whole-output comparison against a
+// one-line identity started failing, and it failed in the least helpful way
+// available: `want` and `got` were byte-identical on their own line and the
+// difference was several lines below, so the message read like a contradiction.
+//
+// The gate now compares the first line, and this test is why that is safe.
+// Anything added ABOVE the identity line breaks the release build in a container
+// ten minutes into CI; here it breaks in one second, in the package whose output
+// changed.
+func TestVersionFirstLineIsTheIdentityAndNothingElse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped under -short")
+	}
+	bin := buildBinary(t, ldflagsFor(testVersion, testCommit))
+
+	got := runBinary(t, bin, "version")
+	first := got
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	want := "aurvet " + testVersion + " (commit " + testCommit[:12] + ")"
+	if strings.TrimSpace(first) != want {
+		t.Errorf("first line of `aurvet version` = %q, want %q\n"+
+			"PKGBUILD's check() reads the identity from this line. Anything printed above it "+
+			"breaks the release build; put new output below.", first, want)
+	}
+	// And the same for the -version flag, which prints the same document.
+	got = runBinary(t, bin, "-version")
+	first = got
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	if strings.TrimSpace(first) != want {
+		t.Errorf("first line of `aurvet -version` = %q, want %q", first, want)
+	}
+}
+
 // TestBinaryIsStaticallyLinked asserts no DT_NEEDED and no PT_INTERP, per spec
 // §16. It runs against the INJECTED build deliberately -- see the file comment.
 func TestBinaryIsStaticallyLinked(t *testing.T) {
