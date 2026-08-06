@@ -545,16 +545,18 @@ internal/report         findings, severity, correlation, coverage accounting, JS
       <table>
         <thead><tr><th>Tier</th><th>Scope</th><th>Reference cost</th><th>Default</th></tr></thead>
         <tbody>
-          <tr><td><code>meta</code></td><td>DB/mtree parse, provenance, surfaces; no content hashing</td><td>~0.35 s</td><td>hook use</td></tr>
-          <tr><td><code>triage</code></td><td>meta + stat prefilter, hash only mismatches (322,594 → 678 candidates)</td><td>~0.6 s</td><td>no</td></tr>
-          <tr><td><code>full</code></td><td>meta + hash every owned file (325,466 files, 19.8 GiB)</td><td>1.8 s warm / 32 s cold; 60–120 s without SHA-NI</td><td><strong>yes</strong></td></tr>
-          <tr><td><code>paranoid</code></td><td>full + unowned walk of all watched trees + full SUID sweep</td><td>+~2 s</td><td>on demand</td></tr>
+          <tr><td><code>meta</code></td><td>DB/mtree parse, provenance, surfaces; no content hashing</td><td>1.54 s measured</td><td>on request</td></tr>
+          <tr><td><code>triage</code></td><td>meta + the security-relevant subset, decided in phase 1 from each descriptor's own mode (11,840 of 386,993 recorded paths, 9,222 MiB)</td><td>1.83 s measured</td><td>no</td></tr>
+          <tr><td><code>full</code></td><td>meta + hash every owned file (337,263 paths, 20,497 MiB)</td><td>2.37 s measured warm; cold unmeasured, storage-bound</td><td><strong>yes</strong></td></tr>
+          <tr><td><code>paranoid</code></td><td>full + a metadata sweep of <code>usr, etc, opt, boot, srv</code> minus the collector skip list, + the SUID sweep</td><td>2.61 s measured</td><td>on demand</td></tr>
         </tbody>
       </table>
       </div>
       <div class="callout warn">
         <div class="ico">▲</div>
-        <div><p><strong>mtime is attacker-controllable</strong> (<code>touch -r</code>), so <code>triage</code> is reassurance, not verification. Therefore: <code>full</code> is the default; <code>triage</code> <strong>unconditionally</strong> hashes the security-relevant subset regardless of stat — all AUR-owned files, all SUID/SGID, and everything under the systemd, hook, <code>profile.d</code> and preload paths; its output carries a visible <em>mtime-assisted</em> marker; and it is <strong>never accepted as the basis for <code>baseline init</code></strong>.</p></div>
+        <div><p><strong>mtime is attacker-controllable</strong> (<code>touch -r</code>), so <code>triage</code> is reassurance, not verification. Therefore: <code>full</code> is the default; <code>triage</code> <strong>unconditionally</strong> hashes the security-relevant subset — all SUID/SGID and every executable, plus everything under the systemd, hook, <code>profile.d</code> and preload paths; its output carries a visible marker; and it is <strong>never accepted as the basis for <code>baseline init</code></strong>.</p>
+        <p><strong>Amended against the implementation, and the amendment strengthens the tier.</strong> This section originally described <code>triage</code> as a “stat prefilter” hashing only mismatches, with an <em>mtime-assisted</em> marker. That design is unbuildable under §11.1: the prefilter compares against the mtree's recorded mtime, which requires the mtree <em>parsed</em>, and after the capability drop the process cannot read a root-only file at all — so a tier that decided what to read in phase 2 could not read the files that most need privilege. The subset is therefore decided in <strong>phase 1</strong>, from the <code>fstat</code> of the descriptor that would be hashed.</p>
+        <p>That is strictly stronger than the original: the recorded mode is what a package <em>claims</em>, while the descriptor's mode is what the kernel honours when something executes the file — and a file made executable after installation is exactly the case worth reading. <strong>Nothing in the implementation consults mtime in any decision</strong>, so the marker is spelled <code>stat-only</code> rather than <em>mtime-assisted</em>; a finding that cited a timestamp nobody looked at would be false on the one line whose job is stating limits. <strong>What the change costs, stated because it is a real weakening:</strong> a file outside the security-relevant subset whose contents changed while its size stayed identical is no longer detected at this tier whatever its mtime says. That limit is carried in the <code>integrity-coverage</code> gap every <code>triage</code> run emits, not only here.</p></div>
       </div>
       <p>Parallelism is a config knob defaulting to <code>min(NumCPU, 8)</code> — measured returns diminish sharply past 8, and a high value on a laptop thrashes the page cache.</p>
     </section>
