@@ -66,6 +66,7 @@
     <div class="toc-title">Delivery plan</div>
     <nav id="toc">
       <a href="#overview">Overview</a>
+      <a href="#status">Implementation status</a>
       <a href="#granularity">Planning granularity</a>
       <a href="#decisions">Decisions needed now</a>
       <a href="#p1a">P1-A · Provenance sweep</a>
@@ -96,16 +97,54 @@
       <table>
         <thead><tr><th>Phase</th><th>Delivers</th><th class="num">Tasks</th><th>Needs root</th><th>Network</th><th>Status</th></tr></thead>
         <tbody>
-          <tr><td><a href="#p1a">P1-A</a></td><td>Provenance sweep — <code>scan</code>, <code>explain</code>, <code>doctor</code>, <code>--since-last</code></td><td class="num">10</td><td>no</td><td>yes</td><td><span class="badge b-next">next</span></td></tr>
-          <tr><td><a href="#p1b">P1-B</a></td><td>Integrity tier, staged-privilege collector, TOCTOU-safe I/O, mtree parser</td><td class="num">13</td><td>yes</td><td>no</td><td>planned</td></tr>
-          <tr><td><a href="#p1c">P1-C</a></td><td>Persistence surfaces, ownership oracle, correlation keys</td><td class="num">9</td><td>yes</td><td>no</td><td>planned</td></tr>
-          <tr><td><a href="#p2">P2</a></td><td>Pre-install gate, PKGBUILD tokeniser, <code>snapshot</code>, hooks</td><td class="num">14</td><td>partial</td><td>yes</td><td>planned</td></tr>
-          <tr><td><a href="#p3">P3</a></td><td>Reproducible build, PKGBUILD, signing, units, man pages, CI</td><td class="num">11</td><td>n/a</td><td>n/a</td><td>planned</td></tr>
-          <tr><td><a href="#p4">P4</a></td><td>Signed baseline, hash chain, <code>diff</code>, adjudication lifecycle</td><td class="num">12</td><td>yes</td><td>push</td><td>planned · <span class="badge b-gate">hard gate</span></td></tr>
-          <tr><td><a href="#p5">P5</a></td><td>Indicator bundle, root key set, delegation, fail-closed paths</td><td class="num">9</td><td>no</td><td>yes</td><td>planned</td></tr>
+          <tr><td><a href="#p1a">P1-A</a></td><td>Provenance sweep — <code>scan</code>, <code>explain</code>, <code>doctor</code>, <code>--since-last</code></td><td class="num">10</td><td>no</td><td>yes</td><td><span class="badge b-done">done</span></td></tr>
+          <tr><td><a href="#p1b">P1-B</a></td><td>Integrity tier, staged-privilege collector, TOCTOU-safe I/O, mtree parser</td><td class="num">13</td><td>yes</td><td>no</td><td><span class="badge b-done">done</span> · <a href="#status">privilege model partial</a></td></tr>
+          <tr><td><a href="#p1c">P1-C</a></td><td>Persistence surfaces, ownership oracle, correlation keys</td><td class="num">9</td><td>yes</td><td>no</td><td><span class="badge b-done">done</span></td></tr>
+          <tr><td><a href="#p2">P2</a></td><td>Pre-install gate, PKGBUILD tokeniser, <code>snapshot</code>, hooks</td><td class="num">14</td><td>partial</td><td>yes</td><td><span class="badge b-done">done</span></td></tr>
+          <tr><td><a href="#p3">P3</a></td><td>Reproducible build, PKGBUILD, signing, units, man pages, CI</td><td class="num">11</td><td>n/a</td><td>n/a</td><td><span class="badge b-done">done</span> · <a href="#status">2 human-gated</a></td></tr>
+          <tr><td><a href="#p4">P4</a></td><td>Signed baseline, hash chain, <code>diff</code>, adjudication lifecycle</td><td class="num">12</td><td>yes</td><td>push</td><td><span class="badge b-done">done</span> · <span class="badge b-gate">gate met</span></td></tr>
+          <tr><td><a href="#p5">P5</a></td><td>Indicator bundle, root key set, delegation, fail-closed paths</td><td class="num">9</td><td>no</td><td>yes</td><td><span class="badge b-done">code done</span> · <a href="#status">refuses until keys exist</a></td></tr>
         </tbody>
       </table>
       </div>
+      <h2 id="status">Implementation status — measured, not asserted</h2>
+      <div class="callout">
+        <div class="ico">✎</div>
+        <div><p>All seven phases are implemented and the suite is green. This section exists for the parts that are <strong>not</strong> finished, because a delivery plan whose status column reads “done” everywhere is a document nobody can act on. Every number below was measured on the reference system (1,410 packages, 39 foreign, 386,993 recorded non-directory paths) and reproduced independently of the lane that produced it.</p></div>
+      </div>
+
+      <h3>Live scan, all four tiers</h3>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Tier</th><th class="num">Wall</th><th class="num">Peak RSS</th><th class="num">Paths hashed</th><th class="num">Findings</th><th class="num">Gaps</th><th class="num">Exit</th></tr></thead>
+        <tbody>
+          <tr><td><code>meta</code></td><td class="num">1.54 s</td><td class="num">480 MiB</td><td class="num">0</td><td class="num">10</td><td class="num">1,469</td><td class="num">3</td></tr>
+          <tr><td><code>triage</code></td><td class="num">1.83 s</td><td class="num">481 MiB</td><td class="num">11,840</td><td class="num">10</td><td class="num">1,422</td><td class="num">3</td></tr>
+          <tr><td><code>full</code></td><td class="num">2.37 s</td><td class="num">519 MiB</td><td class="num">337,263</td><td class="num">10</td><td class="num">72</td><td class="num">3</td></tr>
+          <tr><td><code>paranoid</code></td><td class="num">2.61 s</td><td class="num">515 MiB</td><td class="num">337,584</td><td class="num">27</td><td class="num">94</td><td class="num">3</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Ten findings on a working desktop, <strong>zero critical</strong>, no correlated cluster, and no threshold was tuned to get there — that is the INV-8 gate holding with every rule family running together rather than each in its own test. All timings are <strong>warm page cache</strong>: dropping caches needs root, no lane runs <code>sudo</code>, so the cold-cache figure for hashing 20,497 MiB is unmeasured and would be storage-bound. Exit 3 rather than 1 is correct here and is caused by permission-denied reads on an unprivileged run, not by findings.</p>
+
+      <h3>What does not work yet</h3>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Item</th><th>State</th><th>Consequence for a user</th></tr></thead>
+        <tbody>
+          <tr><td>Staged privilege (spec §11.1)</td><td><strong>Partial.</strong> Integrity obeys it; the hook, unit, correlation and sync-database readers still hold <code>CAP_DAC_READ_SEARCH</code>.</td><td>A parser bug in those four is reachable with a read capability. It cannot write or escalate. Structural, not unfinished — see spec §11.1's status note.</td></tr>
+          <tr><td>P5 root key set</td><td><strong>Human-gated.</strong> <code>embeddedRootKeys</code> is empty and every bundle path refuses.</td><td>Indicator coverage is unavailable and says so. Every other subsystem is unaffected. P5 must not ship enabled until the 2-of-3 hardware keys exist.</td></tr>
+          <tr><td>OpenPGP release signing (P3-5)</td><td><strong>Human-gated.</strong> Needs a human-generated key.</td><td>Reproducible builds are the primary verification path; signing is second.</td></tr>
+          <tr><td>AUR name registration (P3-6)</td><td><strong>Human-gated.</strong></td><td>No AUR package is published.</td></tr>
+          <tr><td><code>integrity-unowned-setuid</code></td><td>Fires at <code>paranoid</code> only, and its sweep excludes <code>home</code>, <code>root</code>, <code>tmp</code>, <code>media</code>, <code>mnt</code>.</td><td>A setuid binary planted in <code>/tmp</code> or a home directory is invisible at every tier. Stated in the rule's own limits, not just here.</td></tr>
+          <tr><td>Root-privileged behaviour</td><td><strong>Unverified end to end.</strong> Every test runs unprivileged; euid 0 is a seam, not an execution.</td><td><code>sudo aurvet baseline init</code> has never been run. The ~16 permission gaps should vanish as root; that is argued, not measured.</td></tr>
+          <tr><td>TLS fetch, ssh-agent, FIDO2</td><td><strong>Wired, unexercised.</strong> No agent, no token, no real HTTPS in any test.</td><td>Formats implemented; interoperability unproven.</td></tr>
+          <tr><td>Cold-cache and other machines</td><td>One machine, one package set.</td><td>Rules are calibrated on a single 34-recipe corpus. Projections to larger systems are arithmetic, not measurement.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>Two things worth knowing about how these were found, because they say something about the process rather than the product. <strong>Three separate lanes stopped and refused their brief</strong> — one because the premise that a tree was read twice was false, one because a memory estimate was wrong by 5×, one because moving the capability drop collides with a coverage guarantee — and in each case the pushback was correct and the brief was wrong. And <strong>the fingerprint-epoch golden history caught four real cross-phase interactions</strong>, each an operator being told to adjudicate a finding the registry would then refuse to let them adjudicate.</p>
+
       <p>The ordering is dependency-driven, not preference. <strong>P2 precedes P4</strong> because provenance evidence is ephemeral — 41% of foreign packages on the reference system already have none — so the capture mechanism must exist before a baseline records what it can see. <strong>P3 precedes P4</strong> so the reproducible-build story lands before the project asks anyone to trust a signed chain.</p>
     </section>
 
