@@ -7,7 +7,7 @@
 // precisely the component that would answer wrong -- it can hide a unit, rewrite
 // a name, or report an ExecStart it does not run. A unit file in an offline root
 // cannot be interrogated by any running daemon at all, which is what makes INV-4
-// hold here: this file is a pure function of (root, dirs) and nothing it does
+// hold here: this file is a pure function of (src, dirs) and nothing it does
 // depends on the machine it runs on.
 //
 // INV-2: ExecStart values are TOKENISED, never executed, and nothing here
@@ -76,11 +76,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
-	"os"
 	"path"
-	"sort"
 	"strings"
 
 	"github.com/lookatitude/aurvet/internal/finding"
@@ -112,7 +109,7 @@ const (
 var ErrUnparseable = errors.New("unit could not be parsed")
 
 // DefaultUnitDirs are systemd's system-wide unit directories relative to the
-// scanned root, in ASCENDING priority: a unit in /etc/systemd/system shadows a
+// scanned src, in ASCENDING priority: a unit in /etc/systemd/system shadows a
 // same-named unit in /usr/lib/systemd/system. Order is part of the contract, not
 // cosmetic.
 //
@@ -506,12 +503,12 @@ func SystemdTokens(s string) []string {
 // offline root and /usr/local/lib/systemd/system exists on almost no system.
 // Anything else (EACCES, ENOTDIR) means the unit set is unknown, and an unknown
 // unit set must not read as a clean one (INV-9).
-func LoadUnits(root *os.Root, dirs []string) ([]Unit, []finding.Gap) {
+func LoadUnits(src fsx.Source, dirs []string) ([]Unit, []finding.Gap) {
 	var (
 		units []Unit
 		gaps  []finding.Gap
 	)
-	if root == nil {
+	if src.Zero() {
 		return nil, []finding.Gap{{
 			RuleID:  RuleUnitCoverage,
 			Subject: "systemd unit directories",
@@ -530,7 +527,7 @@ func LoadUnits(root *os.Root, dirs []string) ([]Unit, []finding.Gap) {
 	var linked []linkedUnit
 
 	for _, dir := range dirs {
-		ents, err := readDirSorted(root, dir)
+		ents, err := readDirSorted(src, dir)
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				gaps = append(gaps, finding.Gap{
@@ -543,7 +540,7 @@ func LoadUnits(root *os.Root, dirs []string) ([]Unit, []finding.Gap) {
 			continue
 		}
 		for _, ent := range ents {
-			name := ent.Name()
+			name := ent.Name
 			rel := path.Join(dir, name)
 			if ent.IsDir() {
 				if strings.HasSuffix(name, ".d") {
@@ -557,8 +554,8 @@ func LoadUnits(root *os.Root, dirs []string) ([]Unit, []finding.Gap) {
 			if !hasUnitSuffix(name) {
 				continue
 			}
-			if ent.Type()&fs.ModeSymlink != 0 {
-				target, lerr := fsx.ReadLinkConfined(root, rel)
+			if ent.IsSymlink() {
+				target, lerr := src.ReadLink(rel)
 				if lerr != nil {
 					gaps = append(gaps, finding.Gap{
 						RuleID:  RuleUnitCoverage,
@@ -571,7 +568,7 @@ func LoadUnits(root *os.Root, dirs []string) ([]Unit, []finding.Gap) {
 				linked = append(linked, linkedUnit{path: rel, target: resolveLinkPath(dir, target)})
 				continue
 			}
-			data, err := readUnitFile(root, rel)
+			data, err := readUnitFile(src, rel)
 			if err != nil {
 				gaps = append(gaps, finding.Gap{
 					RuleID:  RuleUnitCoverage,
@@ -605,7 +602,7 @@ func LoadUnits(root *os.Root, dirs []string) ([]Unit, []finding.Gap) {
 				continue
 			}
 			ddir := path.Join(dir, dname)
-			ents, err := readDirSorted(root, ddir)
+			ents, err := readDirSorted(src, ddir)
 			if err != nil {
 				gaps = append(gaps, finding.Gap{
 					RuleID:  RuleUnitCoverage,
@@ -616,11 +613,11 @@ func LoadUnits(root *os.Root, dirs []string) ([]Unit, []finding.Gap) {
 				continue
 			}
 			for _, ent := range ents {
-				if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".conf") {
+				if ent.IsDir() || !strings.HasSuffix(ent.Name, ".conf") {
 					continue
 				}
-				drel := path.Join(ddir, ent.Name())
-				data, err := readUnitFile(root, drel)
+				drel := path.Join(ddir, ent.Name)
+				data, err := readUnitFile(src, drel)
 				if err != nil {
 					gaps = append(gaps, finding.Gap{
 						RuleID:  RuleUnitCoverage,
@@ -693,7 +690,7 @@ func hasUnitSuffix(name string) bool {
 // resolveLinkPath turns a symlink's target into a path relative to the SCANNED
 // root. An absolute target is re-rooted at the scanned root rather than at the
 // running filesystem's "/" -- that is the chroot reading, and the only one
-// compatible with --offline-root, where /usr/lib/... means that tree's copy and
+// compatible with --offline-src, where /usr/lib/... means that tree's copy and
 // not this machine's. A target escaping the root resolves to nothing.
 func resolveLinkPath(dir, target string) string {
 	var p string
@@ -711,13 +708,8 @@ func resolveLinkPath(dir, target string) string {
 // readUnitFile reads one unit or drop-in through the confined API, bounded.
 // fsx.OpenConfined refuses a symlink leaf and anything that is not a regular
 // file, so a unit replaced by a fifo is a gap rather than a hang.
-func readUnitFile(root *os.Root, rel string) ([]byte, error) {
-	f, _, err := fsx.OpenConfined(root, rel)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxUnitFileBytes+1))
+func readUnitFile(src fsx.Source, rel string) ([]byte, error) {
+	data, _, err := src.ReadFile(rel)
 	if err != nil {
 		return nil, err
 	}
@@ -728,7 +720,7 @@ func readUnitFile(root *os.Root, rel string) ([]byte, error) {
 	return data, nil
 }
 
-// readDirSorted lists dir through the root, sorted by name.
+// readDirSorted lists dir through the src, sorted by name.
 //
 // The sort is not cosmetic: os.File.ReadDir returns entries in directory order,
 // which varies between two filesystems holding identical trees, and INV-4's
@@ -737,19 +729,7 @@ func readUnitFile(root *os.Root, rel string) ([]byte, error) {
 // Entry types come from the directory read itself, so a symlink is reported as a
 // symlink and is not followed to decide whether it is a directory. That is what
 // makes the "*.wants excludes directories" rule mean what it says.
-func readDirSorted(root *os.Root, dir string) ([]os.DirEntry, error) {
-	f, err := root.Open(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	ents, err := f.ReadDir(-1)
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(ents, func(i, j int) bool { return ents[i].Name() < ents[j].Name() })
-	return ents, nil
-}
+func readDirSorted(src fsx.Source, dir string) ([]fsx.Ent, error) { return src.ReadDir(dir) }
 
 // unitSearchPath is systemd's compiled-in search path for a relative Exec
 // command, in the order systemd searches it (Arch's build). A bare `ldconfig`
@@ -776,13 +756,12 @@ const (
 // both, and it refuses them precisely because it got far enough to know they are
 // there. Treating that refusal as absence would be reading an error message as a
 // fact about the filesystem.
-func probePresence(root *os.Root, rel string) presence {
-	if root == nil {
+func probePresence(src fsx.Source, rel string) presence {
+	if src.Zero() {
 		return presenceUnknown
 	}
-	f, _, err := fsx.OpenConfined(root, strings.TrimPrefix(rel, "/"))
+	_, _, err := src.ReadFile(rel)
 	if err == nil {
-		f.Close()
 		return presencePresent
 	}
 	switch {
@@ -822,7 +801,7 @@ func probePresence(root *os.Root, rel string) presence {
 //
 // root may be nil: the checks then degrade to "presence unknown", which is the
 // higher severity, never a silence.
-func UnitFindings(root *os.Root, units []Unit, owners *own.Owners) ([]finding.Finding, []finding.Gap) {
+func UnitFindings(src fsx.Source, units []Unit, owners *own.Owners) ([]finding.Finding, []finding.Gap) {
 	var (
 		findings []finding.Finding
 		gaps     []finding.Gap
@@ -837,12 +816,12 @@ func UnitFindings(root *os.Root, units []Unit, owners *own.Owners) ([]finding.Fi
 	// The search-path winner is a property of the ROOT, not of any one unit, so
 	// it is probed once. It is also the same fact for every hijackable finding,
 	// which is why they can be compared against each other.
-	winner := findSearchPathWinner(root)
+	winner := findSearchPathWinner(src)
 
 	for _, u := range units {
 		seen := map[string]bool{}
 		for _, e := range u.Exec {
-			out, bin, via, gap := unitExecTarget(root, u, e)
+			out, bin, via, gap := unitExecTarget(src, u, e)
 			switch out {
 			case execGap:
 				gaps = append(gaps, *gap)
@@ -882,7 +861,7 @@ func UnitFindings(root *os.Root, units []Unit, owners *own.Owners) ([]finding.Fi
 			}
 
 			sev, presenceNote := finding.SevSuspicious, "the file is present and belongs to no installed package"
-			switch probePresence(root, bin) {
+			switch probePresence(src, bin) {
 			case presenceAbsent:
 				sev = finding.SevInfo
 				presenceNote = "no file exists at this path, so the unit cannot currently start it; " +
@@ -957,11 +936,11 @@ const (
 // uninteresting". `ExecStartPre=-/usr/local/bin/evil` resolves, and it gets the
 // ordinary ownership verdict like any other value -- otherwise an attacker buys
 // an exemption for the price of one character.
-func unitExecTarget(root *os.Root, u Unit, e Exec) (out execOutcome, bin, via string, gap *finding.Gap) {
+func unitExecTarget(src fsx.Source, u Unit, e Exec) (out execOutcome, bin, via string, gap *finding.Gap) {
 	if e.Resolvable {
 		return execResolved, e.Bin, "", nil
 	}
-	if !e.Relative || root == nil {
+	if !e.Relative || src.Zero() {
 		return execGap, "", "", &finding.Gap{
 			RuleID:  RuleUnitCoverage,
 			Subject: u.Path,
@@ -971,7 +950,7 @@ func unitExecTarget(root *os.Root, u Unit, e Exec) (out execOutcome, bin, via st
 	}
 	for _, dir := range unitSearchPath {
 		cand := path.Join(dir, e.Bin)
-		if probePresence(root, cand) == presencePresent {
+		if probePresence(src, cand) == presencePresent {
 			return execResolved, "/" + cand, fmt.Sprintf("%q is a bare command name; it was resolved to /%s, "+
 				"the first entry in systemd's search path (%s) that holds a file of that name",
 				e.Bin, cand, strings.Join(unitSearchPath, ", ")), nil
@@ -1001,7 +980,7 @@ type searchPathWinner struct {
 
 // writableByNonOwner reports the fact severity turns on: a group- or
 // world-writable directory can receive the planted name from someone who is not
-// root, which is a privilege boundary this hole crosses. An attacker who already
+// src, which is a privilege boundary this hole crosses. An attacker who already
 // has root does not need the hole at all.
 func (w searchPathWinner) writableByNonOwner() bool {
 	return w.Known && w.Mode.Perm()&0o022 != 0
@@ -1009,14 +988,13 @@ func (w searchPathWinner) writableByNonOwner() bool {
 
 // findSearchPathWinner probes the search path through the confined root. It
 // opens directories only to stat them; nothing is read and nothing is executed.
-func findSearchPathWinner(root *os.Root) searchPathWinner {
+func findSearchPathWinner(src fsx.Source) searchPathWinner {
 	w := searchPathWinner{}
-	if root == nil {
+	if src.Zero() {
 		return w
 	}
 	for _, dir := range unitSearchPath {
-		f, err := root.Open(dir)
-		if err != nil {
+		if _, err := src.ReadDir(dir); err != nil {
 			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOTDIR) {
 				w.Skipped = append(w.Skipped, dir)
 				continue
@@ -1026,13 +1004,12 @@ func findSearchPathWinner(root *os.Root) searchPathWinner {
 			w.Dir = dir
 			return w
 		}
-		st, serr := f.Stat()
-		f.Close()
-		if serr != nil || !st.IsDir() {
+		mode, serr := src.Stat(dir)
+		if serr != nil || !mode.IsDir() {
 			w.Skipped = append(w.Skipped, dir)
 			continue
 		}
-		w.Dir, w.Mode, w.Known = dir, st.Mode(), true
+		w.Dir, w.Mode, w.Known = dir, mode, true
 		return w
 	}
 	return w
@@ -1062,7 +1039,7 @@ func unitHijackableFinding(u Unit, e Exec, w searchPathWinner) finding.Finding {
 	var winnerNote string
 	switch {
 	case w.Dir == "":
-		winnerNote = fmt.Sprintf("none of the search-path directories (%s) exists in this root, so the "+
+		winnerNote = fmt.Sprintf("none of the search-path directories (%s) exists in this src, so the "+
 			"name could only be captured by creating one of them first",
 			strings.Join(unitSearchPath, ", "))
 	case !w.Known:

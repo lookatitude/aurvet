@@ -47,6 +47,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -95,6 +96,13 @@ type Source struct {
 	dirs  map[string][]Ent
 	links map[string]string
 	errs  map[string]error
+
+	// modes records the mode of a path in its own right, which a listing of its
+	// PARENT does not carry. It exists because the mode of a directory is itself
+	// evidence: unit-execstart-hijackable rates on a group- or world-writable
+	// search-path directory, and losing those bits in the phase transition would
+	// silence that rule rather than move it.
+	modes map[string]fs.FileMode
 }
 
 // Live returns a Source reading through root with the confined API.
@@ -111,6 +119,32 @@ func (s Source) IsLive() bool { return s.root != nil }
 // Zero reports an unusable Source.
 func (s Source) Zero() bool {
 	return s.root == nil && s.files == nil && s.dirs == nil && s.links == nil
+}
+
+// Stat reports the mode of rel in its own right. A listing of the parent gives
+// an entry's TYPE but not its permission bits, and those bits are evidence.
+func (s Source) Stat(rel string) (fs.FileMode, error) {
+	rel = strings.TrimPrefix(rel, "/")
+	if s.root != nil {
+		st, err := fs.Stat(s.root.FS(), rel)
+		if err != nil {
+			return 0, err
+		}
+		return st.Mode(), nil
+	}
+	if s.Zero() {
+		return 0, ErrNoSource
+	}
+	if err, ok := s.errs["s:"+rel]; ok {
+		return 0, err
+	}
+	if m, ok := s.modes[rel]; ok {
+		return m, nil
+	}
+	if f, ok := s.files[rel]; ok {
+		return fs.FileMode(f.Stat.Mode).Perm(), nil
+	}
+	return 0, &fs.PathError{Op: "stat", Path: rel, Err: fs.ErrNotExist}
 }
 
 // maxSourceFile bounds one buffered file. Every format read through a Source is
@@ -224,6 +258,7 @@ type Buffer struct {
 	dirs  map[string][]Ent
 	links map[string]string
 	errs  map[string]error
+	modes map[string]fs.FileMode
 }
 
 // NewBuffer returns an empty Buffer.
@@ -233,12 +268,13 @@ func NewBuffer() *Buffer {
 		dirs:  map[string][]Ent{},
 		links: map[string]string{},
 		errs:  map[string]error{},
+		modes: map[string]fs.FileMode{},
 	}
 }
 
 // Source seals the buffer into a read-only Source.
 func (b *Buffer) Source() Source {
-	return Source{files: b.files, dirs: b.dirs, links: b.links, errs: b.errs}
+	return Source{files: b.files, dirs: b.dirs, links: b.links, errs: b.errs, modes: b.modes}
 }
 
 // Len reports how many files were buffered, for the run's own reporting.
@@ -279,6 +315,16 @@ func (b *Buffer) AddDir(rel string, ents []Ent, err error) {
 	b.dirs[rel] = sorted
 }
 
+// AddMode records a path's own mode, or the error stat'ing it produced.
+func (b *Buffer) AddMode(rel string, mode fs.FileMode, err error) {
+	rel = strings.TrimPrefix(rel, "/")
+	if err != nil {
+		b.errs["s:"+rel] = err
+		return
+	}
+	b.modes[rel] = mode
+}
+
 // Has reports whether a file was already buffered, so a caller enumerating
 // overlapping directories does not read the same path twice.
 func (b *Buffer) Has(rel string) bool {
@@ -306,6 +352,8 @@ func (b *Buffer) CopyTree(src Source, dir string) {
 	if err != nil {
 		return
 	}
+	mode, merr := src.Stat(dir)
+	b.AddMode(dir, mode, merr)
 	for _, e := range ents {
 		rel := path.Join(dir, e.Name)
 		switch {
@@ -321,3 +369,134 @@ func (b *Buffer) CopyTree(src Source, dir string) {
 		}
 	}
 }
+
+// FS exposes the Source as an io/fs.FS.
+//
+// This exists because several readers consume a tree through fs.FS rather than
+// path by path -- internal/hook's parser takes one, and the hook and misc
+// surfaces use fs.Stat and fs.ReadDir over it. Implementing the interface means
+// those callers are unchanged by the phase split: the same parser runs against a
+// live root in phase 1 or against buffered bytes in phase 2, and there is no
+// second copy of any format's reader to drift from the first.
+//
+// A live Source returns os.Root's own FS, so its confinement is the kernel's.
+// A buffered one answers from the maps, and refuses everything not buffered.
+func (s Source) FS() fs.FS {
+	if s.root != nil {
+		return s.root.FS()
+	}
+	return bufFS{s}
+}
+
+// bufFS answers fs.FS reads from buffered bytes.
+type bufFS struct{ s Source }
+
+func (b bufFS) Open(name string) (fs.File, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	if name == "." {
+		return &memDir{name: ".", ents: b.s.dirs["."]}, nil
+	}
+	if ents, ok := b.s.dirs[name]; ok {
+		return &memDir{name: name, ents: ents, mode: b.s.modes[name] | fs.ModeDir}, nil
+	}
+	if f, ok := b.s.files[name]; ok {
+		return &memFile{name: name, data: f.Data}, nil
+	}
+	// A recorded failure is replayed here too, so a directory phase 1 could not
+	// list stays unlistable rather than becoming empty.
+	if err, ok := b.s.errs["d:"+name]; ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+	}
+	if err, ok := b.s.errs[name]; ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+	}
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+}
+
+// memFile is a buffered regular file.
+type memFile struct {
+	name string
+	data []byte
+	off  int
+}
+
+func (f *memFile) Stat() (fs.FileInfo, error) {
+	return memInfo{name: path.Base(f.name), size: int64(len(f.data))}, nil
+}
+
+func (f *memFile) Read(p []byte) (int, error) {
+	if f.off >= len(f.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[f.off:])
+	f.off += n
+	return n, nil
+}
+
+func (f *memFile) Close() error { return nil }
+
+// memDir is a buffered directory. It implements fs.ReadDirFile so fs.ReadDir
+// works over it without the caller knowing which backing it has.
+type memDir struct {
+	name string
+	ents []Ent
+	mode fs.FileMode
+	off  int
+}
+
+func (d *memDir) Stat() (fs.FileInfo, error) {
+	return memInfo{name: path.Base(d.name), mode: d.mode | fs.ModeDir}, nil
+}
+
+func (d *memDir) Read([]byte) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.name, Err: fs.ErrInvalid}
+}
+
+func (d *memDir) Close() error { return nil }
+
+func (d *memDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	rest := d.ents[d.off:]
+	if n > 0 && n < len(rest) {
+		rest = rest[:n]
+	}
+	d.off += len(rest)
+	out := make([]fs.DirEntry, 0, len(rest))
+	for _, e := range rest {
+		out = append(out, memDirEnt{e})
+	}
+	if len(out) == 0 && n > 0 {
+		return nil, io.EOF
+	}
+	return out, nil
+}
+
+// memDirEnt adapts an Ent to fs.DirEntry.
+type memDirEnt struct{ e Ent }
+
+func (m memDirEnt) Name() string { return m.e.Name }
+func (m memDirEnt) IsDir() bool  { return m.e.IsDir() }
+func (m memDirEnt) Type() fs.FileMode {
+	return m.e.Mode & fs.ModeType
+}
+func (m memDirEnt) Info() (fs.FileInfo, error) {
+	return memInfo{name: m.e.Name, mode: m.e.Mode}, nil
+}
+
+// memInfo is the minimum fs.FileInfo the readers consult: the name, the size and
+// whether it is a directory. Times are deliberately zero -- a buffered source
+// records no mtime through this path, and inventing one would let a check reason
+// about a timestamp that came from nowhere.
+type memInfo struct {
+	name string
+	size int64
+	mode fs.FileMode
+}
+
+func (i memInfo) Name() string       { return i.name }
+func (i memInfo) Size() int64        { return i.size }
+func (i memInfo) Mode() fs.FileMode  { return i.mode }
+func (i memInfo) ModTime() time.Time { return time.Time{} }
+func (i memInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i memInfo) Sys() any           { return nil }

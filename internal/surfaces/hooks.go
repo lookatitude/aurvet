@@ -4,7 +4,7 @@
 //
 // A hook is a root-privileged command pacman runs on the next transaction. That
 // makes the hook directories a persistence surface in the ordinary sense --
-// something added there runs later, as root, without anyone asking -- and it
+// something added there runs later, as src, without anyone asking -- and it
 // makes them a surface in a second, quieter sense that neither design review
 // caught: a hook that pacman was supposed to run can be stopped from running.
 // This file covers both directions.
@@ -19,7 +19,7 @@
 // `pacman-conf --listdir hookdir`, no `pacman -Qo`: the hook set is read off
 // disk, hook bodies are parsed and never run (INV-2), and ownership comes from
 // internal/own. An --offline-root is a parameter, not a second code path
-// (INV-4), so everything here is a pure function of (root, owners) and reaches
+// (INV-4), so everything here is a pure function of (src, owners) and reaches
 // the filesystem only through the confined API.
 //
 // Severity, written down weaker than it looks. An unowned hook is suspicious,
@@ -35,9 +35,7 @@ package surfaces
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
-	"os"
 	"path"
 	"strings"
 
@@ -220,15 +218,15 @@ func (r HookReport) ActiveHooks() []HookEntry {
 // ScanHooks reads every hook directory pacman would read and reports what is
 // there that no package shipped, and what a package shipped that no longer runs.
 //
-// It is a pure function of (root, owners): no ambient paths, no environment, no
+// It is a pure function of (src, owners): no ambient paths, no environment, no
 // dependence on the process working directory (INV-4), and no writes (INV-5).
-func ScanHooks(root *os.Root, owners *own.Owners) (HookReport, finding.Result) {
+func ScanHooks(src fsx.Source, owners *own.Owners) (HookReport, finding.Result) {
 	var res finding.Result
 
-	dirs, dirGaps := ResolveHookDirs(root)
+	dirs, dirGaps := ResolveHookDirs(src)
 	res.Gaps = append(res.Gaps, dirGaps...)
 
-	fsys := root.FS()
+	fsys := src.FS()
 	rep := HookReport{Dirs: make([]HookDir, 0, len(dirs))}
 
 	// Per-directory loading, through internal/hook. One parser, deliberately:
@@ -339,14 +337,14 @@ func ScanHooks(root *os.Root, owners *own.Owners) (HookReport, finding.Result) {
 			}
 			continue
 		}
-		sup := classifySuppression(root, loaded[w], loser)
+		sup := classifySuppression(src, loaded[w], loser)
 		rep.Suppressed = append(rep.Suppressed, sup)
 		res.Findings = append(res.Findings, suppressionFinding(sup, loaded[w]))
 		suppressor[sup.Winner] = true
 		if sup.Kind == SuppressMasked {
 			// The mask is understood, not unreadable. The confined reader
 			// refuses to follow an absolute symlink target -- correctly: under
-			// --offline-root, following /dev/null would read the HOST's device
+			// --offline-src, following /dev/null would read the HOST's device
 			// while scanning someone else's disk -- so LoadHooks reported the
 			// file as unreadable. readlinkat told us it is /dev/null, and a hook
 			// whose body is /dev/null demonstrably runs nothing. Leaving the gap
@@ -373,7 +371,7 @@ func ScanHooks(root *os.Root, owners *own.Owners) (HookReport, finding.Result) {
 // classifySuppression decides HOW a packaged hook stopped running, reading the
 // winning file's own bytes only through what has already been parsed plus one
 // readlinkat. It never follows the link.
-func classifySuppression(root *os.Root, win, loser HookEntry) Suppression {
+func classifySuppression(src fsx.Source, win, loser HookEntry) Suppression {
 	sup := Suppression{
 		Name:        loser.Hook.Name,
 		Winner:      win.Path,
@@ -384,10 +382,10 @@ func classifySuppression(root *os.Root, win, loser HookEntry) Suppression {
 	}
 
 	// fsx.ReadLinkConfined, not os.Readlink and not filepath.EvalSymlinks: the
-	// parent directory is resolved once through the root, so no component can be
+	// parent directory is resolved once through the src, so no component can be
 	// swapped for a link leading out of the tree, and the target is returned
 	// verbatim rather than resolved.
-	if target, err := fsx.ReadLinkConfined(root, win.Path); err == nil {
+	if target, err := src.ReadLink(win.Path); err == nil {
 		sup.WinnerLink = target
 		if path.Clean(target) == "/dev/null" {
 			sup.Kind = SuppressMasked
@@ -543,10 +541,10 @@ func dropGap(gaps []finding.Gap, ruleID, subject string) []finding.Gap {
 // Nothing here is expanded (INV-2). An Include this parser cannot pin to exactly
 // one file is a gap, not a guess: the honest answer to "which directories does
 // pacman read" is then "I do not fully know", and INV-9 requires that be said.
-func ResolveHookDirs(root *os.Root) ([]HookDir, []finding.Gap) {
+func ResolveHookDirs(src fsx.Source) ([]HookDir, []finding.Gap) {
 	dirs := []HookDir{{Path: systemHookDir, Source: HookDirSourceSystem}}
 
-	fromConf, gaps := hookDirsFromConf(root, pacmanConf, 0, map[string]bool{})
+	fromConf, gaps := hookDirsFromConf(src, pacmanConf, 0, map[string]bool{})
 	if len(fromConf) == 0 {
 		dirs = append(dirs, HookDir{Path: adminHookDir, Source: HookDirSourceAdmin})
 		return dirs, gaps
@@ -569,7 +567,7 @@ func ResolveHookDirs(root *os.Root) ([]HookDir, []finding.Gap) {
 // means anything; an Include reached from another section is left alone rather
 // than followed, and a HookDir found outside [options] is not one pacman would
 // honour.
-func hookDirsFromConf(root *os.Root, rel string, depth int, visited map[string]bool) ([]string, []finding.Gap) {
+func hookDirsFromConf(src fsx.Source, rel string, depth int, visited map[string]bool) ([]string, []finding.Gap) {
 	var (
 		out  []string
 		gaps []finding.Gap
@@ -589,7 +587,7 @@ func hookDirsFromConf(root *os.Root, rel string, depth int, visited map[string]b
 	}
 	visited[rel] = true
 
-	data, err := readConfined(root, rel)
+	data, err := readConfined(src, rel)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// No pacman.conf (or no such include) means the compiled-in
@@ -641,7 +639,7 @@ func hookDirsFromConf(root *os.Root, rel string, depth int, visited map[string]b
 				gaps = append(gaps, *gap)
 				continue
 			}
-			sub, subGaps := hookDirsFromConf(root, p, depth+1, visited)
+			sub, subGaps := hookDirsFromConf(src, p, depth+1, visited)
 			out = append(out, sub...)
 			gaps = append(gaps, subGaps...)
 		}
@@ -710,13 +708,8 @@ func confPath(inFile, key, val string) (string, *finding.Gap) {
 // readConfined reads a configuration file through the confined API, bounded.
 // fsx.OpenConfined refuses a symlink leaf and anything that is not a regular
 // file, so a pacman.conf replaced by a fifo is a gap rather than a hang.
-func readConfined(root *os.Root, rel string) ([]byte, error) {
-	f, _, err := fsx.OpenConfined(root, rel)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxConfBytes+1))
+func readConfined(src fsx.Source, rel string) ([]byte, error) {
+	data, _, err := src.ReadFile(rel)
 	if err != nil {
 		return nil, err
 	}

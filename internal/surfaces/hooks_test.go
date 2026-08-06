@@ -10,6 +10,7 @@ import (
 
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/fsx"
 	"github.com/lookatitude/aurvet/internal/own"
 )
 
@@ -38,7 +39,7 @@ func hooksOwners(t *testing.T, root *os.Root, name string) *own.Owners {
 	if len(gaps) != 0 {
 		t.Fatalf("%s: unreadable local DB entries %v", name, gaps)
 	}
-	o := own.IndexIn(root, pkgs)
+	o := own.IndexIn(fsx.Live(root), pkgs)
 	if o.Len() == 0 {
 		t.Fatalf("%s: ownership oracle is empty; every unowned assertion would pass vacuously", name)
 	}
@@ -108,7 +109,7 @@ func findingFor(res finding.Result, ruleID, subject string) (finding.Finding, bo
 // system dir first (it is always active), admin dir second (it wins by name).
 func TestResolveHookDirsDefaults(t *testing.T) {
 	root := tempRoot(t, map[string]string{"usr/share/libalpm/hooks/10-a.hook": "[Action]\nExec = /usr/bin/true\n"}, nil)
-	dirs, gaps := ResolveHookDirs(root)
+	dirs, gaps := ResolveHookDirs(fsx.Live(root))
 
 	if got, want := dirPaths(dirs), []string{"usr/share/libalpm/hooks", "etc/pacman.d/hooks"}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("dirs = %v, want %v (system first, admin second: priority is the contract)", got, want)
@@ -123,7 +124,7 @@ func TestResolveHookDirsDefaults(t *testing.T) {
 // looks at usr/local/share/pacman-hooks at all.
 func TestResolveHookDirsHonoursOverride(t *testing.T) {
 	root := hooksRoot(t, "cruft")
-	dirs, gaps := ResolveHookDirs(root)
+	dirs, gaps := ResolveHookDirs(fsx.Live(root))
 	if len(gaps) != 0 {
 		t.Errorf("gaps = %+v, want none", gaps)
 	}
@@ -179,7 +180,7 @@ func TestResolveHookDirsGlobIncludeIsAGap(t *testing.T) {
 	root := tempRoot(t, map[string]string{
 		"etc/pacman.conf": "[options]\nInclude = /etc/pacman.d/conf.d/*.conf\n",
 	}, nil)
-	dirs, gaps := ResolveHookDirs(root)
+	dirs, gaps := ResolveHookDirs(fsx.Live(root))
 	if len(dirs) == 0 {
 		t.Fatal("an unexpandable Include must not empty the hook-dir set: the defaults still apply")
 	}
@@ -204,7 +205,7 @@ func TestResolveHookDirsUnreadableConfigIsAGap(t *testing.T) {
 	if err := os.Chmod(filepath.Join(root.Name(), "etc", "pacman.conf"), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	dirs, gaps := ResolveHookDirs(root)
+	dirs, gaps := ResolveHookDirs(fsx.Live(root))
 	if got, want := len(dirs), 2; got != want {
 		t.Errorf("dirs = %v, want the %d defaults to still be scanned", dirPaths(dirs), want)
 	}
@@ -215,7 +216,7 @@ func TestResolveHookDirsUnreadableConfigIsAGap(t *testing.T) {
 
 func mustDirs(t *testing.T, root *os.Root) []HookDir {
 	t.Helper()
-	dirs, gaps := ResolveHookDirs(root)
+	dirs, gaps := ResolveHookDirs(fsx.Live(root))
 	if len(gaps) != 0 {
 		t.Fatalf("unexpected gaps %+v", gaps)
 	}
@@ -228,7 +229,7 @@ func mustDirs(t *testing.T, root *os.Root) []HookDir {
 // than reported as either an error or a gap.
 func TestScanHooksStock(t *testing.T) {
 	root := hooksRoot(t, "stock")
-	rep, res := ScanHooks(root, hooksOwners(t, root, "stock"))
+	rep, res := ScanHooks(fsx.Live(root), hooksOwners(t, root, "stock"))
 
 	if len(res.Findings) != 0 {
 		t.Errorf("findings = %+v, want none on the stock root (INV-8)", res.Findings)
@@ -266,7 +267,7 @@ func TestScanHooksStock(t *testing.T) {
 // fails the INV-8 gate.
 func TestScanHooksCruftMask(t *testing.T) {
 	root := hooksRoot(t, "cruft")
-	rep, res := ScanHooks(root, hooksOwners(t, root, "cruft"))
+	rep, res := ScanHooks(fsx.Live(root), hooksOwners(t, root, "cruft"))
 
 	if got := res.MaxSeverity(); got >= finding.SevCritical {
 		t.Errorf("max severity = %v on the cruft root; zero criticals here is a release gate", got)
@@ -335,7 +336,7 @@ func TestScanHooksCruftMask(t *testing.T) {
 // packaged hook's work silently stops happening.
 func TestScanHooksMaliciousShadow(t *testing.T) {
 	root := hooksRoot(t, "malicious")
-	rep, res := ScanHooks(root, hooksOwners(t, root, "malicious"))
+	rep, res := ScanHooks(fsx.Live(root), hooksOwners(t, root, "malicious"))
 
 	sup, ok := rep.Suppression("60-depmod.hook")
 	if !ok {
@@ -373,11 +374,11 @@ func TestScanHooksEmptyShadowIsSuppression(t *testing.T) {
 		"usr/share/libalpm/hooks/60-depmod.hook": "[Action]\nWhen = PostTransaction\nExec = /usr/bin/depmod --all\n",
 		"etc/pacman.d/hooks/60-depmod.hook":      "",
 	}, nil)
-	owners := own.IndexIn(root, []alpm.Package{{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{
 		Name:  "kmod",
 		Files: []string{"usr/share/libalpm/hooks/", "usr/share/libalpm/hooks/60-depmod.hook"},
 	}})
-	rep, res := ScanHooks(root, owners)
+	rep, res := ScanHooks(fsx.Live(root), owners)
 
 	sup, ok := rep.Suppression("60-depmod.hook")
 	if !ok {
@@ -400,11 +401,11 @@ func TestScanHooksUnreadableWinnerKeepsItsGap(t *testing.T) {
 	}, map[string]string{
 		"etc/pacman.d/hooks/60-depmod.hook": "/opt/elsewhere.hook",
 	})
-	owners := own.IndexIn(root, []alpm.Package{{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{
 		Name:  "kmod",
 		Files: []string{"usr/share/libalpm/hooks/60-depmod.hook"},
 	}})
-	rep, res := ScanHooks(root, owners)
+	rep, res := ScanHooks(fsx.Live(root), owners)
 
 	sup, ok := rep.Suppression("60-depmod.hook")
 	if !ok {
@@ -435,7 +436,7 @@ func TestScanHooksUnreadableDirIsAGap(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0o755) })
 
-	_, res := ScanHooks(root, own.IndexIn(root, nil))
+	_, res := ScanHooks(fsx.Live(root), own.IndexIn(fsx.Live(root), nil))
 	if _, ok := hasGap(res, RuleHookCoverage, "etc/pacman.d/hooks"); !ok {
 		t.Fatalf("an unlistable hook dir produced no %s gap; gaps=%+v", RuleHookCoverage, res.Gaps)
 	}
@@ -451,7 +452,7 @@ func TestScanHooksUnresolvableOwnershipIsAGap(t *testing.T) {
 		"usr/share/libalpm/hooks/50-a.hook": "50-a.hook",
 	})
 
-	_, res := ScanHooks(root, own.IndexIn(root, nil))
+	_, res := ScanHooks(fsx.Live(root), own.IndexIn(fsx.Live(root), nil))
 	if _, ok := findingFor(res, RuleHookUnowned, "usr/share/libalpm/hooks/50-a.hook"); ok {
 		t.Error("an unresolvable hook was reported as unowned; that is a coverage gap printed as an accusation")
 	}
@@ -479,7 +480,7 @@ func TestScanHooksUnresolvableOwnershipIsAGap(t *testing.T) {
 func TestScanHooksEveryFindingStatesItsLimits(t *testing.T) {
 	for _, name := range []string{"stock", "cruft", "malicious"} {
 		root := hooksRoot(t, name)
-		_, res := ScanHooks(root, hooksOwners(t, root, name))
+		_, res := ScanHooks(fsx.Live(root), hooksOwners(t, root, name))
 		for _, f := range res.Findings {
 			if strings.TrimSpace(f.Limits) == "" {
 				t.Errorf("%s: finding %s/%s has empty Limits (INV-6)", name, f.RuleID, f.Subject)
@@ -507,7 +508,7 @@ func TestScanHooksNeverExecutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep, _ := ScanHooks(root, hooksOwners(t, root, "malicious"))
+	rep, _ := ScanHooks(fsx.Live(root), hooksOwners(t, root, "malicious"))
 	after, err := os.ReadFile(filepath.Join("..", "..", "testdata", "roots", "malicious", "usr", "bin", "depmod"))
 	if err != nil {
 		t.Fatal(err)
@@ -543,7 +544,7 @@ func TestScanHooksLiveSystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep, res := ScanHooks(root, own.IndexIn(root, pkgs))
+	rep, res := ScanHooks(fsx.Live(root), own.IndexIn(fsx.Live(root), pkgs))
 
 	perDir := map[string]int{}
 	for _, h := range rep.Hooks {

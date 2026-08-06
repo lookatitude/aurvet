@@ -21,6 +21,7 @@ import (
 	"github.com/lookatitude/aurvet/internal/aur"
 	"github.com/lookatitude/aurvet/internal/correlate"
 	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/fsx"
 	"github.com/lookatitude/aurvet/internal/hook"
 	"github.com/lookatitude/aurvet/internal/own"
 	"github.com/lookatitude/aurvet/internal/pkgbuild"
@@ -1089,7 +1090,7 @@ func fpgCorrelateConfig(t *testing.T, dir, name string) (*os.Root, correlate.Con
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { root.Close() })
-	owners := own.IndexIn(root, pkgs)
+	owners := own.IndexIn(fsx.Live(root), pkgs)
 	if owners.Len() == 0 {
 		t.Fatalf("%s: empty ownership index; every 'unowned' assertion would pass vacuously", name)
 	}
@@ -1161,7 +1162,7 @@ func TestFPGateMaliciousRootYieldsCorrelatedCriticalCluster(t *testing.T) {
 	}
 	root, cfg := fpgCorrelateConfig(t, dir, "malicious")
 
-	facts, surfaceRes := correlate.Facts(root, cfg)
+	facts, surfaceRes := correlate.Facts(fsx.Live(root), cfg)
 	if len(facts) < 3 {
 		t.Fatalf("only %d correlation facts on the malicious root; the fixture's three structural facts "+
 			"must all be derivable or the cluster below proves nothing: %+v", len(facts), facts)
@@ -1172,7 +1173,7 @@ func TestFPGateMaliciousRootYieldsCorrelatedCriticalCluster(t *testing.T) {
 		}
 	}
 
-	res := correlate.Correlate(root, cfg)
+	res := correlate.Correlate(fsx.Live(root), cfg)
 	var crit []finding.Finding
 	for _, f := range res.Findings {
 		if f.Severity == finding.SevCritical {
@@ -1223,7 +1224,7 @@ func TestFPGateNoCriticalClusterOnBenignSystemRoots(t *testing.T) {
 	for _, name := range []string{"stock", "cruft"} {
 		t.Run(name, func(t *testing.T) {
 			root, cfg := fpgCorrelateConfig(t, systemRoot(t, name), name)
-			res := correlate.Correlate(root, cfg)
+			res := correlate.Correlate(fsx.Live(root), cfg)
 			for _, f := range res.Findings {
 				if f.Severity == finding.SevCritical {
 					t.Errorf("critical finding on benign root %q:\n  %s", name, formatFinding(f))

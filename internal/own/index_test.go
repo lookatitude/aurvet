@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/lookatitude/aurvet/internal/alpm"
+	"github.com/lookatitude/aurvet/internal/fsx"
 )
 
 // pkgs is the fixture package set every test indexes. The paths are recorded
@@ -96,7 +97,7 @@ func TestResolveAcceptsBothPathForms(t *testing.T) {
 }
 
 func TestOwnerThroughSymlinkedParentDirectory(t *testing.T) {
-	o := IndexIn(tree(t), pkgs())
+	o := IndexIn(fsx.Live(tree(t)), pkgs())
 	cases := map[string]string{
 		"/bin/hello":   "coreutils", // bin  -> usr/bin, relative
 		"/lib/libx.so": "glibc",     // lib  -> usr/lib
@@ -115,7 +116,7 @@ func TestOwnerThroughSymlinkedParentDirectory(t *testing.T) {
 }
 
 func TestUnownedPathThatExistsIsUnownedNotAGap(t *testing.T) {
-	o := IndexIn(tree(t), pkgs())
+	o := IndexIn(fsx.Live(tree(t)), pkgs())
 	pkg, st, err := o.Resolve("/usr/local/bin/rat")
 	if err != nil || st != Unowned || pkg != "" {
 		t.Fatalf("Resolve(rat) = (%q, %v, %v), want (\"\", Unowned, nil)", pkg, st, err)
@@ -126,7 +127,7 @@ func TestAbsentPathIsUnownedNotAGap(t *testing.T) {
 	// ENOENT is a definite answer -- nobody owns a path that is not there --
 	// and an ExecStart naming a missing binary must reach the caller as a
 	// finding-eligible fact, not as "I could not tell".
-	o := IndexIn(tree(t), pkgs())
+	o := IndexIn(fsx.Live(tree(t)), pkgs())
 	for _, in := range []string{"/usr/bin/nope", "/nodir/nope", "/usr/bin/hello/under-a-file"} {
 		pkg, st, err := o.Resolve(in)
 		if err != nil || st != Unowned || pkg != "" {
@@ -139,7 +140,7 @@ func TestUnresolvablePathIsAGapNotUnowned(t *testing.T) {
 	// The whole point of the three-state result: "I know nobody owns this"
 	// and "I could not tell" are different answers, and INV-9 makes the
 	// second one a coverage gap for the caller to report.
-	o := IndexIn(tree(t), pkgs())
+	o := IndexIn(fsx.Live(tree(t)), pkgs())
 	for _, in := range []string{
 		"/loopa/hello", // symlink loop, exhausts the hop budget
 		"/loopa",
@@ -160,7 +161,7 @@ func TestUnresolvablePathIsAGapNotUnowned(t *testing.T) {
 }
 
 func TestUnsafeInputIsAGap(t *testing.T) {
-	o := IndexIn(tree(t), pkgs())
+	o := IndexIn(fsx.Live(tree(t)), pkgs())
 	for _, in := range []string{"", "/", ".", "..", "/usr/../etc/passwd", "/usr/bin/hel\x00lo"} {
 		pkg, st, err := o.Resolve(in)
 		if err == nil || st != Unresolved || pkg != "" {
@@ -223,7 +224,7 @@ func TestLiveReferenceSystem(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	o := IndexIn(root, pkgs)
+	o := IndexIn(fsx.Live(root), pkgs)
 
 	var owned, unowned, unresolved int
 	for _, p := range pkgs {

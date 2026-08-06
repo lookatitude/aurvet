@@ -10,6 +10,7 @@ import (
 
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/fsx"
 	"github.com/lookatitude/aurvet/internal/own"
 )
 
@@ -42,7 +43,7 @@ func miscRootAt(t *testing.T, dir string) (*os.Root, *own.Owners) {
 			t.Fatalf("fixture local db has unreadable entries: %v", bad)
 		}
 	}
-	return root, own.IndexIn(root, pkgs)
+	return root, own.IndexIn(fsx.Live(root), pkgs)
 }
 
 // miscCopyTree copies a fixture root into a temporary directory so a test may
@@ -120,7 +121,7 @@ func miscDescribe(res finding.Result) string {
 // must produce nothing whatsoever, findings and gaps alike.
 func TestMiscStockRootIsSilent(t *testing.T) {
 	root, owners := miscFixtureRoot(t, "stock")
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	if len(res.Findings) != 0 || len(res.Gaps) != 0 {
 		t.Fatalf("stock root is not silent:\n%s", miscDescribe(res))
 	}
@@ -139,7 +140,7 @@ func TestMiscNoCriticalsOnBenignRoots(t *testing.T) {
 	for _, name := range []string{"stock", "cruft"} {
 		t.Run(name, func(t *testing.T) {
 			root, owners := miscFixtureRoot(t, name)
-			res := Misc(root, owners, MiscConfig{})
+			res := Misc(fsx.Live(root), owners, MiscConfig{})
 			if got := res.MaxSeverity(); got >= finding.SevCritical {
 				t.Fatalf("%s root reached %v:\n%s", name, got, miscDescribe(res))
 			}
@@ -153,7 +154,7 @@ func TestMiscNoCriticalsOnBenignRoots(t *testing.T) {
 // two surfaces and the check must see it -- at suspicious.
 func TestMiscCruftRootReportsBenignTrafficAsSuspicious(t *testing.T) {
 	root, owners := miscFixtureRoot(t, "cruft")
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 
 	profiled := miscFindings(res, RuleProfileD)
 	if len(profiled) != 1 || profiled[0].Subject != "etc/profile.d/local-path.sh" {
@@ -185,7 +186,7 @@ func TestMiscCruftRootReportsBenignTrafficAsSuspicious(t *testing.T) {
 // /etc/ld.so.preload is ordinary; cruft has one.
 func TestMiscEmptyPreloadIsNotAFinding(t *testing.T) {
 	root, owners := miscFixtureRoot(t, "cruft")
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	if got := miscFindings(res, RulePreload); len(got) != 0 {
 		t.Fatalf("empty ld.so.preload produced %v:\n%s", miscSubjects(got), miscDescribe(res))
 	}
@@ -203,7 +204,7 @@ func TestMiscAbsentPreloadIsNeitherFindingNorGap(t *testing.T) {
 	if _, err := os.Stat(filepath.Join("..", "..", "testdata", "roots", "stock", "etc", "ld.so.preload")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("fixture changed: stock root now has an ld.so.preload (%v)", err)
 	}
-	res := miscPreload(root, owners, DefaultMiscConfig())
+	res := miscPreload(fsx.Live(root), owners, DefaultMiscConfig())
 	if len(res.Findings) != 0 || len(res.Gaps) != 0 {
 		t.Fatalf("absent ld.so.preload produced output:\n%s", miscDescribe(res))
 	}
@@ -213,7 +214,7 @@ func TestMiscAbsentPreloadIsNeitherFindingNorGap(t *testing.T) {
 // surface: a non-empty preload list naming an object no package owns.
 func TestMiscMaliciousPreloadNamesTheUnownedObject(t *testing.T) {
 	root, owners := miscFixtureRoot(t, "malicious")
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 
 	got := miscFindings(res, RulePreload)
 	if len(got) != 1 {
@@ -242,7 +243,7 @@ func TestMiscMaliciousPreloadNamesTheUnownedObject(t *testing.T) {
 func TestMiscFindingsStateTheirLimits(t *testing.T) {
 	for _, name := range []string{"cruft", "malicious"} {
 		root, owners := miscFixtureRoot(t, name)
-		res := Misc(root, owners, MiscConfig{})
+		res := Misc(fsx.Live(root), owners, MiscConfig{})
 		if len(res.Findings) == 0 {
 			t.Fatalf("%s: no findings to check limits on", name)
 		}
@@ -266,7 +267,7 @@ func TestMiscFindingsStateTheirLimits(t *testing.T) {
 // hidden, so it is neither a finding nor a gap.
 func TestMiscAbsentHomeIsNotAGap(t *testing.T) {
 	root, owners := miscFixtureRoot(t, "cruft")
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	for _, g := range res.Gaps {
 		if strings.Contains(g.Subject, "home/bob") || strings.Contains(g.Subject, "buildbot") {
 			t.Fatalf("absent home produced a gap: %s: %s", g.Subject, g.Reason)
@@ -316,7 +317,7 @@ func TestMiscUnreadableHomeIsAGapNotSilence(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(home, 0o755) })
 
 	root, owners := miscRootAt(t, dir)
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 
 	var found bool
 	for _, g := range res.Gaps {
@@ -349,7 +350,7 @@ func TestMiscUnreadableHomeIsAGapNotSilence(t *testing.T) {
 // say that rather than report per-user surfaces as clean.
 func TestMiscAbsentPasswdIsAGapCoveringEveryUser(t *testing.T) {
 	root, owners := miscFixtureRoot(t, "malicious")
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 
 	var found bool
 	for _, g := range res.Gaps {
@@ -392,7 +393,7 @@ func TestMiscUnresolvablePathIsAGapNotAFinding(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "usr", "lib"), 0o755) })
 
 	root, owners := miscRootAt(t, dir)
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 
 	if got := miscFindings(res, RulePreload); len(got) != 0 {
 		t.Fatalf("unresolvable preload entry became a finding: %v", miscSubjects(got))
@@ -423,7 +424,7 @@ func TestMiscUnreadablePreloadIsAGap(t *testing.T) {
 	}
 
 	root, owners := miscRootAt(t, dir)
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	if len(res.Findings) != 0 {
 		t.Fatalf("unreadable preload produced findings: %s", miscDescribe(res))
 	}
@@ -443,7 +444,7 @@ func TestMiscPreloadSymlinkIsRefusedNotFollowed(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	root, owners := miscRootAt(t, dir)
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	if len(res.Findings) != 0 {
 		t.Fatalf("symlinked preload produced findings: %s", miscDescribe(res))
 	}
@@ -477,13 +478,13 @@ func TestMiscGeneratorDirsAlertOnlyOnUnownedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { root.Close() })
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{
 		"usr/lib/systemd/system-generators/",
 		"usr/lib/systemd/system-generators/systemd-fstab-generator",
 		"usr/lib/systemd/vendor-generator",
 	}}})
 
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	got := miscSubjects(miscFindings(res, RuleGenerator))
 	if len(got) != 1 || got[0] != "usr/lib/systemd/system-generators/planted-generator" {
 		t.Fatalf("generator rule reported %v, want exactly the planted generator:\n%s",
@@ -511,7 +512,7 @@ func TestMiscUnreadableGeneratorDirIsAGap(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(gen, 0o755) })
 
 	root, owners := miscRootAt(t, dir)
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	if !miscHasGap(res, RuleGenerator, "etc/systemd/system-generators") {
 		t.Fatalf("unreadable generator dir produced no gap; got:\n%s", miscDescribe(res))
 	}
@@ -572,12 +573,12 @@ func TestMiscAutostartOwnedTargetsAreSilent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { root.Close() })
-	owners := own.IndexIn(root, []alpm.Package{{Name: "nm", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "nm", Files: []string{
 		"usr/bin/nm-applet",
 		"usr/share/applications/slack.desktop",
 	}}})
 
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	if len(res.Findings) != 0 || len(res.Gaps) != 0 {
 		t.Fatalf("owned autostart targets produced output:\n%s", miscDescribe(res))
 	}
@@ -591,7 +592,7 @@ func TestMiscAutostartBareCommandNotFoundIsAGap(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "etc", "xdg", "autostart", "x.desktop"),
 		"[Desktop Entry]\nExec=somewhere-on-path\n")
 	root, owners := miscRootAt(t, dir)
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	if len(miscFindings(res, RuleAutostart)) != 0 {
 		t.Fatalf("bare command became a finding:\n%s", miscDescribe(res))
 	}
@@ -615,8 +616,8 @@ func TestMiscIsPureInTheRoot(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(decoy, ".config"))
 
 	root, owners := miscFixtureRoot(t, "cruft")
-	first := miscDescribe(Misc(root, owners, MiscConfig{}))
-	second := miscDescribe(Misc(root, owners, MiscConfig{}))
+	first := miscDescribe(Misc(fsx.Live(root), owners, MiscConfig{}))
+	second := miscDescribe(Misc(fsx.Live(root), owners, MiscConfig{}))
 	if first != second {
 		t.Fatalf("Misc is not deterministic:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
@@ -630,7 +631,7 @@ func TestMiscIsPureInTheRoot(t *testing.T) {
 // surfaces as clean.
 func TestMiscNilOwnersIsAGapNotSilence(t *testing.T) {
 	root, _ := miscFixtureRoot(t, "cruft")
-	res := Misc(root, nil, MiscConfig{})
+	res := Misc(fsx.Live(root), nil, MiscConfig{})
 	if len(res.Findings) != 0 || res.Complete() {
 		t.Fatalf("Misc with no ownership oracle: %s", miscDescribe(res))
 	}
@@ -655,9 +656,9 @@ func TestLiveMiscSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	owners := own.IndexIn(root, pkgs)
+	owners := own.IndexIn(fsx.Live(root), pkgs)
 
-	res := Misc(root, owners, MiscConfig{})
+	res := Misc(fsx.Live(root), owners, MiscConfig{})
 	byRule := map[string]int{}
 	for _, f := range res.Findings {
 		byRule[f.RuleID]++

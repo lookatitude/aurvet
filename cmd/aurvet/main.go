@@ -1246,13 +1246,13 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 	}
 	defer root.Close()
 
-	owners := own.IndexIn(root, d.pkgs)
+	owners := own.IndexIn(fsx.Live(root), d.pkgs)
 
 	// The exemption set, derived from the hooks pacman would actually run plus
 	// %BACKUP%. ScanHooks' own findings and gaps are NOT taken here: correlate
 	// runs the same scan below and reports them once. Its report is reused for
 	// the inventory for the same reason.
-	hookRep, _ := surfaces.ScanHooks(root, owners)
+	hookRep, _ := surfaces.ScanHooks(fsx.Live(root), owners)
 	active := make([]hook.Hook, 0, len(hookRep.Hooks))
 	for _, h := range hookRep.ActiveHooks() {
 		if h.Parsed {
@@ -1310,7 +1310,7 @@ func fullScan(ctx context.Context, p pipeline) (scanRun, error) {
 	// system as entirely unowned. The scope line says so above the findings rather
 	// than the omission being silent.
 	if len(p.only) == 0 {
-		cres := correlate.Correlate(root, correlate.Config{
+		cres := correlate.Correlate(fsx.Live(root), correlate.Config{
 			Owners: owners, Pkgs: d.pkgs, SyncNames: d.syncNames,
 			Transactions: p.txs, DBPath: dbRel(p.cfg),
 		})
@@ -1631,12 +1631,12 @@ func surfaceInventory(root *os.Root, owners *own.Owners, rep surfaces.HookReport
 	for _, h := range rep.Hooks {
 		add("hook", h.Path, h.Pkg, h.State)
 	}
-	units, _ := surfaces.LoadUnits(root, surfaces.DefaultUnitDirs)
+	units, _ := surfaces.LoadUnits(fsx.Live(root), surfaces.DefaultUnitDirs)
 	for _, u := range units {
 		pkg, st, _ := owners.Resolve(u.Path)
 		add("unit", u.Path, pkg, st)
 	}
-	survey, _ := surfaces.SurveyWants(root, owners, surfaces.DefaultUnitDirs)
+	survey, _ := surfaces.SurveyWants(fsx.Live(root), owners, surfaces.DefaultUnitDirs)
 	for _, e := range append(append([]surfaces.WantsEntry{}, survey.Subjects...), survey.OwnedTargets...) {
 		add("enablement", e.Path, e.Pkg, e.State)
 	}

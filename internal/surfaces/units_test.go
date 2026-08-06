@@ -11,6 +11,7 @@ import (
 
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/fsx"
 	"github.com/lookatitude/aurvet/internal/own"
 )
 
@@ -252,7 +253,7 @@ func TestLoadUnitsAppliesDropIns(t *testing.T) {
 		"usr/lib/systemd/system/bar.service.d/20-off.conf":   "[Service]\nExecStart=\n",
 	}, nil)
 
-	units, gaps := LoadUnits(root, []string{"usr/lib/systemd/system"})
+	units, gaps := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system"})
 	if len(gaps) != 0 {
 		t.Fatalf("unexpected gaps: %+v", gaps)
 	}
@@ -286,7 +287,7 @@ func TestLoadUnitsUnreadableDirectoryIsAGap(t *testing.T) {
 		"usr/lib/systemd/system":          "not a directory\n",
 	}, nil)
 
-	units, gaps := LoadUnits(root, []string{"etc/systemd/system", "usr/lib/systemd/system", "run/systemd/system"})
+	units, gaps := LoadUnits(fsx.Live(root), []string{"etc/systemd/system", "usr/lib/systemd/system", "run/systemd/system"})
 	if len(units) != 1 {
 		t.Errorf("units = %v, want the one readable unit", units)
 	}
@@ -305,7 +306,7 @@ func TestLoadUnitsOversizeFileIsAGapNotATruncation(t *testing.T) {
 	big := "[Service]\n" + strings.Repeat("# padding\n", (maxUnitFileBytes/10)+1) + "ExecStart=/usr/bin/hidden\n"
 	root := unitTree(t, map[string]string{"etc/systemd/system/big.service": big}, nil)
 
-	units, gaps := LoadUnits(root, []string{"etc/systemd/system"})
+	units, gaps := LoadUnits(fsx.Live(root), []string{"etc/systemd/system"})
 	if len(units) != 0 {
 		t.Errorf("units = %v, want none: an oversize unit is refused, not truncated", units)
 	}
@@ -329,7 +330,7 @@ func TestLoadUnitsSymlinkedUnitOutsideTheSearchPathIsAGap(t *testing.T) {
 			"etc/systemd/system/out.service": "/opt/vendor/out.service",
 		})
 
-	units, gaps := LoadUnits(root, []string{"usr/lib/systemd/system", "etc/systemd/system"})
+	units, gaps := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system", "etc/systemd/system"})
 	if len(units) != 1 || units[0].Name != "in.service" {
 		t.Errorf("units = %v, want just in.service (parsed once, at its real location)", units)
 	}
@@ -355,7 +356,7 @@ func ownersFor(t *testing.T, name string) (*os.Root, *own.Owners) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { root.Close() })
-	owners := own.IndexIn(root, pkgs)
+	owners := own.IndexIn(fsx.Live(root), pkgs)
 	if owners.Len() == 0 {
 		t.Fatalf("%s: empty ownership index; every 'unowned' assertion would pass vacuously", name)
 	}
@@ -407,7 +408,7 @@ func TestUnitFindingsOnFixtureRoots(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.root, func(t *testing.T) {
 			root, owners := ownersFor(t, c.root)
-			units, gaps := LoadUnits(root, DefaultUnitDirs)
+			units, gaps := LoadUnits(fsx.Live(root), DefaultUnitDirs)
 			if len(gaps) != 0 {
 				t.Errorf("%s: unexpected load gaps %+v", c.root, gaps)
 			}
@@ -415,7 +416,7 @@ func TestUnitFindingsOnFixtureRoots(t *testing.T) {
 				t.Errorf("%s: loaded %d units, want %d (a rule that examined nothing is not a silent rule)",
 					c.root, len(units), c.wantUnits)
 			}
-			findings, fgaps := UnitFindings(root, units, owners)
+			findings, fgaps := UnitFindings(fsx.Live(root), units, owners)
 			if len(fgaps) != 0 {
 				t.Errorf("%s: unexpected ownership gaps %+v; the `-` prefix and an unfound bare command "+
 					"are both determinate answers, not gaps", c.root, fgaps)
@@ -445,8 +446,8 @@ func TestUnitFindingsOnFixtureRoots(t *testing.T) {
 // finding must learn that a clean result was not earned.
 func TestUnitFindingsLimitsNameTheBlindSpot(t *testing.T) {
 	root, owners := ownersFor(t, "malicious")
-	units, _ := LoadUnits(root, DefaultUnitDirs)
-	findings, _ := UnitFindings(root, units, owners)
+	units, _ := LoadUnits(fsx.Live(root), DefaultUnitDirs)
+	findings, _ := UnitFindings(fsx.Live(root), units, owners)
 	if len(findings) == 0 {
 		t.Fatal("no findings on the malicious root; nothing to inspect")
 	}
@@ -477,14 +478,14 @@ func TestUnitFindingsUnresolvedOwnershipIsAGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	owners := own.IndexIn(root, []alpm.Package{{Name: "coreutils", Files: []string{"usr/bin/true"}}})
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "coreutils", Files: []string{"usr/bin/true"}}})
 
 	units := []Unit{{
 		Path: "etc/systemd/system/loop.service",
 		Name: "loop.service",
 		Exec: []Exec{{Directive: "ExecStart", Raw: "/usr/bin/loopa", Bin: "/usr/bin/loopa", Resolvable: true}},
 	}}
-	findings, gaps := UnitFindings(root, units, owners)
+	findings, gaps := UnitFindings(fsx.Live(root), units, owners)
 	if len(findings) != 0 {
 		t.Errorf("findings = %+v, want none: an unresolvable path is a gap, not an accusation", findings)
 	}
@@ -507,7 +508,7 @@ func TestUnitFindingsUnresolvableExecValueIsAGap(t *testing.T) {
 		Exec: []Exec{{Directive: "ExecStart", Raw: "/usr/lib/%p/agent", Bin: "/usr/lib/%p/agent",
 			Unresolvable: "value contains a systemd specifier, which this parser does not expand"}},
 	}}
-	findings, gaps := UnitFindings(root, units, owners)
+	findings, gaps := UnitFindings(fsx.Live(root), units, owners)
 	if len(findings) != 0 {
 		t.Errorf("findings = %+v, want none", findings)
 	}
@@ -530,7 +531,7 @@ func TestLoadUnitsIsPureOverTheRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer root.Close()
-		units, gaps := LoadUnits(root, DefaultUnitDirs)
+		units, gaps := LoadUnits(fsx.Live(root), DefaultUnitDirs)
 		if len(gaps) != 0 {
 			t.Fatalf("gaps: %+v", gaps)
 		}
@@ -568,15 +569,15 @@ func TestUnitFindingsAbsentCommandIsInfoNotSuspicious(t *testing.T) {
 		"usr/lib/systemd/system/present.service": "[Service]\nExecStart=/usr/local/bin/really-here\n",
 		"usr/local/bin/really-here":              "inert marker, not a payload\n",
 	}, nil)
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{
 		"usr/lib/systemd/system/absent.service", "usr/lib/systemd/system/present.service",
 	}}})
 
-	units, gaps := LoadUnits(root, []string{"usr/lib/systemd/system"})
+	units, gaps := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system"})
 	if len(gaps) != 0 {
 		t.Fatalf("gaps = %+v, want none", gaps)
 	}
-	findings, fgaps := UnitFindings(root, units, owners)
+	findings, fgaps := UnitFindings(fsx.Live(root), units, owners)
 	if len(fgaps) != 0 {
 		t.Fatalf("ownership gaps = %+v, want none", fgaps)
 	}
@@ -608,12 +609,12 @@ func TestUnitFindingsResolvesBareCommandAgainstTheSearchPath(t *testing.T) {
 		"usr/bin/helper":                        "inert\n",
 		"usr/local/bin/helper":                  "inert marker, not a payload\n",
 	}, nil)
-	owners := own.IndexIn(root, []alpm.Package{{Name: "glibc", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "glibc", Files: []string{
 		"usr/bin/ldconfig", "usr/bin/helper",
 	}}})
 
-	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
-	findings, gaps := UnitFindings(root, units, owners)
+	units, _ := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system"})
+	findings, gaps := UnitFindings(fsx.Live(root), units, owners)
 	if len(gaps) != 0 {
 		t.Fatalf("gaps = %+v, want none: a bare name IS attributable once a root is in hand", gaps)
 	}
@@ -641,11 +642,11 @@ func TestUnitFindingsUnfoundBareCommandIsAHijackableFinding(t *testing.T) {
 		"usr/lib/systemd/system/nowhere.service": "[Service]\nExecStop=nowhere-at-all --run\n",
 		"usr/bin/keep":                           "inert\n",
 	}, nil)
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{
 		"usr/lib/systemd/system/nowhere.service", "usr/bin/keep",
 	}}})
-	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
-	findings, gaps := UnitFindings(root, units, owners)
+	units, _ := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system"})
+	findings, gaps := UnitFindings(fsx.Live(root), units, owners)
 	if len(gaps) != 0 {
 		t.Errorf("gaps = %+v, want none: an unfound bare command is a determinate answer, not an "+
 			"inability to look", gaps)
@@ -693,11 +694,11 @@ func TestUnitFindingsHijackableWinnerIsTheFirstDirectoryTHATEXISTS(t *testing.T)
 		"usr/local/bin/other":                 "inert\n",
 		"usr/bin/other":                       "inert\n",
 	}, nil)
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{
 		"usr/lib/systemd/system/hole.service",
 	}}})
-	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
-	findings, _ := UnitFindings(root, units, owners)
+	units, _ := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system"})
+	findings, _ := UnitFindings(fsx.Live(root), units, owners)
 	if len(findings) != 1 {
 		t.Fatalf("findings = %+v, want exactly 1", findings)
 	}
@@ -718,7 +719,7 @@ func TestUnitFindingsHijackableIsSuspiciousWhenTheWinnerIsGroupOrWorldWritable(t
 		"usr/lib/systemd/system/hole.service": "[Service]\nExecStart=absent-helper\n",
 		"usr/local/bin/other":                 "inert\n",
 	}, nil)
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{
 		"usr/lib/systemd/system/hole.service",
 	}}})
 	// git cannot store this mode, so it is a runtime chmod (see the fixture
@@ -727,8 +728,8 @@ func TestUnitFindingsHijackableIsSuspiciousWhenTheWinnerIsGroupOrWorldWritable(t
 	if err := os.Chmod(filepath.Join(root.Name(), "usr/local/bin"), 0o777); err != nil {
 		t.Fatal(err)
 	}
-	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
-	findings, _ := UnitFindings(root, units, owners)
+	units, _ := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system"})
+	findings, _ := UnitFindings(fsx.Live(root), units, owners)
 	if len(findings) != 1 {
 		t.Fatalf("findings = %+v, want exactly 1", findings)
 	}
@@ -753,11 +754,11 @@ func TestUnitFindingsOptionalPrefixOnAnAbsentBareCommandIsSilent(t *testing.T) {
 			"ExecStart=/usr/bin/rescue\n",
 		"usr/bin/rescue": "inert\n",
 	}, nil)
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{
 		"usr/lib/systemd/system/rescue.service", "usr/bin/rescue",
 	}}})
-	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
-	findings, gaps := UnitFindings(root, units, owners)
+	units, _ := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system"})
+	findings, gaps := UnitFindings(fsx.Live(root), units, owners)
 	if len(findings) != 0 || len(gaps) != 0 {
 		t.Fatalf("findings = %+v, gaps = %+v; want neither for a documented optional dependency "+
 			"that is absent", findings, gaps)
@@ -775,11 +776,11 @@ func TestUnitFindingsOptionalPrefixIsNotAFreePass(t *testing.T) {
 		"usr/local/bin/evil-inert":            "inert marker, not a payload\n",
 		"usr/local/bin/evil-inert-bare":       "inert marker, not a payload\n",
 	}, nil)
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{
 		"usr/lib/systemd/system/abs.service", "usr/lib/systemd/system/bare.service",
 	}}})
-	units, _ := LoadUnits(root, []string{"usr/lib/systemd/system"})
-	findings, gaps := UnitFindings(root, units, owners)
+	units, _ := LoadUnits(fsx.Live(root), []string{"usr/lib/systemd/system"})
+	findings, gaps := UnitFindings(fsx.Live(root), units, owners)
 	if len(gaps) != 0 {
 		t.Errorf("gaps = %+v, want none", gaps)
 	}

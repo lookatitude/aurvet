@@ -21,9 +21,9 @@
 //
 // INV-2: Exec= lines and preloaded object paths are parsed and resolved as
 // strings. Nothing here runs, dlopens or stats-then-executes anything.
-// INV-4: a pure function of (root, owners, cfg). No process CWD, no $HOME, no
+// INV-4: a pure function of (src, owners, cfg). No process CWD, no $HOME, no
 // os/user (which consults the HOST's NSS and would answer for the wrong machine
-// entirely under --offline-root), no writes.
+// entirely under --offline-src), no writes.
 //
 // Severity ceiling, deliberately low: nothing in this file reaches
 // SevCritical on its own. Each of these facts is individually weak -- an
@@ -37,9 +37,7 @@ package surfaces
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
-	"os"
 	"path"
 	"strings"
 
@@ -209,11 +207,11 @@ const (
 // Findings are emitted in a fixed order: preload, generators, profile.d, system
 // autostart, then per-user surfaces in /etc/passwd order. fs.ReadDir sorts, so
 // two runs over an unchanged tree produce byte-identical output.
-func Misc(root *os.Root, owners *own.Owners, cfg MiscConfig) finding.Result {
+func Misc(src fsx.Source, owners *own.Owners, cfg MiscConfig) finding.Result {
 	cfg = cfg.withDefaults()
 	var res finding.Result
 
-	if root == nil {
+	if src.Zero() {
 		res.Gaps = append(res.Gaps, finding.Gap{
 			RuleID: RuleMiscCoverage, Subject: "/",
 			Reason: "no scan root was opened, so no persistence surface was examined",
@@ -232,9 +230,9 @@ func Misc(root *os.Root, owners *own.Owners, cfg MiscConfig) finding.Result {
 		return res
 	}
 
-	fsys := root.FS()
+	fsys := src.FS()
 
-	miscAppend(&res, miscPreload(root, owners, cfg))
+	miscAppend(&res, miscPreload(src, owners, cfg))
 	for _, dir := range cfg.GeneratorDirs {
 		miscAppend(&res, miscUnownedInDir(fsys, owners, dir, RuleGenerator,
 			"file in a systemd generator directory is owned by no installed package",
@@ -248,13 +246,13 @@ func Misc(root *os.Root, owners *own.Owners, cfg MiscConfig) finding.Result {
 			miscLimitProfileD))
 	}
 	for _, dir := range cfg.SystemAutostartDirs {
-		miscAppend(&res, miscAutostartDir(root, fsys, owners, cfg, dir, ""))
+		miscAppend(&res, miscAutostartDir(src, fsys, owners, cfg, dir, ""))
 	}
 
 	users, gaps := PasswdUsers(fsys, cfg.PasswdPath)
 	res.Gaps = append(res.Gaps, gaps...)
 	for _, u := range users {
-		miscAppend(&res, miscUserSurfaces(root, fsys, owners, cfg, u))
+		miscAppend(&res, miscUserSurfaces(src, fsys, owners, cfg, u))
 	}
 	return res
 }
@@ -276,10 +274,10 @@ func miscAppend(dst *finding.Result, src finding.Result) {
 // Absence is not a finding and not a gap -- the reference system has no such
 // file at all. Being unable to READ one that is there is a gap: every process
 // on the machine is then loading something this scan cannot name.
-func miscPreload(root *os.Root, owners *own.Owners, cfg MiscConfig) finding.Result {
+func miscPreload(src fsx.Source, owners *own.Owners, cfg MiscConfig) finding.Result {
 	var res finding.Result
 
-	data, err := miscReadFile(root, cfg.PreloadPath, cfg.MaxFileBytes)
+	data, err := miscReadFile(src, cfg.PreloadPath, cfg.MaxFileBytes)
 	if err != nil {
 		if miscIsNotExist(err) {
 			return res
@@ -419,7 +417,7 @@ func miscUnownedInDir(fsys fs.FS, owners *own.Owners, dir, ruleID, summary, why,
 //
 // scope labels the subject for a per-user directory (the user name) and is
 // empty for a system one.
-func miscAutostartDir(root *os.Root, fsys fs.FS, owners *own.Owners, cfg MiscConfig, dir, scope string) finding.Result {
+func miscAutostartDir(src fsx.Source, fsys fs.FS, owners *own.Owners, cfg MiscConfig, dir, scope string) finding.Result {
 	var res finding.Result
 
 	ents, err := fs.ReadDir(fsys, dir)
@@ -448,7 +446,7 @@ func miscAutostartDir(root *os.Root, fsys fs.FS, owners *own.Owners, cfg MiscCon
 			continue
 		}
 
-		data, err := miscReadFile(root, entry, cfg.MaxFileBytes)
+		data, err := miscReadFile(src, entry, cfg.MaxFileBytes)
 		if err != nil {
 			res.Gaps = append(res.Gaps, finding.Gap{
 				RuleID: RuleAutostart, Subject: entry,
@@ -613,7 +611,7 @@ func miscResolveProgram(owners *own.Owners, cfg MiscConfig, exec string) (target
 // PasswdUser is one account from the scanned root's passwd file.
 type PasswdUser struct {
 	Name string
-	// Home is the home directory as a path relative to the scanned root, with
+	// Home is the home directory as a path relative to the scanned src, with
 	// no leading slash. Accounts whose home is the root itself, or is not
 	// absolute, are not returned: they are system accounts, and walking "/" as
 	// if it were a home invents surfaces that do not exist.
@@ -721,7 +719,7 @@ func miscHasDotDot(rel string) bool {
 // The two are told apart by the error from the read of the home directory
 // itself, before any surface beneath it is touched: ENOENT is the first case,
 // anything else -- EACCES above all -- is the second.
-func miscUserSurfaces(root *os.Root, fsys fs.FS, owners *own.Owners, cfg MiscConfig, u PasswdUser) finding.Result {
+func miscUserSurfaces(src fsx.Source, fsys fs.FS, owners *own.Owners, cfg MiscConfig, u PasswdUser) finding.Result {
 	var res finding.Result
 
 	if _, err := fs.ReadDir(fsys, u.Home); err != nil {
@@ -738,7 +736,7 @@ func miscUserSurfaces(root *os.Root, fsys fs.FS, owners *own.Owners, cfg MiscCon
 	}
 
 	for _, sub := range cfg.UserAutostartDirs {
-		miscAppend(&res, miscAutostartDir(root, fsys, owners, cfg, path.Join(u.Home, sub), u.Name))
+		miscAppend(&res, miscAutostartDir(src, fsys, owners, cfg, path.Join(u.Home, sub), u.Name))
 	}
 	for _, sub := range cfg.UserGeneratorDirs {
 		miscAppend(&res, miscUnownedInDir(fsys, owners, path.Join(u.Home, sub), RuleGenerator,
@@ -755,16 +753,18 @@ func miscUserSurfaces(root *os.Root, fsys fs.FS, owners *own.Owners, cfg MiscCon
 // returned. A symlink standing where a regular file is expected is refused
 // rather than followed, which surfaces as a gap in the caller -- the honest
 // answer, since the target was never looked at.
-func miscReadFile(root *os.Root, rel string, max int64) ([]byte, error) {
-	f, st, err := fsx.OpenConfined(root, rel)
+func miscReadFile(src fsx.Source, rel string, max int64) ([]byte, error) {
+	data, st, err := src.ReadFile(rel)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	if st.Size > max {
+	// st.Size is the size of the descriptor the bytes came from; for a buffered
+	// source it is the size phase 1 recorded. Both are checked before the cap so
+	// an oversize file is refused rather than silently truncated.
+	if st.Size > max || int64(len(data)) > max {
 		return nil, fmt.Errorf("%s: %d bytes exceeds the %d-byte read cap", rel, st.Size, max)
 	}
-	return io.ReadAll(io.LimitReader(f, max))
+	return data, nil
 }
 
 // miscIsNotExist reports the "not here" case without swallowing a permission

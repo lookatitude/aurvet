@@ -26,7 +26,7 @@
 //
 // INV-2: nothing here is executed. Unit commands, hook Exec values and preload
 // entries arrive as strings from internal/surfaces and are compared as strings.
-// INV-4: Correlate is a pure function of (root, cfg). It reads no environment,
+// INV-4: Correlate is a pure function of (src, cfg). It reads no environment,
 // no process working directory and -- the one that matters most for a
 // correlation engine -- no wall clock. Every timestamp comes from the recorded
 // evidence (%INSTALLDATE%, a file's own mtime, an optional transaction time), so
@@ -42,7 +42,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path"
 	"sort"
 	"strings"
@@ -135,7 +134,7 @@ const (
 //   - usr/local, opt: reserved for software not managed by the package manager,
 //     by the FHS and by pacman's own conventions. pip, `npm -g` and hand-built
 //     tools land here.
-//   - home, root, srv: user and service data. No package owns anything here.
+//   - home, src, srv: user and service data. No package owns anything here.
 //
 // Note what this list does NOT do: it does not stop a fact in admin territory
 // from JOINING a cluster or from being reported by internal/surfaces. It only
@@ -180,7 +179,7 @@ const clusterLimit = "What this cluster proves is bounded, and the bound is larg
 //
 // It is an INPUT rather than something parsed here: pacman.log parsing is a
 // separate task with its own hazards (two UTC offsets in one file, entries
-// naming another root, rotation), and a correlation engine that half-parses a
+// naming another src, rotation), and a correlation engine that half-parses a
 // log would make its own third clock unreliable. When no transactions are
 // supplied the temporal key runs on %INSTALLDATE% alone and every cluster says
 // so.
@@ -342,9 +341,9 @@ type Cluster struct {
 //
 // The underlying findings are returned unchanged, at the severity their own
 // rules chose. This package adds; it never rewrites another rule's verdict.
-func Correlate(root *os.Root, cfg Config) finding.Result {
-	facts, res := Facts(root, cfg)
-	clusters, gaps := Clusters(root, cfg, facts)
+func Correlate(src fsx.Source, cfg Config) finding.Result {
+	facts, res := Facts(src, cfg)
+	clusters, gaps := Clusters(src, cfg, facts)
 	res.Gaps = append(res.Gaps, gaps...)
 	for _, c := range clusters {
 		res.Findings = append(res.Findings, c.Finding())
@@ -363,12 +362,12 @@ func Correlate(root *os.Root, cfg Config) finding.Result {
 // commands are exactly that. Feeding them to a correlation engine would let
 // packaged units naming files their optional dependencies no longer ship build
 // clusters out of nothing.
-func Facts(root *os.Root, cfg Config) ([]Fact, finding.Result) {
+func Facts(src fsx.Source, cfg Config) ([]Fact, finding.Result) {
 	var (
 		res   finding.Result
 		facts []Fact
 	)
-	if root == nil || cfg.Owners == nil {
+	if src.Zero() || cfg.Owners == nil {
 		res.Gaps = append(res.Gaps, finding.Gap{
 			RuleID:  RuleCoverage,
 			Subject: "/",
@@ -383,9 +382,9 @@ func Facts(root *os.Root, cfg Config) ([]Fact, finding.Result) {
 	// UnitFindings' prose, and the two are kept consistent deliberately: the
 	// same three conditions (resolvable value, unowned target, file actually
 	// present) decide both.
-	units, unitGaps := surfaces.LoadUnits(root, cfg.unitDirs())
+	units, unitGaps := surfaces.LoadUnits(src, cfg.unitDirs())
 	res.Gaps = append(res.Gaps, unitGaps...)
-	unitFindings, ownerGaps := surfaces.UnitFindings(root, units, owners)
+	unitFindings, ownerGaps := surfaces.UnitFindings(src, units, owners)
 	res.Findings = append(res.Findings, unitFindings...)
 	res.Gaps = append(res.Gaps, ownerGaps...)
 
@@ -407,7 +406,7 @@ func Facts(root *os.Root, cfg Config) ([]Fact, finding.Result) {
 			if _, st, _ := owners.Resolve(bin); st != own.Unowned {
 				continue
 			}
-			if absent(root, bin) {
+			if absent(src, bin) {
 				// surfaces rates an ExecStart naming an ABSENT file at info --
 				// nothing can be executed from a path that holds no file -- and
 				// this mirrors that, so the two layers cannot disagree about
@@ -441,7 +440,7 @@ func Facts(root *os.Root, cfg Config) ([]Fact, finding.Result) {
 	}
 
 	// Enablement links.
-	wants, wantsGaps := surfaces.SurveyWants(root, owners, cfg.unitDirs())
+	wants, wantsGaps := surfaces.SurveyWants(src, owners, cfg.unitDirs())
 	res.Gaps = append(res.Gaps, wantsGaps...)
 	res.Findings = append(res.Findings, wants.Findings()...)
 	for _, e := range wants.Subjects {
@@ -462,7 +461,7 @@ func Facts(root *os.Root, cfg Config) ([]Fact, finding.Result) {
 
 	// Hooks, from the structured report: an unowned hook pacman would actually
 	// run, and a file suppressing a packaged one.
-	rep, hookRes := surfaces.ScanHooks(root, owners)
+	rep, hookRes := surfaces.ScanHooks(src, owners)
 	res.Findings = append(res.Findings, hookRes.Findings...)
 	res.Gaps = append(res.Gaps, hookRes.Gaps...)
 	hookFact := map[string]int{}
@@ -509,7 +508,7 @@ func Facts(root *os.Root, cfg Config) ([]Fact, finding.Result) {
 	// with no usable Target: surfaces resolves the Exec program but reports
 	// only the entry, so this fact joins by its own path and by the package key
 	// and never by its Exec target. Stated rather than worked around.
-	miscRes := surfaces.Misc(root, owners, cfg.Misc)
+	miscRes := surfaces.Misc(src, owners, cfg.Misc)
 	res.Findings = append(res.Findings, miscRes.Findings...)
 	res.Gaps = append(res.Gaps, miscRes.Gaps...)
 	for _, f := range miscRes.Findings {
@@ -531,7 +530,7 @@ func Facts(root *os.Root, cfg Config) ([]Fact, finding.Result) {
 	// TARGET's mtime when there is a target (that is the planted file), else
 	// the fact's own path.
 	for i := range facts {
-		timeFact(root, &facts[i])
+		timeFact(src, &facts[i])
 	}
 
 	sort.SliceStable(facts, func(i, j int) bool {
@@ -562,7 +561,7 @@ func miscFamily(ruleID string) (string, bool) {
 }
 
 // timeFact fills in the temporal key's input for one fact.
-func timeFact(root *os.Root, f *Fact) {
+func timeFact(src fsx.Source, f *Fact) {
 	if f.TimeKnown {
 		return
 	}
@@ -573,7 +572,7 @@ func timeFact(root *os.Root, f *Fact) {
 	cands = append(cands, f.Path)
 	var firstErr error
 	for _, c := range cands {
-		st, err := statConfined(root, c)
+		st, err := statConfined(src, c)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -587,19 +586,18 @@ func timeFact(root *os.Root, f *Fact) {
 }
 
 // statConfined answers "what does the kernel say about this path" through the
-// confined opener and nothing else: resolved once through the root, O_NOFOLLOW
+// confined opener and nothing else: resolved once through the src, O_NOFOLLOW
 // on the leaf, regular files only. A symlink or a directory is refused, which is
 // why a fact's TARGET is preferred over its own path -- an enablement link is a
 // symlink, and the unit behind it is the file with a meaningful mtime.
 //
 // os.Stat is not used and could not be: under --offline-root it would resolve
 // against the running filesystem.
-func statConfined(root *os.Root, rel string) (unix.Stat_t, error) {
-	f, st, err := fsx.OpenConfined(root, strings.TrimPrefix(rel, "/"))
+func statConfined(src fsx.Source, rel string) (unix.Stat_t, error) {
+	_, st, err := src.ReadFile(rel)
 	if err != nil {
 		return unix.Stat_t{}, err
 	}
-	f.Close()
 	return st, nil
 }
 
@@ -615,8 +613,8 @@ func mtimeSeconds(st unix.Stat_t) float64 {
 // "the stat failed": ENOENT and ENOTDIR are facts about the filesystem, while
 // EACCES, ELOOP and a refused path are inabilities, and treating an inability as
 // absence is how a check goes quiet about the file it could read least.
-func absent(root *os.Root, rel string) bool {
-	_, err := statConfined(root, rel)
+func absent(src fsx.Source, rel string) bool {
+	_, err := statConfined(src, rel)
 	if err == nil {
 		return false
 	}
@@ -683,11 +681,11 @@ func absent(root *os.Root, rel string) bool {
 // (INV-3, INV-9). A cluster assembled from partial inputs must not read as a
 // quiet suspicious. When 2 fails because the timestamps were read and did not
 // match, that is an answer and not a gap.
-func Clusters(root *os.Root, cfg Config, facts []Fact) ([]Cluster, []finding.Gap) {
+func Clusters(src fsx.Source, cfg Config, facts []Fact) ([]Cluster, []finding.Gap) {
 	if len(facts) == 0 || cfg.Owners == nil {
 		return nil, nil
 	}
-	cands := packageCandidates(root, cfg)
+	cands := packageCandidates(src, cfg)
 	syncKnown := len(cfg.SyncNames) > 0
 
 	// Per-fact attribution first: the package key needs it before it can join
@@ -920,7 +918,7 @@ func (c Cluster) Finding() finding.Finding {
 // because it is the recorded mechanism by which a file lands on disk outside any
 // %FILES% list: pacman knows nothing about what a scriptlet created, which is
 // exactly why ownership rather than `pacman -Qo` has to be the oracle.
-func packageCandidates(root *os.Root, cfg Config) []Candidate {
+func packageCandidates(src fsx.Source, cfg Config) []Candidate {
 	out := make([]Candidate, 0, len(cfg.Pkgs))
 	syncKnown := len(cfg.SyncNames) > 0
 	for _, p := range cfg.Pkgs {
@@ -933,9 +931,9 @@ func packageCandidates(root *os.Root, cfg Config) []Candidate {
 		if c.Base == "" {
 			c.Base = p.Name
 		}
-		if root != nil && p.Version != "" {
+		if !src.Zero() && p.Version != "" {
 			rel := path.Join(cfg.dbPath(), p.Name+"-"+p.Version, "install")
-			c.HasScriptlet = !absent(root, rel)
+			c.HasScriptlet = !absent(src, rel)
 		}
 		out = append(out, c)
 	}

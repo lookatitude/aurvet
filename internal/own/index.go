@@ -31,7 +31,6 @@ package own
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/lookatitude/aurvet/internal/alpm"
@@ -88,11 +87,17 @@ type Owners struct {
 	// only caller input is normalized -- one normalization, in one direction.
 	byPath map[string]string
 
-	// root is the tree symlinks are resolved against, or nil. A nil root is
-	// not a degraded mode to be papered over: it means the caller has no tree
-	// (a test, or an index built from a DB alone), and the honest answer is
-	// then whatever the recorded paths say, with no resolution claimed.
-	root *os.Root
+	// src is the tree symlinks are resolved against; the zero Source means
+	// there is none. That is not a degraded mode to be papered over: it means
+	// the caller has no tree (a test, or an index built from a DB alone), and
+	// the honest answer is then whatever the recorded paths say, with no
+	// resolution claimed.
+	//
+	// It is an fsx.Source rather than an *os.Root so the oracle can be built
+	// AFTER the capability is dropped, from bytes buffered while it was held
+	// (spec §11.1). The resolution it performs is identical either way -- see
+	// fsx.Source, whose contract test asserts the two backings answer alike.
+	src fsx.Source
 }
 
 // Index builds the oracle from the installed package set with no filesystem
@@ -102,13 +107,13 @@ type Owners struct {
 // through a symlinked directory -- /bin/foo, /lib/libc.so.6 -- reads as
 // Unowned, which is precisely the false-positive engine this package exists to
 // prevent.
-func Index(pkgs []alpm.Package) *Owners { return IndexIn(nil, pkgs) }
+func Index(pkgs []alpm.Package) *Owners { return IndexIn(fsx.Source{}, pkgs) }
 
 // IndexIn builds the oracle and binds the tree its lookups resolve against.
 // root is the scanned root -- "/" for a live scan, the offline tree for
 // --offline-root. It is read, never written.
-func IndexIn(root *os.Root, pkgs []alpm.Package) *Owners {
-	o := &Owners{byPath: make(map[string]string, 1<<18), root: root}
+func IndexIn(src fsx.Source, pkgs []alpm.Package) *Owners {
+	o := &Owners{byPath: make(map[string]string, 1<<18), src: src}
 	for _, p := range pkgs {
 		for _, f := range p.Files {
 			key, err := canonical(f)
@@ -192,7 +197,7 @@ func (o *Owners) Resolve(path string) (pkg string, st State, err error) {
 // one compatible with --offline-root: a link recorded as /usr/bin/sh inside an
 // offline tree describes that tree's /usr/bin/sh, not this machine's.
 func (o *Owners) resolve(key string) (string, error) {
-	if o.root == nil {
+	if o.src.Zero() {
 		return key, nil
 	}
 
@@ -219,7 +224,7 @@ func (o *Owners) resolve(key string) (string, error) {
 		}
 
 		cand := strings.Join(append(append([]string{}, resolved...), comp), "/")
-		target, err := fsx.ReadLinkConfined(o.root, cand)
+		target, err := o.src.ReadLink(cand)
 		if err != nil {
 			switch {
 			case errors.Is(err, unix.EINVAL):

@@ -9,6 +9,7 @@ import (
 
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/fsx"
 	"github.com/lookatitude/aurvet/internal/own"
 )
 
@@ -33,11 +34,11 @@ func TestSurveyWantsExcludesDirectories(t *testing.T) {
 	}, map[string]string{
 		"etc/systemd/system/multi-user.target.wants/foo.service": "/usr/lib/systemd/system/foo.service",
 	})
-	owners := own.IndexIn(root, []alpm.Package{{Name: "foo", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "foo", Files: []string{
 		"usr/lib/systemd/system/", "usr/lib/systemd/system/foo.service",
 	}}})
 
-	s, gaps := SurveyWants(root, owners, []string{"etc/systemd/system", "usr/lib/systemd/system"})
+	s, gaps := SurveyWants(fsx.Live(root), owners, []string{"etc/systemd/system", "usr/lib/systemd/system"})
 	if len(gaps) != 0 {
 		t.Fatalf("gaps = %+v, want none", gaps)
 	}
@@ -69,11 +70,11 @@ func TestSurveyWantsResolvesSymlinkTargets(t *testing.T) {
 		"etc/systemd/system/multi-user.target.wants/abs.service": "/usr/lib/systemd/system/abs.service",
 		"etc/systemd/system/multi-user.target.wants/rel.service": "../../../../usr/lib/systemd/system/rel.service",
 	})
-	owners := own.IndexIn(root, []alpm.Package{{Name: "foo", Files: []string{
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "foo", Files: []string{
 		"usr/lib/systemd/system/abs.service", "usr/lib/systemd/system/rel.service",
 	}}})
 
-	s, gaps := SurveyWants(root, owners, []string{"etc/systemd/system"})
+	s, gaps := SurveyWants(fsx.Live(root), owners, []string{"etc/systemd/system"})
 	if len(gaps) != 0 {
 		t.Fatalf("gaps = %+v, want none", gaps)
 	}
@@ -104,9 +105,9 @@ func TestSurveyWantsReportsUnownedTarget(t *testing.T) {
 		// rather than skipped for having nothing behind it.
 		"etc/systemd/system/multi-user.target.wants/gone.service": "/usr/lib/systemd/system/gone.service",
 	})
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{"etc/systemd/system/"}}})
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{"etc/systemd/system/"}}})
 
-	s, gaps := SurveyWants(root, owners, []string{"etc/systemd/system"})
+	s, gaps := SurveyWants(fsx.Live(root), owners, []string{"etc/systemd/system"})
 	if len(gaps) != 0 {
 		t.Fatalf("gaps = %+v, want none", gaps)
 	}
@@ -133,9 +134,9 @@ func TestSurveyWantsUnresolvableTargetIsAGap(t *testing.T) {
 		"etc/systemd/system/loopa":                                "loopb",
 		"etc/systemd/system/loopb":                                "loopa",
 	})
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{"etc/systemd/system/"}}})
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{"etc/systemd/system/"}}})
 
-	s, gaps := SurveyWants(root, owners, []string{"etc/systemd/system"})
+	s, gaps := SurveyWants(fsx.Live(root), owners, []string{"etc/systemd/system"})
 	if len(s.Subjects) != 0 {
 		t.Errorf("subjects = %v, want none: an unresolvable target is a gap", wantsPaths(s.Subjects))
 	}
@@ -161,9 +162,9 @@ func TestSurveyWantsUnreadableDirectoryIsAGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{"etc/systemd/system/"}}})
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{"etc/systemd/system/"}}})
 
-	s, gaps := SurveyWants(root, owners, []string{"etc/systemd/system"})
+	s, gaps := SurveyWants(fsx.Live(root), owners, []string{"etc/systemd/system"})
 	if len(s.Subjects) != 0 {
 		t.Errorf("subjects = %v, want none", wantsPaths(s.Subjects))
 	}
@@ -208,7 +209,7 @@ func TestSurveyWantsOnFixtureRoots(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.root, func(t *testing.T) {
 			root, owners := ownersFor(t, c.root)
-			s, gaps := SurveyWants(root, owners, DefaultUnitDirs)
+			s, gaps := SurveyWants(fsx.Live(root), owners, DefaultUnitDirs)
 			if len(gaps) != 0 {
 				t.Errorf("%s: unexpected gaps %+v", c.root, gaps)
 			}
@@ -238,7 +239,7 @@ func TestSurveyWantsOnFixtureRoots(t *testing.T) {
 // here would fail the INV-8 gate on a legitimate root.
 func TestSurveyWantsFindingsStayBelowCritical(t *testing.T) {
 	root, owners := ownersFor(t, "cruft")
-	s, _ := SurveyWants(root, owners, DefaultUnitDirs)
+	s, _ := SurveyWants(fsx.Live(root), owners, DefaultUnitDirs)
 	findings := s.Findings()
 	if len(findings) != 1 {
 		t.Fatalf("findings = %+v, want 1", findings)
@@ -271,9 +272,9 @@ func TestSurveyWantsCoversRequiresToo(t *testing.T) {
 	}, map[string]string{
 		"etc/systemd/system/multi-user.target.requires/local.service": "../local.service",
 	})
-	owners := own.IndexIn(root, []alpm.Package{{Name: "systemd", Files: []string{"etc/systemd/system/"}}})
+	owners := own.IndexIn(fsx.Live(root), []alpm.Package{{Name: "systemd", Files: []string{"etc/systemd/system/"}}})
 
-	s, gaps := SurveyWants(root, owners, []string{"etc/systemd/system"})
+	s, gaps := SurveyWants(fsx.Live(root), owners, []string{"etc/systemd/system"})
 	if len(gaps) != 0 {
 		t.Fatalf("gaps = %+v, want none", gaps)
 	}
@@ -299,7 +300,7 @@ func TestSurveyWantsIsPureOverTheRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer root.Close()
-		s, gaps := SurveyWants(root, own.IndexIn(root, pkgs), DefaultUnitDirs)
+		s, gaps := SurveyWants(fsx.Live(root), own.IndexIn(fsx.Live(root), pkgs), DefaultUnitDirs)
 		if len(gaps) != 0 {
 			t.Fatalf("gaps: %+v", gaps)
 		}
@@ -340,7 +341,7 @@ func TestSurveyWantsLiveSystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owners := own.IndexIn(root, pkgs)
+	owners := own.IndexIn(fsx.Live(root), pkgs)
 
 	for _, scope := range []struct {
 		name string
@@ -349,7 +350,7 @@ func TestSurveyWantsLiveSystem(t *testing.T) {
 		{"etc/systemd/system", []string{"etc/systemd/system"}},
 		{"DefaultUnitDirs", DefaultUnitDirs},
 	} {
-		s, gaps := SurveyWants(root, owners, scope.dirs)
+		s, gaps := SurveyWants(fsx.Live(root), owners, scope.dirs)
 		t.Logf("%s: packages=%d db-gaps=%d examined=%d dirs=%d ownedTargets=%d subjects=%d unresolved=%d gaps=%d",
 			scope.name, len(pkgs), len(dbGaps), s.Examined, len(s.Dirs),
 			len(s.OwnedTargets), len(s.Subjects), len(s.Unresolved), len(gaps))

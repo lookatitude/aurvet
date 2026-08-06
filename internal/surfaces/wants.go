@@ -34,7 +34,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path"
 	"strings"
 
@@ -121,22 +120,22 @@ type WantsSurvey struct {
 // on the process working directory, no write of any kind (INV-4, INV-5). Gaps
 // are returned separately so a caller cannot mistake an unreadable directory for
 // an empty one.
-func SurveyWants(root *os.Root, owners *own.Owners, dirs []string) (WantsSurvey, []finding.Gap) {
+func SurveyWants(src fsx.Source, owners *own.Owners, dirs []string) (WantsSurvey, []finding.Gap) {
 	var (
 		s    WantsSurvey
 		gaps []finding.Gap
 	)
-	if root == nil || owners == nil {
+	if src.Zero() || owners == nil {
 		return s, []finding.Gap{{
 			RuleID:  RuleWantsCoverage,
 			Subject: "systemd enablement directories",
-			Reason: "no scanned root or no ownership index was supplied, so no enablement link could be " +
+			Reason: "no scanned tree or no ownership index was supplied, so no enablement link could be " +
 				"resolved",
 		}}
 	}
 
 	for _, dir := range dirs {
-		ents, err := readDirSorted(root, dir)
+		ents, err := src.ReadDir(dir)
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				gaps = append(gaps, finding.Gap{
@@ -149,10 +148,10 @@ func SurveyWants(root *os.Root, owners *own.Owners, dirs []string) (WantsSurvey,
 			continue
 		}
 		for _, ent := range ents {
-			if !hasWantsSuffix(ent.Name()) {
+			if !hasWantsSuffix(ent.Name) {
 				continue
 			}
-			wdir := path.Join(dir, ent.Name())
+			wdir := path.Join(dir, ent.Name)
 
 			// The enablement directory is classified by exactly the same rule as
 			// its contents, rather than quietly skipped for being a container.
@@ -162,7 +161,7 @@ func SurveyWants(root *os.Root, owners *own.Owners, dirs []string) (WantsSurvey,
 			// DIRECTORIES -- behaviour 2 -- not because of where the loop
 			// happens to meet them. Skipping them structurally would make the
 			// exclusion untestable and the rule's silence accidental.
-			gaps = s.classify(root, owners, wdir, ent, gaps)
+			gaps = s.classify(src, owners, wdir, ent, gaps)
 			if !ent.IsDir() {
 				// A *.wants that is not a directory -- a symlink to one, say --
 				// is a path whose CONTENTS cannot be enumerated here without
@@ -179,7 +178,7 @@ func SurveyWants(root *os.Root, owners *own.Owners, dirs []string) (WantsSurvey,
 				continue
 			}
 
-			wents, err := readDirSorted(root, wdir)
+			wents, err := src.ReadDir(wdir)
 			if err != nil {
 				gaps = append(gaps, finding.Gap{
 					RuleID:  RuleWantsCoverage,
@@ -190,7 +189,7 @@ func SurveyWants(root *os.Root, owners *own.Owners, dirs []string) (WantsSurvey,
 				continue
 			}
 			for _, we := range wents {
-				gaps = s.classify(root, owners, path.Join(wdir, we.Name()), we, gaps)
+				gaps = s.classify(src, owners, path.Join(wdir, we.Name), we, gaps)
 			}
 		}
 	}
@@ -201,7 +200,7 @@ func SurveyWants(root *os.Root, owners *own.Owners, dirs []string) (WantsSurvey,
 // bucket its verdict belongs to. One code path for the enablement directory and
 // for its contents, so there is exactly one place where "is this a subject?" is
 // decided.
-func (s *WantsSurvey) classify(root *os.Root, owners *own.Owners, rel string, ent os.DirEntry, gaps []finding.Gap) []finding.Gap {
+func (s *WantsSurvey) classify(src fsx.Source, owners *own.Owners, rel string, ent fsx.Ent, gaps []finding.Gap) []finding.Gap {
 	s.Examined++
 
 	// Behaviour 2. Note that a SYMLINK to a directory is reported as a symlink
@@ -214,8 +213,8 @@ func (s *WantsSurvey) classify(root *os.Root, owners *own.Owners, rel string, en
 	}
 
 	e := WantsEntry{Path: rel}
-	if ent.Type()&fs.ModeSymlink != 0 {
-		link, lerr := fsx.ReadLinkConfined(root, rel)
+	if ent.IsSymlink() {
+		link, lerr := src.ReadLink(rel)
 		if lerr != nil {
 			// The link exists and its own target could not be read. That is an
 			// inability, not a fact about ownership.

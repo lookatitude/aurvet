@@ -11,6 +11,7 @@ import (
 
 	"github.com/lookatitude/aurvet/internal/alpm"
 	"github.com/lookatitude/aurvet/internal/finding"
+	"github.com/lookatitude/aurvet/internal/fsx"
 	"github.com/lookatitude/aurvet/internal/own"
 	"github.com/lookatitude/aurvet/internal/surfaces"
 )
@@ -49,7 +50,7 @@ func fixtureConfig(t *testing.T, dir, name string) (*os.Root, Config) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { root.Close() })
-	owners := own.IndexIn(root, pkgs)
+	owners := own.IndexIn(fsx.Live(root), pkgs)
 	if owners.Len() == 0 {
 		t.Fatalf("%s: empty ownership index; every 'unowned' assertion would pass vacuously", name)
 	}
@@ -198,7 +199,7 @@ func TestFactsOnFixtureRootsAreNeverCritical(t *testing.T) {
 	for _, name := range []string{"stock", "cruft", "malicious"} {
 		t.Run(name, func(t *testing.T) {
 			root, cfg := fixture(t, name)
-			_, res := Facts(root, cfg)
+			_, res := Facts(fsx.Live(root), cfg)
 			for _, f := range res.Findings {
 				if f.Severity == finding.SevCritical {
 					t.Errorf("%s: surface check %s rated %s critical on its own; only a cluster may",
@@ -238,7 +239,7 @@ func TestFactCountsOnFixtureRoots(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			root, cfg := fixture(t, c.name)
-			facts, _ := Facts(root, cfg)
+			facts, _ := Facts(fsx.Live(root), cfg)
 			got := factPaths(facts)
 			if strings.Join(got, "\n") != strings.Join(c.facts, "\n") {
 				t.Errorf("%s facts:\n got %v\nwant %v", c.name, got, c.facts)
@@ -250,7 +251,7 @@ func TestFactCountsOnFixtureRoots(t *testing.T) {
 // TestStockRootHasNoCluster: nothing to correlate, and nothing invented.
 func TestStockRootHasNoCluster(t *testing.T) {
 	root, cfg := fixture(t, "stock")
-	res := Correlate(root, cfg)
+	res := Correlate(fsx.Live(root), cfg)
 	for _, f := range res.Findings {
 		if f.RuleID == RuleCluster {
 			t.Errorf("stock: cluster finding %+v", f)
@@ -270,8 +271,8 @@ func TestStockRootHasNoCluster(t *testing.T) {
 // supposed to live.
 func TestCruftClusterStaysSuspicious(t *testing.T) {
 	root, cfg := fixture(t, "cruft")
-	facts, _ := Facts(root, cfg)
-	clusters, gaps := Clusters(root, cfg, facts)
+	facts, _ := Facts(fsx.Live(root), cfg)
+	clusters, gaps := Clusters(fsx.Live(root), cfg, facts)
 	if len(clusters) != 1 {
 		t.Fatalf("cruft: %d clusters, want 1 (the hand-written unit and its enablement link): %+v",
 			len(clusters), clusters)
@@ -312,8 +313,8 @@ func TestCruftSurvivesAnAdversarialTimestamp(t *testing.T) {
 	setMtime(t, dir, "usr/local/bin/hand-built-tool", 1770000700+31)
 	root, cfg := fixtureConfig(t, dir, "cruft")
 
-	facts, _ := Facts(root, cfg)
-	clusters, _ := Clusters(root, cfg, facts)
+	facts, _ := Facts(fsx.Live(root), cfg)
+	clusters, _ := Clusters(fsx.Live(root), cfg, facts)
 	if len(clusters) != 1 {
 		t.Fatalf("cruft: %d clusters, want 1: %+v", len(clusters), clusters)
 	}
@@ -336,7 +337,7 @@ func TestCruftSurvivesAnAdversarialTimestamp(t *testing.T) {
 //  4. the Limits text states what the cluster cannot see (INV-6).
 func TestMaliciousClusterIsCriticalWithTheTemporalKey(t *testing.T) {
 	root, cfg := maliciousWithMtimes(t)
-	facts, surfaceRes := Facts(root, cfg)
+	facts, surfaceRes := Facts(fsx.Live(root), cfg)
 
 	// Half 2, first direction: no individual fact is critical.
 	for _, f := range surfaceRes.Findings {
@@ -351,7 +352,7 @@ func TestMaliciousClusterIsCriticalWithTheTemporalKey(t *testing.T) {
 		}
 	}
 
-	clusters, gaps := Clusters(root, cfg, facts)
+	clusters, gaps := Clusters(fsx.Live(root), cfg, facts)
 	var crit []Cluster
 	for _, c := range clusters {
 		if c.Severity == finding.SevCritical {
@@ -417,7 +418,7 @@ func TestMaliciousClusterIsCriticalWithTheTemporalKey(t *testing.T) {
 	}
 
 	// Half 2, second direction: the cluster, and only the cluster, is critical.
-	res := Correlate(root, cfg)
+	res := Correlate(fsx.Live(root), cfg)
 	cs := criticals(res)
 	if len(cs) != 1 || cs[0].RuleID != RuleCluster {
 		t.Fatalf("criticals in the full result = %+v, want exactly one %s", cs, RuleCluster)
@@ -451,8 +452,8 @@ func TestMaliciousClusterIsCriticalWithTheTemporalKey(t *testing.T) {
 // and not the cluster.
 func TestMaliciousTreeWithoutMtimesStaysSuspicious(t *testing.T) {
 	root, cfg := fixture(t, "malicious")
-	facts, _ := Facts(root, cfg)
-	clusters, _ := Clusters(root, cfg, facts)
+	facts, _ := Facts(fsx.Live(root), cfg)
+	clusters, _ := Clusters(fsx.Live(root), cfg, facts)
 	if len(clusters) == 0 {
 		t.Fatal("no cluster at all; the joins must not depend on timestamps")
 	}
@@ -504,15 +505,15 @@ func TestBreakingEachKeyStopsTheCritical(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root, cfg := maliciousWithMtimes(t)
 			// Sanity: unbroken, this configuration is critical.
-			facts, _ := Facts(root, cfg)
-			base, _ := Clusters(root, cfg, facts)
+			facts, _ := Facts(fsx.Live(root), cfg)
+			base, _ := Clusters(fsx.Live(root), cfg, facts)
 			if !anyCritical(base) {
 				t.Fatalf("the unbroken configuration is not critical, so breaking a key proves nothing: %+v", base)
 			}
 
 			tc.break_(&cfg)
-			facts, _ = Facts(root, cfg)
-			clusters, gaps := Clusters(root, cfg, facts)
+			facts, _ = Facts(fsx.Live(root), cfg)
+			clusters, gaps := Clusters(fsx.Live(root), cfg, facts)
 			if anyCritical(clusters) {
 				t.Errorf("still critical with %q broken: %+v", tc.name, clusters)
 			}
@@ -549,7 +550,7 @@ func ownersWithout(cfg *Config, drop string) *own.Owners {
 		pkgs = append(pkgs, q)
 	}
 	cfg.Pkgs = pkgs
-	return own.IndexIn(nil, pkgs)
+	return own.IndexIn(fsx.Source{}, pkgs)
 }
 
 // TestSingleFactIsNeverACluster: one unowned file is one unowned file. Restating
@@ -557,7 +558,7 @@ func ownersWithout(cfg *Config, drop string) *own.Owners {
 // rating this package is allowed to hand out.
 func TestSingleFactIsNeverACluster(t *testing.T) {
 	root, cfg := maliciousWithMtimes(t)
-	facts, _ := Facts(root, cfg)
+	facts, _ := Facts(fsx.Live(root), cfg)
 	var one []Fact
 	for _, f := range facts {
 		if f.Family == FamilyUnitExec {
@@ -567,7 +568,7 @@ func TestSingleFactIsNeverACluster(t *testing.T) {
 	if len(one) != 1 {
 		t.Fatalf("expected exactly one unit fact, got %d", len(one))
 	}
-	clusters, _ := Clusters(root, cfg, one)
+	clusters, _ := Clusters(fsx.Live(root), cfg, one)
 	if len(clusters) != 0 {
 		t.Errorf("a single fact produced %d clusters: %+v", len(clusters), clusters)
 	}
@@ -601,8 +602,8 @@ func TestUnreadableMemberTimeIsAGapNotADrop(t *testing.T) {
 	}
 	root, cfg := fixtureConfig(t, dir, "malicious")
 
-	facts, _ := Facts(root, cfg)
-	clusters, gaps := Clusters(root, cfg, facts)
+	facts, _ := Facts(fsx.Live(root), cfg)
+	clusters, gaps := Clusters(fsx.Live(root), cfg, facts)
 	if anyCritical(clusters) {
 		t.Errorf("critical from facts whose timestamps could not be read: %+v", clusters)
 	}
@@ -663,16 +664,16 @@ func TestPathNameAttributionNeedsNoTimestamps(t *testing.T) {
 		{Name: "mailertool-bin", Version: "2-1", Files: []string{"usr/lib/", "usr/lib/mailer/"}},
 	}
 	cfg := Config{
-		Owners:    own.IndexIn(root, pkgs),
+		Owners:    own.IndexIn(fsx.Live(root), pkgs),
 		Pkgs:      pkgs,
 		SyncNames: map[string]bool{"systemd": true},
 		UnitDirs:  []string{"etc/systemd/system"},
 	}
-	facts, _ := Facts(root, cfg)
+	facts, _ := Facts(fsx.Live(root), cfg)
 	if len(facts) != 2 {
 		t.Fatalf("facts = %v, want the unit and the preload entry", factPaths(facts))
 	}
-	clusters, _ := Clusters(root, cfg, facts)
+	clusters, _ := Clusters(fsx.Live(root), cfg, facts)
 	if len(clusters) != 1 {
 		t.Fatalf("clusters = %+v, want 1 joined by the shared package-owned directory", clusters)
 	}
@@ -770,7 +771,7 @@ func TestCorrelateIsPureOverTheRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer root.Close()
-		res := Correlate(root, Config{
+		res := Correlate(fsx.Live(root), Config{
 			Owners: owners(root, pkgs), Pkgs: pkgs, SyncNames: fixtureSyncNames["malicious"],
 		})
 		var b strings.Builder
@@ -794,7 +795,7 @@ func TestCorrelateIsPureOverTheRoot(t *testing.T) {
 	}
 }
 
-func owners(root *os.Root, pkgs []alpm.Package) *own.Owners { return own.IndexIn(root, pkgs) }
+func owners(root *os.Root, pkgs []alpm.Package) *own.Owners { return own.IndexIn(fsx.Live(root), pkgs) }
 
 // TestNilRootIsAGapNotSilence: no root, no evidence, and saying so is the only
 // honest answer (INV-3 -- incomplete coverage outranks a clean verdict).
@@ -807,7 +808,7 @@ func TestNilRootIsAGapNotSilence(t *testing.T) {
 		{"nil owners", Config{}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			res := Correlate(nil, c.cfg)
+			res := Correlate(fsx.Source{}, c.cfg)
 			if len(res.Findings) != 0 {
 				t.Errorf("findings from nothing: %+v", res.Findings)
 			}
@@ -867,9 +868,9 @@ func TestCorrelateLiveSystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Owners: own.IndexIn(root, pkgs), Pkgs: pkgs, SyncNames: sync}
-	facts, surfaceRes := Facts(root, cfg)
-	clusters, gaps := Clusters(root, cfg, facts)
+	cfg := Config{Owners: own.IndexIn(fsx.Live(root), pkgs), Pkgs: pkgs, SyncNames: sync}
+	facts, surfaceRes := Facts(fsx.Live(root), cfg)
+	clusters, gaps := Clusters(fsx.Live(root), cfg, facts)
 	t.Logf("packages=%d db-gaps=%d sync-names=%d unreadable-sync=%v", len(pkgs), len(dbGaps), len(sync), unreadable)
 	t.Logf("facts=%d surface-findings=%d surface-gaps=%d clusters=%d cluster-gaps=%d",
 		len(facts), len(surfaceRes.Findings), len(surfaceRes.Gaps), len(clusters), len(gaps))
@@ -897,7 +898,7 @@ func TestCorrelateLiveSystem(t *testing.T) {
 // disagree about what is suspicious. Checked on the noisiest root.
 func TestFactsMirrorTheSurfaceFindings(t *testing.T) {
 	root, cfg := fixture(t, "cruft")
-	facts, res := Facts(root, cfg)
+	facts, res := Facts(fsx.Live(root), cfg)
 	suspicious := 0
 	for _, f := range res.Findings {
 		if f.Severity >= finding.SevSuspicious {
