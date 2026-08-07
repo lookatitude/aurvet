@@ -185,4 +185,24 @@ instead. Do not carry `--skipchecksums` into a real release build.
 - **release-please proposes the wrong version.** It reads Conventional Commit
   subjects; a mislabelled `feat:` that should have been `fix:` is the usual cause.
   The manifest (`.release-please-manifest.json`) records the last released
-  version and is seeded at `0.0.0` so the first release lands on `0.0.1`.
+  version and is seeded at `0.0.0`.
+
+  > **`release-as` is pinned to `0.0.1` and MUST be removed after v0.0.1 ships.**
+  > Measured 2026-08-07: with the manifest at `0.0.0` and no prior tag,
+  > release-please proposed **`1.0.0`** despite `bump-minor-pre-major` and
+  > `bump-patch-for-minor-pre-major` both being set — with no previous release to
+  > compute from, those options had nothing to apply to and it fell back to its
+  > default initial version. `"release-as": "0.0.1"` in
+  > `release-please-config.json` forces it. Left in place it pins **every** future
+  > release to 0.0.1, so deleting that line is part of the first release, not a
+  > follow-up. Once a real tag exists the heuristics work normally and the pin is
+  > not needed again.
+
+- **release-please fails with "GitHub Actions is not permitted to create or
+  approve pull requests".** It has already created the branch and the changelog
+  commit by that point; only the PR call failed. Either enable *Settings → Actions
+  → General → Allow GitHub Actions to create and approve pull requests*, or open
+  the PR by hand from the `release-please--branches--next` branch — the content is
+  already correct. Opening it by hand keeps the Actions token from gaining
+  PR-creation rights on a repository whose whole subject is supply-chain trust,
+  which is the reason to prefer it.
