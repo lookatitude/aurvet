@@ -19,11 +19,11 @@ pkgbase = aurvet-bin
 	options = !lto
 	source = aurvet-0.0.1.tar.gz::https://github.com/lookatitude/aurvet/releases/download/v0.0.1/aurvet-0.0.1.tar.gz
 	source = SHA256SUMS-0.0.1::https://github.com/lookatitude/aurvet/releases/download/v0.0.1/SHA256SUMS
-	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
-	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums = 1f8c3651293b9f67e008bf5aaa69506dcdef66b6763375094a52ac6eba0cee0a
+	sha256sums = 833052c119f0a399bb91861779a77e995ac4162f0ad61ba056463ba2fa89be37
 	source_x86_64 = aurvet-0.0.1-x86_64::https://github.com/lookatitude/aurvet/releases/download/v0.0.1/aurvet-0.0.1-x86_64
-	sha256sums_x86_64 = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums_x86_64 = b15c672af340e9c538558d9800f1781d62e5a943f1a15a49548e8e87199ef674
 	source_aarch64 = aurvet-0.0.1-aarch64::https://github.com/lookatitude/aurvet/releases/download/v0.0.1/aurvet-0.0.1-aarch64
-	sha256sums_aarch64 = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums_aarch64 = bf373c6403b40705bc90a7617a7306aa30468e7a6138f7a12b20a54d4727fbb1
 
 pkgname = aurvet-bin
