@@ -106,7 +106,7 @@ options=('!strip' '!debug' '!lto')
 # shipping a binary that misreports its own provenance -- `aurvet version` ends
 # up quoted in incident reports, and a confidently wrong identity there is worse
 # than an absent one (internal/buildinfo).
-_commit='0000000000000000000000000000000000000000'
+_commit='b78db9a8ca550e032a3790d6e249643a844fb190'
 
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
 # A real sha256, never SKIP: SKIP on a fixed URL means the build accepts whatever
@@ -119,7 +119,7 @@ source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgv
 # loudly on it. CI asserts that once tag v$pkgver exists in the repository, this
 # line equals the sha256 of that tag's `git archive` tarball -- so the sentinel
 # cannot survive a release.
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('1f8c3651293b9f67e008bf5aaa69506dcdef66b6763375094a52ac6eba0cee0a')
 
 build() {
   cd "$pkgname-$pkgver"
