@@ -66,11 +66,43 @@ The tag is what triggers publication. `release.yml` then:
 3. assembles `SHA256SUMS`;
 4. creates the GitHub release with the `git archive` tarball and both binaries.
 
-### 6. Verify what was published
+### 6. Replace the PKGBUILD sentinels — `main` is failing until you do
+
+The moment the tag exists, CI's sentinel assertion **inverts**: it stops
+demanding that the placeholders are present and starts demanding they are gone.
+So `main` goes red as a direct result of step 5, and stays red until this lands.
+That is intended, not a fault — but it means the release is not finished at
+step 5. See *The PKGBUILD, and the two placeholders a release must replace*
+below for the commands.
+
+### 7. Back-merge `next` → `dev`
+
+```sh
+git checkout dev && git merge --no-ff next && git push
+```
+
+**Do not skip this, and do not discover it at the next release.** release-please
+writes the changelog and the manifest bump on `next`, so from the moment its PR
+merges, `next` holds a commit `dev` does not. Step 2's `git merge --ff-only dev`
+will then **refuse**, because `dev` is no longer a descendant of `next`.
+
+Merge, do not rebase. `dev` is the branch every contributor targets and its
+commits are already pushed; rewriting published history to keep the graph linear
+is the worse trade. One merge commit per release is the cost.
+
+### 8. Verify what was published
 
 ```sh
 sha256sum -c SHA256SUMS
 ./aurvet-<version>-x86_64 version    # must report the version and commit
+```
+
+Verify the tarball independently too — it is a `git archive`, so anyone can
+regenerate it from the tag and must get the same bytes:
+
+```sh
+git archive --format=tar --prefix=aurvet-<version>/ v<version>^{commit} \
+  | gzip -n | sha256sum        # must equal the SHA256SUMS entry
 ```
 
 ## Reproducibility, and how to read a mismatch
