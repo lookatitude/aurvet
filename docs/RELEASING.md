@@ -91,10 +91,10 @@ That is intended, not a fault — but it means the release is not finished at
 step 5. See *The PKGBUILD, and the two placeholders a release must replace*
 below for the commands.
 
-### 7. Back-merge `next` → `dev`
+### 7. Rebase `dev` onto `next` — **rebase, never merge**
 
 ```sh
-git checkout dev && git merge --no-ff next && git push
+git checkout dev && git rebase next && git push --force-with-lease
 ```
 
 **Do not skip this, and do not discover it at the next release.** release-please
@@ -102,9 +102,22 @@ writes the changelog and the manifest bump on `next`, so from the moment its PR
 merges, `next` holds a commit `dev` does not. Step 2's `git merge --ff-only dev`
 will then **refuse**, because `dev` is no longer a descendant of `next`.
 
-Merge, do not rebase. `dev` is the branch every contributor targets and its
-commits are already pushed; rewriting published history to keep the graph linear
-is the worse trade. One merge commit per release is the cost.
+**A back-merge is not an option here, however natural it looks.** `next` and
+`main` both set `required_linear_history`, and `main` additionally sets
+`enforce_admins`, so a merge commit cannot reach `main` by any route — not by
+admin override, and not by force-push, which `main` also forbids. Learned the
+expensive way on 2026-08-07: a back-merge was pushed to `next` (where
+`enforce_admins` is off, so it was *bypassed* rather than blocked, with only a
+`remote:` warning to show for it) and would have dead-ended at `main`. It had to
+be unwound by cherry-picking `dev` onto the release commit.
+
+So `dev` is the branch that gets rewritten, once per release, and that is the
+deliberate trade: `dev`'s history is disposable, `main`'s is not.
+
+Use `--force-with-lease`, never a bare `--force`: it refuses if someone else
+pushed to `dev` in the meantime, which a plain force would silently discard.
+Check nothing is mid-review on `dev` first — this rewrites commits others may
+have pulled.
 
 ### 8. Verify what was published
 
