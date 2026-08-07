@@ -59,6 +59,22 @@ git tag -a v0.0.1 -m "aurvet v0.0.1"
 git push origin v0.0.1
 ```
 
+> **Every release to `main` gets a NEW version tag. A tag is never reused for
+> different content.** This is not a style preference. A tag is the only name a
+> user, a PKGBUILD, or a reproducibility check has for a specific set of bytes:
+> `_commit` and `sha256sums` in the PKGBUILD are pinned to it, `make
+> verify-reproducible` checks out by it, and `aurvet version` reports the commit
+> it resolved to. Repointing a tag silently invalidates all three at once, and
+> anyone who already fetched it keeps different bytes under the same name — with
+> no error, anywhere, ever. That is precisely the supply-chain substitution this
+> project exists to detect.
+>
+> **Enforced, not merely requested.** A repository ruleset (*release tags are
+> immutable*) blocks `deletion`, `update` and `non_fast_forward` on
+> `refs/tags/v*`, with **no bypass actors** — it applies to admins too, the same
+> stance as `main`'s `enforce_admins`. A botched release is corrected by
+> releasing the next patch version, never by moving a tag.
+
 The tag is what triggers publication. `release.yml` then:
 
 1. builds the artifacts on **two independent runners**;
@@ -219,16 +235,16 @@ instead. Do not carry `--skipchecksums` into a real release build.
   The manifest (`.release-please-manifest.json`) records the last released
   version and is seeded at `0.0.0`.
 
-  > **`release-as` is pinned to `0.0.1` and MUST be removed after v0.0.1 ships.**
-  > Measured 2026-08-07: with the manifest at `0.0.0` and no prior tag,
-  > release-please proposed **`1.0.0`** despite `bump-minor-pre-major` and
-  > `bump-patch-for-minor-pre-major` both being set — with no previous release to
-  > compute from, those options had nothing to apply to and it fell back to its
-  > default initial version. `"release-as": "0.0.1"` in
-  > `release-please-config.json` forces it. Left in place it pins **every** future
-  > release to 0.0.1, so deleting that line is part of the first release, not a
-  > follow-up. Once a real tag exists the heuristics work normally and the pin is
-  > not needed again.
+  > **Do not reintroduce `release-as` except as a same-day, single-release
+  > override that you delete in the same release.** Measured 2026-08-07: cutting
+  > v0.0.1 with the manifest at `0.0.0` and no prior tag, release-please proposed
+  > **`1.0.0`** despite `bump-minor-pre-major` and `bump-patch-for-minor-pre-major`
+  > both being set — with no previous release to compute from, those options had
+  > nothing to apply to and it fell back to its default initial version.
+  > `"release-as": "0.0.1"` forced the right answer and was **removed once v0.0.1
+  > shipped**, because a pin left in place proposes that same version forever,
+  > which collides head-on with the never-reuse-a-tag rule above. Now that a real
+  > tag exists the heuristics compute from it and no pin is needed.
 
 - **release-please fails with "GitHub Actions is not permitted to create or
   approve pull requests".** It has already created the branch and the changelog
