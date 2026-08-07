@@ -8,11 +8,33 @@
 # when it was added, so a bump is reviewable rather than opaque.
 name: ci
 
+# `push:` fires on `dev` only, deliberately narrower than the branches this
+# repo actually ships from. The flow is `dev -> next -> main`, and every
+# promotion is a FAST-FORWARD of an already-checked commit -- MEASURED: run
+# #41 (next) and #42 (main) were both commit b78db9a, doing the identical
+# build+test+package work twice for no new information. GitHub attaches a
+# status check to the COMMIT, not the branch, so a check produced on `next`
+# already satisfies `main`'s required context when that same commit lands
+# there by fast-forward -- confirmed: `main`'s protection accepted b78db9a
+# from the check the `next` run produced, before the `main` run had even
+# finished. Re-running here would be pure duplicate work, including the slow
+# `package` job (clean Arch container build + namcap).
+#
+# CONSEQUENCE a maintainer would otherwise hit cold: a commit pushed DIRECTLY
+# to `next` or `main` -- not fast-forwarded from `dev` -- gets no `push` run
+# at all, and since the required check is then simply absent rather than
+# failing, branch protection REFUSES the push outright. That is a safe
+# failure (it blocks, it does not admit unchecked code) but it is surprising
+# the first time, so it's recorded here rather than discovered live.
+#
+# `pull_request:` stays on all three branches: that is what gates PRs into
+# `next` and `main` (including release-please's release PR), and a PR is
+# never a fast-forward of a commit already checked elsewhere.
 on:
   pull_request:
     branches: [dev, next, main]
   push:
-    branches: [dev, next, main]
+    branches: [dev]
 
 # Least privilege. Nothing in CI needs to write to the repository.
 permissions:
