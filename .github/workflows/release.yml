@@ -10,13 +10,22 @@
 # me' into 'check me'."
 #
 # ┌──────────────────────────────────────────────────────────────────────────┐
-# │ CONTROLS REQUIRED BY SPEC §16 THAT ARE **ABSENT** AT v0.0.1              │
+# │ CONTROLS REQUIRED BY SPEC §16 AND THEIR STATE AT v0.0.1                 │
 # │                                                                          │
-# │ 1. OWN-PKGBUILD-PASSES-OWN-INDICATORS RELEASE GATE — **NOT IMPLEMENTED** │
+# │ 1. OWN-PKGBUILD-PASSES-OWN-INDICATORS GATE — **IMPLEMENTED, ELSEWHERE** │
 # │    §16 requires that "aurvet's own PKGBUILD must pass aurvet's own       │
-# │    indicators as an automated release gate". It cannot exist yet: it     │
-# │    depends on internal/pkgbuild, which arrives in P2. There is also no   │
-# │    PKGBUILD in this repository yet.                                      │
+# │    indicators as an automated release gate". internal/pkgbuild landed in │
+# │    P2 and ci.yml's `package` job now runs `aurvet review` against this   │
+# │    repository's own PKGBUILD, failing on any finding at or above the     │
+# │    default floor. Every commit that reaches main has passed it.          │
+# │                                                                          │
+# │    What is NOT true is the word "release": this workflow does not re-run │
+# │    the self-gate on the tag. It inherits the verdict from the tagged     │
+# │    commit's CI run. That is weaker than §16 asks for, because main's     │
+# │    branch protection requires only the `build` job, so the self-gate is  │
+# │    enforced by convention rather than by the ruleset. Closing this means │
+# │    either adding `package` to main's required checks or running the      │
+# │    self-gate here as a `needs:` of publish.                              │
 # │                                                                          │
 # │ 2. OPENPGP RELEASE SIGNING — **NOT IMPLEMENTED**                         │
 # │    §16 requires a second OpenPGP identity for release artifacts, because │
@@ -198,11 +207,20 @@ jobs:
 
             ### Not yet in place at this version
 
-            - **Artifacts are not OpenPGP-signed.** The release key does not exist yet.
-            - **No AUR package.** Install from source.
-            - The spec-required "aurvet's own PKGBUILD passes aurvet's own
-              indicators" release gate is **not implemented** (it needs
-              `internal/pkgbuild`, arriving in P2).
+            - **Artifacts are not OpenPGP-signed.** The release key does not
+              exist yet, so there is no signature to check — `SHA256SUMS` tells
+              you the files agree with each other, not who built them.
+            - **No AUR package at the moment this release was published.** Install
+              from source.
+            - **`gosec` runs with eight rule IDs excluded**, each justified in
+              `ci.yml`. Gated, but not a clean bill of health.
+            - **No devtools chroot build.** The package is built in a clean
+              container, which is weaker: it does not pin the `[core]`/`[extra]`
+              snapshot `pkgctl build` would.
+
+            aurvet's own PKGBUILD **does** pass aurvet's own indicators — that
+            gate runs in CI on every commit, and this release was built from a
+            commit that passed it.
 
             See `docs/RELEASING.md` and `SECURITY.md`.
           fail_on_unmatched_files: true
