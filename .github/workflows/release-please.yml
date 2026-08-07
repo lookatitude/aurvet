@@ -21,6 +21,15 @@ name: release-please
 on:
   push:
     branches: [next]
+  # Manual recovery. Observed 2026-08-07: a push to `next` produced a
+  # `startup_failure` -- the run never began -- from a workflow file byte-identical
+  # to one that had started successfully an hour earlier, and GitHub refuses to
+  # retry a run that failed at startup. Without this, the only way to re-propose a
+  # release is another commit on `next`, which means inventing a commit for
+  # infrastructure reasons. release-please is idempotent: it recomputes the version
+  # from the commit history and force-updates its own branch, so running it again
+  # is always safe.
+  workflow_dispatch:
 
 permissions:
   contents: read
